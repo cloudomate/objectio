@@ -1,0 +1,49 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Docker (don't copy Docker files into build context)
+docker-compose*.yml
+.dockerignore
+
+# Kubernetes manifests
+k8s/
+helm/
+
+# Test files and data
+tests/fixtures/
+*.test
+testdata/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+
+# Development
+.env
+.env.*
+*.local
+Makefile.local
+
+# Logs and temp files
+*.log
+tmp/
+temp/

@@ -1,0 +1,121 @@
+[workspace]
+resolver = "2"
+
+members = [
+    # Library crates
+    "crates/objectio-common",
+    "crates/objectio-proto",
+    "crates/objectio-erasure",
+    "crates/objectio-placement",
+    "crates/objectio-storage",
+    "crates/objectio-meta-store",
+    "crates/objectio-s3",
+    "crates/objectio-client",
+    "crates/objectio-auth",
+    "crates/objectio-block",
+
+    # Binary crates
+    "bin/objectio-gateway",
+    "bin/objectio-meta",
+    "bin/objectio-osd",
+    "bin/objectio-cli",
+    "bin/objectio-install",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+repository = "https://github.com/objectio/objectio"
+authors = ["ObjectIO Contributors"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# HTTP/Web
+axum = { version = "0.8", features = ["macros"] }
+hyper = { version = "1.5", features = ["full"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
+
+# gRPC
+tonic = { version = "0.12" }
+prost = { version = "0.13" }
+prost-types = { version = "0.13" }
+
+# Erasure coding
+reed-solomon-simd = "3.0"
+erasure-isa-l = "0.2"
+
+# Consensus & Storage
+openraft = { version = "0.9", features = ["serde"] }
+redb = "2.4"
+
+# Checksums & Crypto
+crc32c = "0.6"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+ring = "0.17"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+quick-xml = { version = "0.37", features = ["serialize"] }
+base64 = "0.22"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+bytes = "1.9"
+hex = "0.4"
+futures = "0.3"
+parking_lot = "0.12"
+dashmap = "6.1"
+thiserror = "2.0"
+anyhow = "1.0"
+derive_more = { version = "1.0", features = ["full"] }
+
+# Tracing & Metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Config
+config = "0.14"
+
+# Unix-specific
+nix = { version = "0.29", features = ["fs", "ioctl"] }
+libc = "0.2"
+
+# Testing
+tempfile = "3.14"
+rand = "0.8"
+
+# Internal crates
+objectio-common = { path = "crates/objectio-common" }
+objectio-proto = { path = "crates/objectio-proto" }
+objectio-erasure = { path = "crates/objectio-erasure" }
+objectio-placement = { path = "crates/objectio-placement" }
+objectio-storage = { path = "crates/objectio-storage" }
+objectio-meta-store = { path = "crates/objectio-meta-store" }
+objectio-s3 = { path = "crates/objectio-s3" }
+objectio-client = { path = "crates/objectio-client" }
+objectio-auth = { path = "crates/objectio-auth" }
+objectio-block = { path = "crates/objectio-block" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"

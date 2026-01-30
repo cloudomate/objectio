@@ -1,0 +1,30 @@
+[package]
+name = "objectio-osd"
+description = "Object Storage Daemon for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "objectio-osd"
+path = "src/main.rs"
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-storage = { workspace = true }
+objectio-erasure = { workspace = true }
+objectio-proto = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+config = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+crc32c = { workspace = true }
+serde = { workspace = true }
+prost = { workspace = true }
+toml = "0.8"

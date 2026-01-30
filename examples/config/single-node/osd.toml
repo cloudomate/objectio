@@ -1,0 +1,49 @@
+# ObjectIO OSD Configuration - Single Node Deployment
+#
+# In a single-node deployment, all OSDs run on one server.
+# Failure domain is at the DISK level - shards spread across disks.
+#
+# Example: One server with 12 NVMe drives
+
+[osd]
+# Human-readable name for this OSD instance
+node_name = "osd-single-01"
+
+# gRPC listen address
+listen = "0.0.0.0:9002"
+
+# Metadata service endpoint
+meta_endpoint = "http://localhost:9001"
+
+# Placement weight (higher = more data assigned)
+# Use this to balance data across OSDs with different capacities
+weight = 1.0
+
+# Failure domain - where this OSD sits in the topology
+# For single-node: all OSDs share the same region/datacenter/rack
+# CRUSH will spread shards across different DISKS on this node
+[osd.failure_domain]
+region = "default"
+datacenter = "dc1"
+rack = "rack1"
+
+[storage]
+# List of disk paths managed by this OSD
+# Each path should be a dedicated disk or partition
+disks = [
+    "/mnt/nvme0",
+    "/mnt/nvme1",
+    "/mnt/nvme2",
+    "/mnt/nvme3",
+    "/mnt/nvme4",
+    "/mnt/nvme5",
+]
+
+# Block size for data (4 MB default)
+block_size = 4194304
+
+# OSD metadata directory (WAL, object index, etc.)
+data_dir = "/var/lib/objectio/osd"
+
+[logging]
+level = "info"

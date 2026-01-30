@@ -1,0 +1,26 @@
+[package]
+name = "objectio-storage"
+description = "Raw disk storage engine for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-erasure = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+crc32c = { workspace = true }
+xxhash-rust = { workspace = true }
+tracing = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }

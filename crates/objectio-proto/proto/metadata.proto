@@ -1,0 +1,552 @@
+syntax = "proto3";
+
+package objectio.metadata;
+
+// Metadata service for bucket and object operations
+service MetadataService {
+    // Bucket operations
+    rpc CreateBucket(CreateBucketRequest) returns (CreateBucketResponse);
+    rpc DeleteBucket(DeleteBucketRequest) returns (DeleteBucketResponse);
+    rpc GetBucket(GetBucketRequest) returns (GetBucketResponse);
+    rpc ListBuckets(ListBucketsRequest) returns (ListBucketsResponse);
+
+    // Object metadata operations
+    rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
+    rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectResponse);
+    rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+    rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+
+    // Placement
+    rpc GetPlacement(GetPlacementRequest) returns (GetPlacementResponse);
+
+    // Multipart upload
+    rpc CreateMultipartUpload(CreateMultipartUploadRequest) returns (CreateMultipartUploadResponse);
+    rpc RegisterPart(RegisterPartRequest) returns (RegisterPartResponse);
+    rpc ListParts(ListPartsRequest) returns (ListPartsResponse);
+    rpc CompleteMultipartUpload(CompleteMultipartUploadRequest) returns (CompleteMultipartUploadResponse);
+    rpc AbortMultipartUpload(AbortMultipartUploadRequest) returns (AbortMultipartUploadResponse);
+    rpc ListMultipartUploads(ListMultipartUploadsRequest) returns (ListMultipartUploadsResponse);
+
+    // Bucket policy
+    rpc SetBucketPolicy(SetBucketPolicyRequest) returns (SetBucketPolicyResponse);
+    rpc GetBucketPolicy(GetBucketPolicyRequest) returns (GetBucketPolicyResponse);
+    rpc DeleteBucketPolicy(DeleteBucketPolicyRequest) returns (DeleteBucketPolicyResponse);
+
+    // OSD registration (for placement)
+    rpc RegisterOsd(RegisterOsdRequest) returns (RegisterOsdResponse);
+
+    // Get all active nodes for listing operations (scatter-gather)
+    rpc GetListingNodes(GetListingNodesRequest) returns (GetListingNodesResponse);
+
+    // IAM operations (user/credential persistence)
+    rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+    rpc GetUser(GetUserRequest) returns (GetUserResponse);
+    rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+    rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+    rpc CreateAccessKey(CreateAccessKeyRequest) returns (CreateAccessKeyResponse);
+    rpc ListAccessKeys(ListAccessKeysRequest) returns (ListAccessKeysResponse);
+    rpc DeleteAccessKey(DeleteAccessKeyRequest) returns (DeleteAccessKeyResponse);
+    rpc GetAccessKeyForAuth(GetAccessKeyForAuthRequest) returns (GetAccessKeyForAuthResponse);
+}
+
+// Bucket metadata
+message BucketMeta {
+    string name = 1;
+    string owner = 2;
+    uint64 created_at = 3;
+    string storage_class = 4;
+    VersioningState versioning = 5;
+}
+
+enum VersioningState {
+    VERSIONING_DISABLED = 0;
+    VERSIONING_ENABLED = 1;
+    VERSIONING_SUSPENDED = 2;
+}
+
+// Erasure coding type
+enum ErasureType {
+    // Standard Reed-Solomon MDS (Maximum Distance Separable)
+    // Any k shards can reconstruct the data
+    ERASURE_MDS = 0;
+
+    // Locally Repairable Codes (LRC)
+    // Local parity groups enable faster single-shard recovery
+    ERASURE_LRC = 1;
+
+    // Simple replication (no erasure coding)
+    // Data is replicated N times without encoding
+    // Use replication_count=1 for single-disk mode (no redundancy)
+    // Use replication_count=3 for 3-way replication
+    ERASURE_REPLICATION = 2;
+}
+
+// Object metadata
+message ObjectMeta {
+    string bucket = 1;
+    string key = 2;
+    bytes object_id = 3;        // 16-byte UUID
+    uint64 size = 4;
+    string etag = 5;
+    string content_type = 6;
+    uint64 created_at = 7;
+    uint64 modified_at = 8;
+    string storage_class = 9;
+    map<string, string> user_metadata = 10;
+    string version_id = 11;
+    bool is_delete_marker = 12;
+    repeated StripeMeta stripes = 13;
+}
+
+// Stripe metadata (EC group)
+message StripeMeta {
+    uint64 stripe_id = 1;
+    uint32 ec_k = 2;                // Data shards
+    uint32 ec_m = 3;                // Total parity shards (local + global for LRC)
+    repeated ShardLocation shards = 4;
+
+    // LRC-specific fields
+    ErasureType ec_type = 5;        // MDS or LRC
+    uint32 ec_local_parity = 6;     // Number of local parity shards (LRC only)
+    uint32 ec_global_parity = 7;    // Number of global parity shards (LRC only)
+    uint32 local_group_size = 8;    // Data shards per local group (LRC only)
+
+    // Original data size for this stripe (needed for decoding multipart uploads)
+    uint64 data_size = 9;
+
+    // Object ID used when writing shards (needed for multipart uploads where each part has different ID)
+    bytes object_id = 10;
+}
+
+// Shard location
+message ShardLocation {
+    uint32 position = 1;        // Position in stripe
+    bytes node_id = 2;          // 16-byte UUID
+    bytes disk_id = 3;          // 16-byte UUID
+    uint64 offset = 4;
+
+    // LRC-specific fields
+    ShardType shard_type = 5;   // Type of shard (data, local parity, global parity)
+    uint32 local_group = 6;     // Local group index (for LRC)
+}
+
+// Shard type for LRC
+enum ShardType {
+    SHARD_DATA = 0;             // Data shard
+    SHARD_LOCAL_PARITY = 1;     // Local parity shard (XOR of local group)
+    SHARD_GLOBAL_PARITY = 2;    // Global parity shard (RS over all data)
+}
+
+// Create bucket
+message CreateBucketRequest {
+    string name = 1;
+    string owner = 2;
+    string storage_class = 3;
+    string region = 4;
+}
+
+message CreateBucketResponse {
+    BucketMeta bucket = 1;
+}
+
+// Delete bucket
+message DeleteBucketRequest {
+    string name = 1;
+}
+
+message DeleteBucketResponse {
+    bool success = 1;
+}
+
+// Get bucket
+message GetBucketRequest {
+    string name = 1;
+}
+
+message GetBucketResponse {
+    BucketMeta bucket = 1;
+}
+
+// List buckets
+message ListBucketsRequest {
+    string owner = 1;
+}
+
+message ListBucketsResponse {
+    repeated BucketMeta buckets = 1;
+}
+
+// Create object
+message CreateObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    uint64 size = 3;
+    string content_type = 4;
+    string etag = 5;
+    map<string, string> user_metadata = 6;
+    repeated StripeMeta stripes = 7;
+    bytes object_id = 8;        // 16-byte UUID (provided by caller)
+}
+
+message CreateObjectResponse {
+    ObjectMeta object = 1;
+}
+
+// Delete object
+message DeleteObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;      // Optional: delete specific version
+}
+
+message DeleteObjectResponse {
+    bool success = 1;
+    string version_id = 2;      // Version ID of delete marker (if versioning enabled)
+}
+
+// Get object
+message GetObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;      // Optional: get specific version
+}
+
+message GetObjectResponse {
+    ObjectMeta object = 1;
+}
+
+// List objects
+message ListObjectsRequest {
+    string bucket = 1;
+    string prefix = 2;
+    string delimiter = 3;
+    string start_after = 4;
+    string continuation_token = 5;
+    uint32 max_keys = 6;
+    bool include_versions = 7;
+}
+
+message ListObjectsResponse {
+    repeated ObjectMeta objects = 1;
+    repeated string common_prefixes = 2;
+    string next_continuation_token = 3;
+    bool is_truncated = 4;
+    uint32 key_count = 5;
+}
+
+// Get placement for new object
+message GetPlacementRequest {
+    string bucket = 1;
+    string key = 2;
+    uint64 size = 3;
+    string storage_class = 4;
+}
+
+message GetPlacementResponse {
+    string storage_class = 1;
+    uint32 ec_k = 2;
+    uint32 ec_m = 3;                // Total parity (local + global for LRC)
+    repeated NodePlacement nodes = 4;
+
+    // LRC-specific fields
+    ErasureType ec_type = 5;        // MDS, LRC, or REPLICATION
+    uint32 ec_local_parity = 6;     // Number of local parity shards (LRC only)
+    uint32 ec_global_parity = 7;    // Number of global parity shards (LRC only)
+    uint32 local_group_size = 8;    // Data shards per local group (LRC only)
+
+    // Replication-specific fields
+    uint32 replication_count = 9;   // Number of replicas (REPLICATION mode only)
+}
+
+message NodePlacement {
+    uint32 position = 1;            // Shard position
+    bytes node_id = 2;
+    string node_address = 3;
+    bytes disk_id = 4;
+
+    // LRC-specific fields
+    ShardType shard_type = 5;       // Type of shard
+    uint32 local_group = 6;         // Local group index (for LRC)
+}
+
+// Multipart upload
+message CreateMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string content_type = 3;
+    map<string, string> user_metadata = 4;
+}
+
+message CreateMultipartUploadResponse {
+    string upload_id = 1;
+    string bucket = 2;
+    string key = 3;
+}
+
+message CompleteMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    repeated PartInfo parts = 4;
+}
+
+message PartInfo {
+    uint32 part_number = 1;
+    string etag = 2;
+    uint64 size = 3;
+}
+
+message CompleteMultipartUploadResponse {
+    ObjectMeta object = 1;
+}
+
+message AbortMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+}
+
+message AbortMultipartUploadResponse {
+    bool success = 1;
+}
+
+message ListMultipartUploadsRequest {
+    string bucket = 1;
+    string prefix = 2;
+    string key_marker = 3;
+    string upload_id_marker = 4;
+    uint32 max_uploads = 5;
+}
+
+message ListMultipartUploadsResponse {
+    repeated MultipartUpload uploads = 1;
+    string next_key_marker = 2;
+    string next_upload_id_marker = 3;
+    bool is_truncated = 4;
+}
+
+message MultipartUpload {
+    string key = 1;
+    string upload_id = 2;
+    uint64 initiated = 3;
+    string storage_class = 4;
+}
+
+// Register a completed part upload
+message RegisterPartRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    uint32 part_number = 4;
+    string etag = 5;
+    uint64 size = 6;
+    repeated StripeMeta stripes = 7;  // EC stripes info for this part (multiple for large parts)
+}
+
+message RegisterPartResponse {
+    bool success = 1;
+    string etag = 2;            // Confirmed ETag
+}
+
+// List parts of a multipart upload
+message ListPartsRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    uint32 part_number_marker = 4;  // Start listing after this part number
+    uint32 max_parts = 5;           // Max parts to return (default 1000)
+}
+
+message ListPartsResponse {
+    repeated PartMeta parts = 1;
+    bool is_truncated = 2;
+    uint32 next_part_number_marker = 3;
+    string bucket = 4;
+    string key = 5;
+    string upload_id = 6;
+}
+
+// Extended part metadata (includes stripe info for internal use)
+message PartMeta {
+    uint32 part_number = 1;
+    string etag = 2;
+    uint64 size = 3;
+    uint64 last_modified = 4;
+    repeated StripeMeta stripes = 5;  // EC stripes info (multiple for large parts)
+}
+
+// Bucket policy operations
+message SetBucketPolicyRequest {
+    string bucket = 1;
+    string policy_json = 2;  // JSON-encoded bucket policy
+}
+
+message SetBucketPolicyResponse {
+    bool success = 1;
+}
+
+message GetBucketPolicyRequest {
+    string bucket = 1;
+}
+
+message GetBucketPolicyResponse {
+    string policy_json = 1;  // JSON-encoded bucket policy (empty if no policy)
+    bool has_policy = 2;     // True if bucket has a policy set
+}
+
+message DeleteBucketPolicyRequest {
+    string bucket = 1;
+}
+
+message DeleteBucketPolicyResponse {
+    bool success = 1;
+}
+
+// Failure domain for CRUSH placement
+message FailureDomainInfo {
+    string region = 1;          // Region name (e.g., "us-east-1")
+    string datacenter = 2;      // Datacenter/AZ name (e.g., "us-east-1a")
+    string rack = 3;            // Rack identifier (e.g., "rack-01")
+}
+
+// OSD registration
+message RegisterOsdRequest {
+    bytes node_id = 1;                  // 16-byte UUID
+    string address = 2;                 // gRPC endpoint (e.g., "http://192.168.1.10:9002")
+    repeated bytes disk_ids = 3;        // 16-byte UUIDs for each disk
+    FailureDomainInfo failure_domain = 4; // Where this OSD sits in the topology
+    string node_name = 5;               // Human-readable name (optional)
+    double weight = 6;                  // Placement weight (default: 1.0)
+}
+
+message RegisterOsdResponse {
+    bool success = 1;
+    uint64 topology_version = 2;        // Current cluster topology version
+}
+
+// Get listing nodes for scatter-gather list operations
+message GetListingNodesRequest {
+    string bucket = 1;          // Optional: filter by bucket's storage class
+}
+
+message GetListingNodesResponse {
+    repeated ListingNode nodes = 1;
+    uint64 topology_version = 2; // For continuation token validation
+}
+
+message ListingNode {
+    bytes node_id = 1;
+    string address = 2;
+    uint32 shard_id = 3;        // Logical shard ID for partitioned listing (0..N-1)
+}
+
+// ============ IAM Messages ============
+
+// User status
+enum UserStatus {
+    USER_ACTIVE = 0;
+    USER_SUSPENDED = 1;
+    USER_DELETED = 2;
+}
+
+// Access key status
+enum KeyStatus {
+    KEY_ACTIVE = 0;
+    KEY_INACTIVE = 1;
+}
+
+// User metadata
+message UserMeta {
+    string user_id = 1;
+    string display_name = 2;
+    string arn = 3;
+    UserStatus status = 4;
+    uint64 created_at = 5;
+    string email = 6;
+}
+
+// Access key metadata
+message AccessKeyMeta {
+    string access_key_id = 1;
+    string secret_access_key = 2;   // Only returned on creation
+    string user_id = 3;
+    KeyStatus status = 4;
+    uint64 created_at = 5;
+}
+
+// Create user
+message CreateUserRequest {
+    string display_name = 1;
+    string email = 2;
+}
+
+message CreateUserResponse {
+    UserMeta user = 1;
+}
+
+// Get user
+message GetUserRequest {
+    string user_id = 1;
+}
+
+message GetUserResponse {
+    UserMeta user = 1;
+}
+
+// List users
+message ListUsersRequest {
+    uint32 max_results = 1;
+    string marker = 2;
+}
+
+message ListUsersResponse {
+    repeated UserMeta users = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+// Delete user
+message DeleteUserRequest {
+    string user_id = 1;
+}
+
+message DeleteUserResponse {
+    bool success = 1;
+}
+
+// Create access key
+message CreateAccessKeyRequest {
+    string user_id = 1;
+}
+
+message CreateAccessKeyResponse {
+    AccessKeyMeta access_key = 1;   // Includes secret_access_key
+}
+
+// List access keys
+message ListAccessKeysRequest {
+    string user_id = 1;
+}
+
+message ListAccessKeysResponse {
+    repeated AccessKeyMeta access_keys = 1;  // secret_access_key is empty
+}
+
+// Delete access key
+message DeleteAccessKeyRequest {
+    string access_key_id = 1;
+}
+
+message DeleteAccessKeyResponse {
+    bool success = 1;
+}
+
+// Get access key for authentication (includes secret for verification)
+message GetAccessKeyForAuthRequest {
+    string access_key_id = 1;
+}
+
+message GetAccessKeyForAuthResponse {
+    AccessKeyMeta access_key = 1;   // Includes secret_access_key
+    UserMeta user = 2;
+}

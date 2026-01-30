@@ -1,0 +1,22 @@
+[package]
+name = "objectio-cli"
+description = "Admin CLI for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "objectio-cli"
+path = "src/main.rs"
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-client = { workspace = true }
+objectio-proto = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,30 @@
+[package]
+name = "objectio-meta"
+description = "Metadata Service for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "objectio-meta"
+path = "src/main.rs"
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-meta-store = { workspace = true }
+objectio-placement = { workspace = true }
+objectio-proto = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+config = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+xxhash-rust = { workspace = true }
+md5 = "0.7"
+rand = { workspace = true }

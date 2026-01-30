@@ -1,0 +1,131 @@
+# ObjectIO Single Node Deployment - 7 Disks
+#
+# Topology: Single node with 7x100GB disks (vdb-vdh)
+# EC Config: 5+2 (71% efficiency, survives 2 disk failures)
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Test with AWS CLI:
+#   aws --endpoint-url http://localhost:9000 s3 mb s3://test
+#   aws --endpoint-url http://localhost:9000 s3 cp /etc/hosts s3://test/
+
+services:
+  # Metadata service (Raft-based)
+  meta:
+    image: objectio-meta:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: meta
+    container_name: objectio-meta
+    hostname: meta
+    restart: unless-stopped
+    ports:
+      - "9001:9001"
+    volumes:
+      - meta-data:/var/lib/objectio/meta
+    command:
+      - "--listen"
+      - "0.0.0.0:9001"
+      - "--data-dir"
+      - "/var/lib/objectio/meta"
+      - "--log-level"
+      - "info"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - objectio
+
+  # OSD - manages all 7 disks
+  osd:
+    image: objectio-osd:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: osd
+    container_name: objectio-osd
+    hostname: osd
+    restart: unless-stopped
+    depends_on:
+      meta:
+        condition: service_healthy
+    ports:
+      - "9002:9002"
+    volumes:
+      # Mount the 7 data disks
+      - /mnt/disk0:/data/disk0
+      - /mnt/disk1:/data/disk1
+      - /mnt/disk2:/data/disk2
+      - /mnt/disk3:/data/disk3
+      - /mnt/disk4:/data/disk4
+      - /mnt/disk5:/data/disk5
+      - /mnt/disk6:/data/disk6
+      # OSD metadata
+      - osd-meta:/var/lib/objectio/osd
+      # Config file
+      - ./config/osd.toml:/etc/objectio/osd.toml:ro
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - objectio
+
+  # S3 Gateway
+  gateway:
+    image: objectio-gateway:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: gateway
+    container_name: objectio-gateway
+    hostname: gateway
+    restart: unless-stopped
+    depends_on:
+      meta:
+        condition: service_healthy
+      osd:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--listen"
+      - "0.0.0.0:9000"
+      - "--meta-endpoint"
+      - "http://meta:9001"
+      - "--osd-endpoint"
+      - "http://osd:9002"
+      - "--ec-k"
+      - "5"
+      - "--ec-m"
+      - "2"
+      - "--no-auth"
+      - "--log-level"
+      - "info"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - objectio
+
+networks:
+  objectio:
+    driver: bridge
+
+volumes:
+  meta-data:
+  osd-meta:

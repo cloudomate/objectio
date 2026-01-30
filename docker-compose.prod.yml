@@ -1,0 +1,236 @@
+# ObjectIO Production Deployment
+# Supports both raw block devices and folder-emulated disks
+#
+# Usage:
+#   # With raw disks (production):
+#   docker compose -f docker-compose.prod.yml up -d
+#
+#   # With folder-emulated disks (testing):
+#   DISK_MODE=folder docker compose -f docker-compose.prod.yml up -d
+#
+# Environment variables:
+#   DISK_MODE=raw|folder (default: raw)
+#   DISK_SIZE=100G (for folder mode, creates sparse files)
+
+x-osd-common: &osd-common
+  image: objectio-osd:latest
+  restart: unless-stopped
+  networks:
+    - objectio-net
+  depends_on:
+    - meta1
+  # Required for raw disk access
+  privileged: true
+  user: root
+  cap_add:
+    - SYS_RAWIO
+    - SYS_ADMIN
+
+services:
+  # ==========================================================================
+  # S3 Gateway
+  # ==========================================================================
+  gateway:
+    image: objectio-gateway:latest
+    hostname: gateway
+    ports:
+      - "9000:9000"
+    command:
+      - "--listen"
+      - "0.0.0.0:9000"
+      - "--meta-endpoint"
+      - "http://meta1:9100"
+      - "--no-auth"
+      - "--log-level"
+      - "info"
+    depends_on:
+      - meta1
+      - meta2
+      - meta3
+    networks:
+      - objectio-net
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Metadata Service (3-node Raft cluster)
+  # ==========================================================================
+  meta1:
+    image: objectio-meta:latest
+    hostname: meta1
+    command:
+      - "--node-id"
+      - "1"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta1-data:/var/lib/objectio
+    ports:
+      - "9100:9100"
+    networks:
+      - objectio-net
+    restart: unless-stopped
+
+  meta2:
+    image: objectio-meta:latest
+    hostname: meta2
+    command:
+      - "--node-id"
+      - "2"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta2-data:/var/lib/objectio
+    ports:
+      - "9102:9100"
+    networks:
+      - objectio-net
+    restart: unless-stopped
+
+  meta3:
+    image: objectio-meta:latest
+    hostname: meta3
+    command:
+      - "--node-id"
+      - "3"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta3-data:/var/lib/objectio
+    ports:
+      - "9103:9100"
+    networks:
+      - objectio-net
+    restart: unless-stopped
+
+  # ==========================================================================
+  # OSDs with raw block devices (vdb-vdh)
+  # For 4+2 erasure coding, we need at least 6 OSDs
+  # 7 OSDs provides 1 spare for recovery
+  # ==========================================================================
+  osd1:
+    <<: *osd-common
+    hostname: osd1
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdb:/dev/vdb
+    volumes:
+      - ./config/osd1.toml:/etc/objectio/osd.toml:ro
+      - osd1-wal:/var/lib/objectio/wal
+    ports:
+      - "9200:9200"
+
+  osd2:
+    <<: *osd-common
+    hostname: osd2
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdc:/dev/vdc
+    volumes:
+      - ./config/osd2.toml:/etc/objectio/osd.toml:ro
+      - osd2-wal:/var/lib/objectio/wal
+    ports:
+      - "9201:9200"
+
+  osd3:
+    <<: *osd-common
+    hostname: osd3
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdd:/dev/vdd
+    volumes:
+      - ./config/osd3.toml:/etc/objectio/osd.toml:ro
+      - osd3-wal:/var/lib/objectio/wal
+    ports:
+      - "9202:9200"
+
+  osd4:
+    <<: *osd-common
+    hostname: osd4
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vde:/dev/vde
+    volumes:
+      - ./config/osd4.toml:/etc/objectio/osd.toml:ro
+      - osd4-wal:/var/lib/objectio/wal
+    ports:
+      - "9203:9200"
+
+  osd5:
+    <<: *osd-common
+    hostname: osd5
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdf:/dev/vdf
+    volumes:
+      - ./config/osd5.toml:/etc/objectio/osd.toml:ro
+      - osd5-wal:/var/lib/objectio/wal
+    ports:
+      - "9204:9200"
+
+  osd6:
+    <<: *osd-common
+    hostname: osd6
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdg:/dev/vdg
+    volumes:
+      - ./config/osd6.toml:/etc/objectio/osd.toml:ro
+      - osd6-wal:/var/lib/objectio/wal
+    ports:
+      - "9205:9200"
+
+  osd7:
+    <<: *osd-common
+    hostname: osd7
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    devices:
+      - /dev/vdh:/dev/vdh
+    volumes:
+      - ./config/osd7.toml:/etc/objectio/osd.toml:ro
+      - osd7-wal:/var/lib/objectio/wal
+    ports:
+      - "9206:9200"
+
+networks:
+  objectio-net:
+    driver: bridge
+
+volumes:
+  # Metadata volumes (small, for Raft logs and metadata DB)
+  meta1-data:
+  meta2-data:
+  meta3-data:
+  # OSD WAL volumes (for write-ahead logs, separate from data disk)
+  osd1-wal:
+  osd2-wal:
+  osd3-wal:
+  osd4-wal:
+  osd5-wal:
+  osd6-wal:
+  osd7-wal:

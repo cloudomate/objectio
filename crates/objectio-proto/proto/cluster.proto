@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package objectio.cluster;
+
+// Cluster management service
+service ClusterService {
+    // Node management
+    rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+    rpc DeregisterNode(DeregisterNodeRequest) returns (DeregisterNodeResponse);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc GetClusterMap(GetClusterMapRequest) returns (GetClusterMapResponse);
+
+    // Disk management
+    rpc RegisterDisk(RegisterDiskRequest) returns (RegisterDiskResponse);
+    rpc DeregisterDisk(DeregisterDiskRequest) returns (DeregisterDiskResponse);
+
+    // Repair coordination
+    rpc ReportFailure(ReportFailureRequest) returns (ReportFailureResponse);
+    rpc GetRepairTasks(GetRepairTasksRequest) returns (GetRepairTasksResponse);
+    rpc UpdateRepairProgress(UpdateRepairProgressRequest) returns (UpdateRepairProgressResponse);
+}
+
+// Node information
+message NodeInfo {
+    bytes node_id = 1;          // 16-byte UUID
+    string name = 2;
+    string address = 3;         // gRPC endpoint
+    FailureDomain failure_domain = 4;
+    NodeStatus status = 5;
+    repeated DiskInfo disks = 6;
+    double weight = 7;
+    uint64 last_heartbeat = 8;
+}
+
+enum NodeStatus {
+    NODE_UNKNOWN = 0;
+    NODE_ACTIVE = 1;
+    NODE_DRAINING = 2;
+    NODE_DOWN = 3;
+    NODE_DECOMMISSIONING = 4;
+}
+
+// Failure domain hierarchy
+message FailureDomain {
+    string region = 1;
+    string datacenter = 2;
+    string rack = 3;
+}
+
+// Disk information
+message DiskInfo {
+    bytes disk_id = 1;          // 16-byte UUID
+    string path = 2;
+    uint64 total_capacity = 3;
+    uint64 used_capacity = 4;
+    DiskStatus status = 5;
+    double weight = 6;
+}
+
+enum DiskStatus {
+    DISK_UNKNOWN = 0;
+    DISK_HEALTHY = 1;
+    DISK_DEGRADED = 2;
+    DISK_FAILED = 3;
+    DISK_REBUILDING = 4;
+}
+
+// Cluster map (topology)
+message ClusterMap {
+    uint64 version = 1;
+    repeated RegionInfo regions = 2;
+}
+
+message RegionInfo {
+    string name = 1;
+    repeated DatacenterInfo datacenters = 2;
+}
+
+message DatacenterInfo {
+    string name = 1;
+    repeated RackInfo racks = 2;
+}
+
+message RackInfo {
+    string name = 1;
+    repeated NodeInfo nodes = 2;
+}
+
+// Register node
+message RegisterNodeRequest {
+    string name = 1;
+    string address = 2;
+    FailureDomain failure_domain = 3;
+    repeated DiskInfo disks = 4;
+}
+
+message RegisterNodeResponse {
+    bytes node_id = 1;
+    uint64 cluster_map_version = 2;
+}
+
+// Deregister node
+message DeregisterNodeRequest {
+    bytes node_id = 1;
+}
+
+message DeregisterNodeResponse {
+    bool success = 1;
+}
+
+// Heartbeat
+message HeartbeatRequest {
+    bytes node_id = 1;
+    NodeStatus status = 2;
+    repeated DiskInfo disks = 3;
+    uint64 known_cluster_map_version = 4;
+}
+
+message HeartbeatResponse {
+    bool need_map_update = 1;
+    ClusterMap cluster_map = 2;  // Only if need_map_update is true
+}
+
+// Get cluster map
+message GetClusterMapRequest {
+    uint64 min_version = 1;     // Return only if version > min_version
+}
+
+message GetClusterMapResponse {
+    ClusterMap cluster_map = 1;
+}
+
+// Register disk
+message RegisterDiskRequest {
+    bytes node_id = 1;
+    string path = 2;
+    uint64 capacity = 3;
+    double weight = 4;
+}
+
+message RegisterDiskResponse {
+    bytes disk_id = 1;
+}
+
+// Deregister disk
+message DeregisterDiskRequest {
+    bytes node_id = 1;
+    bytes disk_id = 2;
+}
+
+message DeregisterDiskResponse {
+    bool success = 1;
+}
+
+// Report failure
+message ReportFailureRequest {
+    FailureType type = 1;
+    bytes node_id = 2;
+    bytes disk_id = 3;          // Optional: only for disk failures
+    string reason = 4;
+}
+
+enum FailureType {
+    FAILURE_UNKNOWN = 0;
+    FAILURE_DISK = 1;
+    FAILURE_NODE = 2;
+    FAILURE_RACK = 3;
+    FAILURE_DATACENTER = 4;
+}
+
+message ReportFailureResponse {
+    bool acknowledged = 1;
+}
+
+// Get repair tasks
+message GetRepairTasksRequest {
+    bytes node_id = 1;
+    uint32 max_tasks = 2;
+}
+
+message GetRepairTasksResponse {
+    repeated RepairTask tasks = 1;
+}
+
+message RepairTask {
+    string task_id = 1;
+    RepairType type = 2;
+    RepairPriority priority = 3;
+    bytes object_id = 4;
+    uint64 stripe_id = 5;
+    repeated uint32 missing_positions = 6;
+    repeated ShardSource available_sources = 7;
+    repeated ShardTarget targets = 8;
+}
+
+enum RepairType {
+    REPAIR_UNKNOWN = 0;
+    REPAIR_DISK = 1;
+    REPAIR_NODE = 2;
+    REPAIR_RACK = 3;
+    REPAIR_AZ = 4;
+}
+
+enum RepairPriority {
+    PRIORITY_UNKNOWN = 0;
+    PRIORITY_CRITICAL = 1;      // Data at risk
+    PRIORITY_HIGH = 2;          // Below redundancy threshold
+    PRIORITY_NORMAL = 3;        // Degraded but safe
+    PRIORITY_LOW = 4;           // Proactive repair
+}
+
+message ShardSource {
+    uint32 position = 1;
+    bytes node_id = 2;
+    string node_address = 3;
+}
+
+message ShardTarget {
+    uint32 position = 1;
+    bytes node_id = 2;
+    bytes disk_id = 3;
+}
+
+// Update repair progress
+message UpdateRepairProgressRequest {
+    string task_id = 1;
+    RepairState state = 2;
+    uint64 bytes_processed = 3;
+    uint64 total_bytes = 4;
+    string error_message = 5;   // Only if state is FAILED
+}
+
+enum RepairState {
+    STATE_UNKNOWN = 0;
+    STATE_PENDING = 1;
+    STATE_IN_PROGRESS = 2;
+    STATE_COMPLETED = 3;
+    STATE_FAILED = 4;
+}
+
+message UpdateRepairProgressResponse {
+    bool acknowledged = 1;
+}

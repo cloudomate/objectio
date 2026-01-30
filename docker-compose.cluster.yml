@@ -1,0 +1,228 @@
+# ObjectIO Docker Compose - Local Cluster
+# Runs a complete ObjectIO cluster for development and testing
+#
+# Usage:
+#   docker compose -f docker-compose.cluster.yml up -d          # Start cluster
+#   docker compose -f docker-compose.cluster.yml down -v        # Stop and cleanup
+#   docker compose -f docker-compose.cluster.yml logs -f        # View logs
+#
+# Services:
+#   - gateway: S3 API endpoint at http://localhost:9000
+#   - meta1/2/3: 3-node Raft metadata cluster
+#   - osd1/2/3/4/5/6: 6 OSDs for 4+2 erasure coding
+#
+# Test with AWS CLI:
+#   aws --endpoint-url http://localhost:9000 s3 mb s3://test-bucket
+#   aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://test-bucket/
+
+x-meta-common: &meta-common
+  image: objectio-meta:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: meta
+  networks:
+    - objectio-net
+  restart: unless-stopped
+
+x-osd-common: &osd-common
+  image: objectio-osd:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: osd
+  networks:
+    - objectio-net
+  restart: unless-stopped
+
+services:
+  # ==========================================================================
+  # S3 Gateway
+  # ==========================================================================
+  gateway:
+    image: objectio-gateway:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway
+    ports:
+      - "9000:9000"
+    environment:
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+      RUST_BACKTRACE: 1
+    depends_on:
+      - meta1
+      - meta2
+      - meta3
+    networks:
+      - objectio-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ==========================================================================
+  # Metadata Service (3-node Raft cluster)
+  # ==========================================================================
+  meta1:
+    <<: *meta-common
+    hostname: meta1
+    environment:
+      OBJECTIO_NODE_ID: "1"
+      OBJECTIO_BIND: "0.0.0.0:9100"
+      OBJECTIO_RAFT_BIND: "0.0.0.0:9101"
+      OBJECTIO_RAFT_PEERS: "meta1:9101,meta2:9101,meta3:9101"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/meta"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - meta1-data:/var/lib/objectio
+    ports:
+      - "9100:9100"
+
+  meta2:
+    <<: *meta-common
+    hostname: meta2
+    environment:
+      OBJECTIO_NODE_ID: "2"
+      OBJECTIO_BIND: "0.0.0.0:9100"
+      OBJECTIO_RAFT_BIND: "0.0.0.0:9101"
+      OBJECTIO_RAFT_PEERS: "meta1:9101,meta2:9101,meta3:9101"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/meta"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - meta2-data:/var/lib/objectio
+    ports:
+      - "9102:9100"
+
+  meta3:
+    <<: *meta-common
+    hostname: meta3
+    environment:
+      OBJECTIO_NODE_ID: "3"
+      OBJECTIO_BIND: "0.0.0.0:9100"
+      OBJECTIO_RAFT_BIND: "0.0.0.0:9101"
+      OBJECTIO_RAFT_PEERS: "meta1:9101,meta2:9101,meta3:9101"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/meta"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - meta3-data:/var/lib/objectio
+    ports:
+      - "9103:9100"
+
+  # ==========================================================================
+  # Object Storage Daemons (6 nodes for 4+2 erasure coding)
+  # ==========================================================================
+  osd1:
+    <<: *osd-common
+    hostname: osd1
+    environment:
+      OBJECTIO_OSD_ID: "1"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd1-data:/var/lib/objectio
+    ports:
+      - "9200:9200"
+    depends_on:
+      - meta1
+
+  osd2:
+    <<: *osd-common
+    hostname: osd2
+    environment:
+      OBJECTIO_OSD_ID: "2"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd2-data:/var/lib/objectio
+    ports:
+      - "9202:9200"
+    depends_on:
+      - meta1
+
+  osd3:
+    <<: *osd-common
+    hostname: osd3
+    environment:
+      OBJECTIO_OSD_ID: "3"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd3-data:/var/lib/objectio
+    ports:
+      - "9203:9200"
+    depends_on:
+      - meta1
+
+  osd4:
+    <<: *osd-common
+    hostname: osd4
+    environment:
+      OBJECTIO_OSD_ID: "4"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd4-data:/var/lib/objectio
+    ports:
+      - "9204:9200"
+    depends_on:
+      - meta1
+
+  osd5:
+    <<: *osd-common
+    hostname: osd5
+    environment:
+      OBJECTIO_OSD_ID: "5"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd5-data:/var/lib/objectio
+    ports:
+      - "9205:9200"
+    depends_on:
+      - meta1
+
+  osd6:
+    <<: *osd-common
+    hostname: osd6
+    environment:
+      OBJECTIO_OSD_ID: "6"
+      OBJECTIO_BIND: "0.0.0.0:9200"
+      OBJECTIO_DATA_DIR: "/var/lib/objectio/osd"
+      OBJECTIO_META_ENDPOINTS: "meta1:9100,meta2:9100,meta3:9100"
+      OBJECTIO_LOG_LEVEL: info
+    volumes:
+      - osd6-data:/var/lib/objectio
+    ports:
+      - "9206:9200"
+    depends_on:
+      - meta1
+
+networks:
+  objectio-net:
+    driver: bridge
+
+volumes:
+  meta1-data:
+  meta2-data:
+  meta3-data:
+  osd1-data:
+  osd2-data:
+  osd3-data:
+  osd4-data:
+  osd5-data:
+  osd6-data:

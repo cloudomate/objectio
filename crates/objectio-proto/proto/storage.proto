@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package objectio.storage;
+
+import "metadata.proto";
+
+// Storage service for OSD (Object Storage Daemon) operations
+service StorageService {
+    // Write a shard to the storage node
+    rpc WriteShard(WriteShardRequest) returns (WriteShardResponse);
+
+    // Read a shard from the storage node
+    rpc ReadShard(ReadShardRequest) returns (ReadShardResponse);
+
+    // Delete a shard from the storage node
+    rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+
+    // Get shard metadata
+    rpc GetShardMeta(GetShardMetaRequest) returns (GetShardMetaResponse);
+
+    // List shards on this node
+    rpc ListShards(ListShardsRequest) returns (ListShardsResponse);
+
+    // Health check
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+    // Get node status
+    rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+    // Object metadata operations (stored on primary OSD)
+    // Put object metadata (called by gateway after writing all shards)
+    rpc PutObjectMeta(PutObjectMetaRequest) returns (PutObjectMetaResponse);
+
+    // Get object metadata (called by gateway before reading shards)
+    rpc GetObjectMeta(GetObjectMetaRequest) returns (GetObjectMetaResponse);
+
+    // Delete object metadata (called by gateway when deleting object)
+    rpc DeleteObjectMeta(DeleteObjectMetaRequest) returns (DeleteObjectMetaResponse);
+
+    // List objects by prefix (for ListObjects operation)
+    rpc ListObjectsMeta(ListObjectsMetaRequest) returns (ListObjectsMetaResponse);
+}
+
+// Shard identifier
+message ShardId {
+    bytes object_id = 1;    // 16-byte UUID
+    uint64 stripe_id = 2;   // Stripe number
+    uint32 position = 3;    // Position within stripe (0..k+m-1)
+}
+
+// Block location on disk
+message BlockLocation {
+    bytes node_id = 1;      // 16-byte UUID
+    bytes disk_id = 2;      // 16-byte UUID
+    uint64 offset = 3;      // Offset on disk
+    uint32 size = 4;        // Size in bytes
+}
+
+// Checksum values
+message Checksum {
+    uint32 crc32c = 1;
+    uint64 xxhash64 = 2;
+    bytes sha256 = 3;       // Optional, 32 bytes
+}
+
+// Write shard request
+message WriteShardRequest {
+    ShardId shard_id = 1;
+    bytes data = 2;
+    uint32 ec_k = 3;        // Data shard count
+    uint32 ec_m = 4;        // Parity shard count
+    Checksum checksum = 5;
+}
+
+message WriteShardResponse {
+    BlockLocation location = 1;
+    uint64 timestamp = 2;
+}
+
+// Read shard request
+message ReadShardRequest {
+    ShardId shard_id = 1;
+    // Optional: read only a range
+    uint64 offset = 2;
+    uint32 length = 3;
+}
+
+message ReadShardResponse {
+    bytes data = 1;
+    Checksum checksum = 2;
+    uint64 timestamp = 3;
+}
+
+// Delete shard request
+message DeleteShardRequest {
+    ShardId shard_id = 1;
+}
+
+message DeleteShardResponse {
+    bool success = 1;
+}
+
+// Get shard metadata
+message GetShardMetaRequest {
+    ShardId shard_id = 1;
+}
+
+message GetShardMetaResponse {
+    ShardId shard_id = 1;
+    BlockLocation location = 2;
+    uint32 size = 3;
+    Checksum checksum = 4;
+    uint64 created_at = 5;
+}
+
+// List shards
+message ListShardsRequest {
+    bytes object_id = 1;    // Optional: filter by object
+    uint32 limit = 2;
+    bytes continuation_token = 3;
+}
+
+message ListShardsResponse {
+    repeated GetShardMetaResponse shards = 1;
+    bytes next_token = 2;
+}
+
+// Health check
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    enum Status {
+        UNKNOWN = 0;
+        HEALTHY = 1;
+        DEGRADED = 2;
+        UNHEALTHY = 3;
+    }
+    Status status = 1;
+    string message = 2;
+}
+
+// Node status
+message GetStatusRequest {}
+
+message GetStatusResponse {
+    bytes node_id = 1;
+    string node_name = 2;
+    repeated DiskStatus disks = 3;
+    uint64 total_capacity = 4;
+    uint64 used_capacity = 5;
+    uint64 shard_count = 6;
+    uint64 uptime_seconds = 7;
+}
+
+message DiskStatus {
+    bytes disk_id = 1;
+    string path = 2;
+    uint64 total_capacity = 3;
+    uint64 used_capacity = 4;
+    string status = 5;      // "healthy", "degraded", "failed"
+    uint64 shard_count = 6;
+}
+
+// ============================================================
+// Object Metadata Operations (stored on primary OSD)
+// ============================================================
+
+// Put object metadata request
+message PutObjectMetaRequest {
+    string bucket = 1;
+    string key = 2;
+    objectio.metadata.ObjectMeta object = 3;
+}
+
+message PutObjectMetaResponse {
+    bool success = 1;
+    uint64 timestamp = 2;
+}
+
+// Get object metadata request
+message GetObjectMetaRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;  // Optional: get specific version
+}
+
+message GetObjectMetaResponse {
+    objectio.metadata.ObjectMeta object = 1;
+    bool found = 2;
+}
+
+// Delete object metadata request
+message DeleteObjectMetaRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;  // Optional: delete specific version
+}
+
+message DeleteObjectMetaResponse {
+    bool success = 1;
+}
+
+// List objects metadata request (for ListObjects)
+message ListObjectsMetaRequest {
+    string bucket = 1;
+    string prefix = 2;
+    string start_after = 3;
+    uint32 max_keys = 4;
+    string continuation_token = 5;
+}
+
+message ListObjectsMetaResponse {
+    repeated objectio.metadata.ObjectMeta objects = 1;
+    string next_continuation_token = 2;
+    bool is_truncated = 3;
+    uint32 key_count = 4;
+}

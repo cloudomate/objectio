@@ -1,0 +1,42 @@
+[package]
+name = "objectio-block"
+description = "Block storage layer for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal crates
+objectio-common = { workspace = true }
+objectio-proto = { workspace = true }
+objectio-client = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
+
+# gRPC
+tonic = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+
+# Time
+chrono = "0.4"
+
+# Async traits
+async-trait = "0.1"
+
+# Checksums
+crc32c = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }

@@ -1,0 +1,32 @@
+# ObjectIO OSD Configuration
+# Single node with 7 disks - EC 5+2 configuration
+
+[osd]
+node_name = "osd-single-node"
+listen = "0.0.0.0:9002"
+meta_endpoint = "http://meta:9001"
+weight = 1.0
+
+# Failure domain - single node deployment
+# All disks share the same rack, CRUSH spreads across DISKS
+[osd.failure_domain]
+region = "local"
+datacenter = "dc1"
+rack = "rack1"
+
+[storage]
+# 7 disks mounted from host
+disks = [
+    "/data/disk0",
+    "/data/disk1",
+    "/data/disk2",
+    "/data/disk3",
+    "/data/disk4",
+    "/data/disk5",
+    "/data/disk6"
+]
+block_size = 4194304
+data_dir = "/var/lib/objectio/osd"
+
+[logging]
+level = "info"

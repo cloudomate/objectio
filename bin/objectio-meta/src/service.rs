@@ -1,0 +1,1460 @@
+//! Metadata gRPC service implementation
+
+use objectio_common::{NodeId, NodeStatus};
+use objectio_placement::{
+    topology::{ClusterTopology, DiskInfo, FailureDomainInfo, NodeInfo},
+    Crush2, PlacementTemplate, ShardRole,
+};
+use objectio_proto::metadata::{
+    metadata_service_server::MetadataService,
+    AbortMultipartUploadRequest, AbortMultipartUploadResponse, BucketMeta,
+    CompleteMultipartUploadRequest, CompleteMultipartUploadResponse,
+    CreateBucketRequest, CreateBucketResponse, CreateMultipartUploadRequest,
+    CreateMultipartUploadResponse, CreateObjectRequest, CreateObjectResponse,
+    DeleteBucketPolicyRequest, DeleteBucketPolicyResponse,
+    DeleteBucketRequest, DeleteBucketResponse, DeleteObjectRequest, DeleteObjectResponse,
+    ErasureType, GetBucketPolicyRequest, GetBucketPolicyResponse,
+    GetBucketRequest, GetBucketResponse, GetListingNodesRequest, GetListingNodesResponse,
+    GetObjectRequest, GetObjectResponse, GetPlacementRequest, GetPlacementResponse,
+    ListBucketsRequest, ListBucketsResponse, ListMultipartUploadsRequest,
+    ListMultipartUploadsResponse, ListObjectsRequest, ListObjectsResponse, ListingNode,
+    ListPartsRequest, ListPartsResponse, MultipartUpload, NodePlacement, ObjectMeta,
+    PartMeta, RegisterOsdRequest, RegisterOsdResponse, RegisterPartRequest, RegisterPartResponse,
+    SetBucketPolicyRequest, SetBucketPolicyResponse, ShardType, StripeMeta, VersioningState,
+    // IAM types
+    AccessKeyMeta, CreateAccessKeyRequest, CreateAccessKeyResponse, CreateUserRequest,
+    CreateUserResponse, DeleteAccessKeyRequest, DeleteAccessKeyResponse, DeleteUserRequest,
+    DeleteUserResponse, GetAccessKeyForAuthRequest, GetAccessKeyForAuthResponse,
+    GetUserRequest, GetUserResponse, KeyStatus, ListAccessKeysRequest, ListAccessKeysResponse,
+    ListUsersRequest, ListUsersResponse, UserMeta, UserStatus,
+};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use tonic::{Request, Response, Status};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+/// OSD node information for placement (legacy, kept for compatibility)
+#[derive(Clone, Debug)]
+pub struct OsdNode {
+    pub node_id: [u8; 16],
+    pub address: String,
+    pub disk_ids: Vec<[u8; 16]>,
+    /// Failure domain (region/datacenter/rack)
+    pub failure_domain: Option<(String, String, String)>,
+}
+
+/// EC configuration for a storage class
+#[derive(Clone, Debug)]
+pub enum EcConfig {
+    /// MDS (Maximum Distance Separable) Reed-Solomon
+    Mds { k: u8, m: u8 },
+    /// LRC (Locally Repairable Codes)
+    Lrc { k: u8, l: u8, g: u8 },
+    /// Simple replication (no erasure coding)
+    /// count=1: single disk, no redundancy
+    /// count=3: 3-way replication
+    Replication { count: u8 },
+}
+
+impl Default for EcConfig {
+    fn default() -> Self {
+        EcConfig::Mds { k: 4, m: 2 }
+    }
+}
+
+/// State for an in-progress multipart upload
+#[derive(Clone, Debug)]
+pub struct MultipartUploadState {
+    pub bucket: String,
+    pub key: String,
+    pub upload_id: String,
+    pub content_type: String,
+    pub user_metadata: HashMap<String, String>,
+    pub initiated: u64,
+    pub parts: HashMap<u32, PartState>,
+}
+
+/// State for a completed part within a multipart upload
+#[derive(Clone, Debug)]
+pub struct PartState {
+    pub part_number: u32,
+    pub etag: String,
+    pub size: u64,
+    pub last_modified: u64,
+    pub stripes: Vec<StripeMeta>,  // Multiple stripes for large parts
+}
+
+/// Internal user storage
+#[derive(Clone, Debug)]
+pub struct StoredUser {
+    pub user_id: String,
+    pub display_name: String,
+    pub arn: String,
+    pub status: i32,  // UserStatus enum value
+    pub created_at: u64,
+    pub email: String,
+}
+
+/// Internal access key storage
+#[derive(Clone, Debug)]
+pub struct StoredAccessKey {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub user_id: String,
+    pub status: i32,  // KeyStatus enum value
+    pub created_at: u64,
+}
+
+/// Metadata service state
+///
+/// Note: Object metadata is stored on OSDs (primary OSD for each object).
+/// The meta service only stores cluster configuration (buckets, topology, policies).
+/// ListObjects uses scatter-gather to query OSDs directly.
+pub struct MetaService {
+    /// Bucket metadata: name -> BucketMeta
+    buckets: RwLock<HashMap<String, BucketMeta>>,
+    /// Bucket policies: bucket_name -> policy_json
+    bucket_policies: RwLock<HashMap<String, String>>,
+    /// In-progress multipart uploads: upload_id -> MultipartUploadState
+    multipart_uploads: RwLock<HashMap<String, MultipartUploadState>>,
+    /// Registered OSD nodes (legacy)
+    osd_nodes: RwLock<Vec<OsdNode>>,
+    /// Cluster topology for CRUSH 2.0
+    topology: RwLock<ClusterTopology>,
+    /// CRUSH 2.0 placement engine
+    crush: RwLock<Crush2>,
+    /// Default erasure coding configuration
+    default_ec: EcConfig,
+    /// Default erasure coding parameters (for backward compat)
+    default_ec_k: u32,
+    default_ec_m: u32,
+    /// IAM: Users indexed by user_id
+    users: RwLock<HashMap<String, StoredUser>>,
+    /// IAM: Access keys indexed by access_key_id
+    access_keys: RwLock<HashMap<String, StoredAccessKey>>,
+    /// IAM: Map from user_id to their access_key_ids
+    user_keys: RwLock<HashMap<String, Vec<String>>>,
+}
+
+impl MetaService {
+    /// Create a new metadata service with default MDS 4+2 configuration
+    pub fn new() -> Self {
+        Self::with_ec_config(EcConfig::default())
+    }
+
+    /// Create a new metadata service with custom EC configuration
+    pub fn with_ec_config(ec_config: EcConfig) -> Self {
+        let topology = ClusterTopology::new();
+        let crush = Crush2::new(topology.clone(), 64); // 64 stripe groups
+
+        // For replication mode: k=1 (full data), m=0 (no parity)
+        // The gateway will skip EC encoding entirely
+        let (default_ec_k, default_ec_m) = match &ec_config {
+            EcConfig::Mds { k, m } => (*k as u32, *m as u32),
+            EcConfig::Lrc { k, l, g } => (*k as u32, (*l + *g) as u32),
+            EcConfig::Replication { count: _ } => (1, 0), // No EC, just raw data
+        };
+
+        Self {
+            buckets: RwLock::new(HashMap::new()),
+            bucket_policies: RwLock::new(HashMap::new()),
+            multipart_uploads: RwLock::new(HashMap::new()),
+            osd_nodes: RwLock::new(Vec::new()),
+            topology: RwLock::new(topology),
+            crush: RwLock::new(crush),
+            default_ec: ec_config,
+            default_ec_k,
+            default_ec_m,
+            users: RwLock::new(HashMap::new()),
+            access_keys: RwLock::new(HashMap::new()),
+            user_keys: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Create admin user if no users exist
+    pub fn ensure_admin(&self, admin_name: &str) -> Option<(String, String)> {
+        let users = self.users.read();
+        if !users.is_empty() {
+            // Users exist, check if admin already has keys
+            drop(users);
+            let user = self.users.read()
+                .values()
+                .find(|u| u.display_name == admin_name)
+                .cloned();
+            if let Some(admin_user) = user {
+                let keys = self.user_keys.read();
+                if let Some(key_ids) = keys.get(&admin_user.user_id) {
+                    if let Some(first_key_id) = key_ids.first() {
+                        if let Some(key) = self.access_keys.read().get(first_key_id) {
+                            return Some((key.access_key_id.clone(), key.secret_access_key.clone()));
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        drop(users);
+
+        // Create admin user
+        let user_id = Uuid::new_v4().to_string();
+        let now = Self::current_timestamp();
+        let user = StoredUser {
+            user_id: user_id.clone(),
+            display_name: admin_name.to_string(),
+            arn: format!("arn:objectio:iam::user/{}", admin_name),
+            status: UserStatus::UserActive as i32,
+            created_at: now,
+            email: String::new(),
+        };
+
+        self.users.write().insert(user_id.clone(), user);
+        self.user_keys.write().insert(user_id.clone(), Vec::new());
+
+        // Create access key
+        let access_key_id = Self::generate_access_key_id();
+        let secret_access_key = Self::generate_secret_access_key();
+
+        let key = StoredAccessKey {
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+            user_id: user_id.clone(),
+            status: KeyStatus::KeyActive as i32,
+            created_at: now,
+        };
+
+        self.access_keys.write().insert(access_key_id.clone(), key);
+        self.user_keys.write().entry(user_id).or_default().push(access_key_id.clone());
+
+        info!("Created admin user '{}' with access key {}", admin_name, access_key_id);
+
+        Some((access_key_id, secret_access_key))
+    }
+
+    /// Generate AWS-style access key ID (20 chars, starts with AKIA)
+    fn generate_access_key_id() -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".chars().collect();
+        let suffix: String = (0..16).map(|_| chars[rng.gen_range(0..chars.len())]).collect();
+        format!("AKIA{}", suffix)
+    }
+
+    /// Generate AWS-style secret access key (40 chars, base64-like)
+    fn generate_secret_access_key() -> String {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            .chars()
+            .collect();
+        (0..40).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
+    }
+
+    /// Register an OSD node for placement (legacy method)
+    pub fn register_osd(&self, node: OsdNode) {
+        info!(
+            "Registering OSD node: {} at {}",
+            hex::encode(&node.node_id),
+            node.address
+        );
+        self.osd_nodes.write().push(node.clone());
+
+        // Also update the CRUSH topology
+        self.update_topology_with_node(&node);
+    }
+
+    /// Update CRUSH topology with a new OSD node
+    fn update_topology_with_node(&self, osd_node: &OsdNode) {
+        let (region, dc, rack) = osd_node.failure_domain.clone()
+            .unwrap_or_else(|| ("default".to_string(), "dc1".to_string(), "rack1".to_string()));
+
+        let node_id = NodeId::from_bytes(osd_node.node_id);
+
+        let disks: Vec<DiskInfo> = osd_node.disk_ids.iter().map(|disk_id| {
+            DiskInfo {
+                id: objectio_common::DiskId::from_bytes(*disk_id),
+                path: String::new(),
+                total_capacity: 1_000_000_000_000, // 1TB default
+                used_capacity: 0,
+                status: objectio_common::DiskStatus::Healthy,
+                weight: 1.0,
+            }
+        }).collect();
+
+        let node_info = NodeInfo {
+            id: node_id,
+            name: hex::encode(&osd_node.node_id[..4]),
+            address: osd_node.address.parse().unwrap_or_else(|_| "0.0.0.0:9200".parse().unwrap()),
+            failure_domain: FailureDomainInfo::new(&region, &dc, &rack),
+            status: NodeStatus::Active,
+            disks,
+            weight: 1.0,
+            last_heartbeat: Self::current_timestamp(),
+        };
+
+        // Update topology and rebuild CRUSH
+        {
+            let mut topology = self.topology.write();
+            topology.upsert_node(node_info);
+        }
+
+        // Rebuild CRUSH with updated topology
+        {
+            let topology = self.topology.read().clone();
+            let mut crush = self.crush.write();
+            crush.update_topology(topology);
+        }
+
+        debug!("Updated CRUSH topology with node {}", hex::encode(&osd_node.node_id));
+    }
+
+    /// Generate object key for internal storage
+    fn current_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Legacy placement algorithm (fallback when no CRUSH topology)
+    async fn get_placement_legacy(
+        &self,
+        req: &GetPlacementRequest,
+    ) -> Result<Response<GetPlacementResponse>, Status> {
+        let nodes = self.osd_nodes.read();
+
+        // Determine number of shards and EC type based on config
+        let (total_shards, ec_type, replication_count) = match &self.default_ec {
+            EcConfig::Mds { k, m } => ((*k + *m) as usize, ErasureType::ErasureMds, 0u32),
+            EcConfig::Lrc { k, l, g } => ((*k + *l + *g) as usize, ErasureType::ErasureLrc, 0u32),
+            EcConfig::Replication { count } => (*count as usize, ErasureType::ErasureReplication, *count as u32),
+        };
+
+        if nodes.is_empty() {
+            return Err(Status::unavailable("no storage nodes available"));
+        }
+
+        // Collect all available disk placements (node, disk pairs)
+        let mut all_disks: Vec<(&OsdNode, &[u8; 16])> = nodes
+            .iter()
+            .flat_map(|node| node.disk_ids.iter().map(move |disk_id| (node, disk_id)))
+            .collect();
+
+        // Use object key hash for deterministic placement
+        let hash_seed = {
+            let key_bytes = format!("{}/{}", req.bucket, req.key);
+            key_bytes.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64))
+        };
+
+        // Rotate the disk list based on hash for distribution
+        if !all_disks.is_empty() {
+            let rotation = (hash_seed as usize) % all_disks.len();
+            all_disks.rotate_left(rotation);
+        }
+
+        // Select disks for each shard position, spreading across nodes
+        let mut placements: Vec<NodePlacement> = Vec::with_capacity(total_shards);
+        let mut used_nodes: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
+
+        // First pass: try to use different nodes for each shard
+        for pos in 0..total_shards {
+            if placements.len() >= total_shards {
+                break;
+            }
+
+            let disk_opt = all_disks
+                .iter()
+                .find(|(node, _)| !used_nodes.contains(&node.node_id));
+
+            if let Some((node, disk_id)) = disk_opt {
+                let pos_u32 = pos as u32;
+                placements.push(NodePlacement {
+                    position: pos_u32,
+                    node_id: node.node_id.to_vec(),
+                    node_address: node.address.clone(),
+                    disk_id: disk_id.to_vec(),
+                    shard_type: if pos_u32 < self.default_ec_k {
+                        ShardType::ShardData.into()
+                    } else {
+                        ShardType::ShardGlobalParity.into()
+                    },
+                    local_group: 0,
+                });
+                used_nodes.insert(node.node_id);
+            }
+        }
+
+        // Second pass: reuse nodes with different disks if needed
+        if placements.len() < total_shards {
+            for (node, disk_id) in all_disks.iter() {
+                if placements.len() >= total_shards {
+                    break;
+                }
+                let disk_used = placements.iter().any(|p| p.disk_id == disk_id.to_vec());
+                if !disk_used {
+                    let pos = placements.len() as u32;
+                    placements.push(NodePlacement {
+                        position: pos,
+                        node_id: node.node_id.to_vec(),
+                        node_address: node.address.clone(),
+                        disk_id: disk_id.to_vec(),
+                        shard_type: if pos < self.default_ec_k {
+                            ShardType::ShardData.into()
+                        } else {
+                            ShardType::ShardGlobalParity.into()
+                        },
+                        local_group: 0,
+                    });
+                }
+            }
+        }
+
+        // Third pass: allow disk reuse for single disk mode
+        while placements.len() < total_shards {
+            let idx = placements.len() % all_disks.len().max(1);
+            if let Some((node, disk_id)) = all_disks.get(idx) {
+                let pos = placements.len() as u32;
+                placements.push(NodePlacement {
+                    position: pos,
+                    node_id: node.node_id.to_vec(),
+                    node_address: node.address.clone(),
+                    disk_id: disk_id.to_vec(),
+                    shard_type: if pos < self.default_ec_k {
+                        ShardType::ShardData.into()
+                    } else {
+                        ShardType::ShardGlobalParity.into()
+                    },
+                    local_group: 0,
+                });
+            } else {
+                break;
+            }
+        }
+
+        debug!(
+            "Legacy placement for {}/{}: {} shards across {} nodes",
+            req.bucket, req.key, placements.len(), used_nodes.len()
+        );
+
+        Ok(Response::new(GetPlacementResponse {
+            storage_class: "STANDARD".to_string(),
+            ec_k: self.default_ec_k,
+            ec_m: self.default_ec_m,
+            nodes: placements,
+            ec_type: ec_type.into(),
+            ec_local_parity: 0,
+            ec_global_parity: self.default_ec_m,
+            local_group_size: 0,
+            replication_count,
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl MetadataService for MetaService {
+    async fn create_bucket(
+        &self,
+        request: Request<CreateBucketRequest>,
+    ) -> Result<Response<CreateBucketResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.name.is_empty() {
+            return Err(Status::invalid_argument("bucket name is required"));
+        }
+
+        // Check if bucket already exists
+        if self.buckets.read().contains_key(&req.name) {
+            return Err(Status::already_exists("bucket already exists"));
+        }
+
+        let bucket = BucketMeta {
+            name: req.name.clone(),
+            owner: req.owner,
+            created_at: Self::current_timestamp(),
+            storage_class: if req.storage_class.is_empty() {
+                "STANDARD".to_string()
+            } else {
+                req.storage_class
+            },
+            versioning: VersioningState::VersioningDisabled.into(),
+        };
+
+        self.buckets.write().insert(req.name.clone(), bucket.clone());
+
+        info!("Created bucket: {}", req.name);
+
+        Ok(Response::new(CreateBucketResponse {
+            bucket: Some(bucket),
+        }))
+    }
+
+    async fn delete_bucket(
+        &self,
+        request: Request<DeleteBucketRequest>,
+    ) -> Result<Response<DeleteBucketResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.name) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        // Note: The check for whether bucket is empty should be done by the Gateway
+        // using scatter-gather before calling delete_bucket. Object metadata is stored
+        // on OSDs, so we can't check emptiness from the meta service.
+
+        self.buckets.write().remove(&req.name);
+
+        info!("Deleted bucket: {}", req.name);
+
+        Ok(Response::new(DeleteBucketResponse { success: true }))
+    }
+
+    async fn get_bucket(
+        &self,
+        request: Request<GetBucketRequest>,
+    ) -> Result<Response<GetBucketResponse>, Status> {
+        let req = request.into_inner();
+
+        let bucket = self
+            .buckets
+            .read()
+            .get(&req.name)
+            .cloned()
+            .ok_or_else(|| Status::not_found("bucket not found"))?;
+
+        Ok(Response::new(GetBucketResponse {
+            bucket: Some(bucket),
+        }))
+    }
+
+    async fn list_buckets(
+        &self,
+        request: Request<ListBucketsRequest>,
+    ) -> Result<Response<ListBucketsResponse>, Status> {
+        let req = request.into_inner();
+
+        let buckets: Vec<BucketMeta> = self
+            .buckets
+            .read()
+            .values()
+            .filter(|b| req.owner.is_empty() || b.owner == req.owner)
+            .cloned()
+            .collect();
+
+        Ok(Response::new(ListBucketsResponse { buckets }))
+    }
+
+    /// DEPRECATED: Object metadata is now stored on primary OSD
+    /// This RPC is kept for backward compatibility but does nothing
+    async fn create_object(
+        &self,
+        request: Request<CreateObjectRequest>,
+    ) -> Result<Response<CreateObjectResponse>, Status> {
+        let req = request.into_inner();
+        warn!(
+            "create_object called (deprecated): {}/{}. Object metadata should be stored on primary OSD.",
+            req.bucket, req.key
+        );
+        // Return success but don't store anything - OSD is source of truth
+        Ok(Response::new(CreateObjectResponse { object: None }))
+    }
+
+    /// DEPRECATED: Object metadata is now stored on primary OSD
+    /// This RPC is kept for backward compatibility but does nothing
+    async fn delete_object(
+        &self,
+        request: Request<DeleteObjectRequest>,
+    ) -> Result<Response<DeleteObjectResponse>, Status> {
+        let req = request.into_inner();
+        warn!(
+            "delete_object called (deprecated): {}/{}. Object metadata should be deleted from primary OSD.",
+            req.bucket, req.key
+        );
+        // Return success - OSD is source of truth
+        Ok(Response::new(DeleteObjectResponse {
+            success: true,
+            version_id: String::new(),
+        }))
+    }
+
+    /// DEPRECATED: Object metadata is now stored on primary OSD
+    /// Use scatter-gather to query OSDs directly
+    async fn get_object(
+        &self,
+        _request: Request<GetObjectRequest>,
+    ) -> Result<Response<GetObjectResponse>, Status> {
+        // Object metadata is stored on primary OSD, not in meta service
+        Err(Status::unimplemented(
+            "Object metadata is stored on primary OSD. Use GetObjectMeta RPC on OSD.",
+        ))
+    }
+
+    /// DEPRECATED: Use scatter-gather to query OSDs directly
+    /// The meta service no longer maintains an object index
+    async fn list_objects(
+        &self,
+        _request: Request<ListObjectsRequest>,
+    ) -> Result<Response<ListObjectsResponse>, Status> {
+        // ListObjects should use scatter-gather to query OSDs directly
+        Err(Status::unimplemented(
+            "ListObjects should use scatter-gather via Gateway. Use GetListingNodes + ListObjectsMeta on OSDs.",
+        ))
+    }
+
+    async fn get_placement(
+        &self,
+        request: Request<GetPlacementRequest>,
+    ) -> Result<Response<GetPlacementResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if we have any nodes in the topology
+        let active_node_count = {
+            let topology = self.topology.read();
+            topology.active_nodes().count()
+        };
+
+        if active_node_count == 0 {
+            // Fall back to legacy placement if no CRUSH topology
+            return self.get_placement_legacy(&req).await;
+        }
+
+        // Create object ID from bucket/key for deterministic placement
+        let object_id = {
+            let key_str = format!("{}/{}", req.bucket, req.key);
+            let hash = xxhash_rust::xxh64::xxh64(key_str.as_bytes(), 0);
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&hash.to_le_bytes());
+            bytes[8..16].copy_from_slice(&hash.to_be_bytes());
+            objectio_common::ObjectId::from_uuid(Uuid::from_bytes(bytes))
+        };
+
+        // Select placement template based on EC configuration
+        let (template, ec_type, ec_k, ec_local_parity, ec_global_parity, local_group_size, replication_count) =
+            match &self.default_ec {
+                EcConfig::Mds { k, m } => (
+                    PlacementTemplate::mds(*k, *m),
+                    ErasureType::ErasureMds,
+                    *k as u32,
+                    0u32,
+                    *m as u32,
+                    0u32,
+                    0u32, // Not replication mode
+                ),
+                EcConfig::Lrc { k, l, g } => (
+                    PlacementTemplate::lrc(*k, *l, *g),
+                    ErasureType::ErasureLrc,
+                    *k as u32,
+                    *l as u32,
+                    *g as u32,
+                    (*k / *l) as u32,
+                    0u32, // Not replication mode
+                ),
+                EcConfig::Replication { count } => (
+                    // For replication, we need 'count' replicas
+                    // Use MDS template with k=count (each is a full copy) and m=0
+                    PlacementTemplate::mds(*count, 0),
+                    ErasureType::ErasureReplication,
+                    1u32,  // ec_k=1: single data shard (full data)
+                    0u32,  // No local parity
+                    0u32,  // No global parity
+                    0u32,  // No local groups
+                    *count as u32, // Replication count
+                ),
+            };
+
+        // Use CRUSH 2.0 for placement
+        let crush = self.crush.read();
+        let hrw_placements = crush.select_placement(&object_id, &template);
+        drop(crush);
+
+        // Convert HRW placements to NodePlacement responses
+        let nodes = self.osd_nodes.read();
+        let placements: Vec<NodePlacement> = hrw_placements
+            .iter()
+            .map(|hrw| {
+                // Find the OSD node by NodeId
+                let node = nodes.iter().find(|n| {
+                    NodeId::from_bytes(n.node_id) == hrw.node_id
+                });
+
+                let (node_address, disk_id) = match node {
+                    Some(n) => {
+                        let disk = n.disk_ids.first().map(|d| d.to_vec())
+                            .unwrap_or_else(|| vec![0u8; 16]);
+                        (n.address.clone(), disk)
+                    }
+                    None => {
+                        // Node not found in legacy list, use placeholder
+                        warn!("Node {} not found in OSD list", hrw.node_id);
+                        (String::new(), hrw.node_id.as_bytes().to_vec())
+                    }
+                };
+
+                let shard_type = match hrw.role {
+                    ShardRole::Data => ShardType::ShardData.into(),
+                    ShardRole::LocalParity => ShardType::ShardLocalParity.into(),
+                    ShardRole::GlobalParity => ShardType::ShardGlobalParity.into(),
+                };
+
+                NodePlacement {
+                    position: hrw.position as u32,
+                    node_id: hrw.node_id.as_bytes().to_vec(),
+                    node_address,
+                    disk_id,
+                    shard_type,
+                    local_group: hrw.local_group.unwrap_or(0) as u32,
+                }
+            })
+            .collect();
+
+        debug!(
+            "CRUSH 2.0 placement for {}/{}: {} shards using {:?}",
+            req.bucket,
+            req.key,
+            placements.len(),
+            ec_type
+        );
+
+        Ok(Response::new(GetPlacementResponse {
+            storage_class: req.storage_class.clone(),
+            ec_k,
+            ec_m: ec_local_parity + ec_global_parity,
+            nodes: placements,
+            ec_type: ec_type.into(),
+            ec_local_parity,
+            ec_global_parity,
+            local_group_size,
+            replication_count,
+        }))
+    }
+
+    async fn create_multipart_upload(
+        &self,
+        request: Request<CreateMultipartUploadRequest>,
+    ) -> Result<Response<CreateMultipartUploadResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.bucket) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        let upload_id = Uuid::new_v4().to_string();
+        let now = Self::current_timestamp();
+
+        // Store the multipart upload state
+        let state = MultipartUploadState {
+            bucket: req.bucket.clone(),
+            key: req.key.clone(),
+            upload_id: upload_id.clone(),
+            content_type: req.content_type.clone(),
+            user_metadata: req.user_metadata.clone(),
+            initiated: now,
+            parts: HashMap::new(),
+        };
+        self.multipart_uploads.write().insert(upload_id.clone(), state);
+
+        info!("Created multipart upload: bucket={}, key={}, upload_id={}",
+            req.bucket, req.key, upload_id);
+
+        Ok(Response::new(CreateMultipartUploadResponse {
+            upload_id,
+            bucket: req.bucket,
+            key: req.key,
+        }))
+    }
+
+    async fn register_part(
+        &self,
+        request: Request<RegisterPartRequest>,
+    ) -> Result<Response<RegisterPartResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate part number (S3 allows 1-10,000)
+        if req.part_number == 0 || req.part_number > 10000 {
+            return Err(Status::invalid_argument("part number must be between 1 and 10000"));
+        }
+
+        let now = Self::current_timestamp();
+
+        // Find and update the multipart upload
+        let mut uploads = self.multipart_uploads.write();
+        let upload = uploads.get_mut(&req.upload_id).ok_or_else(|| {
+            Status::not_found(format!("multipart upload not found: {}", req.upload_id))
+        })?;
+
+        // Verify bucket/key match
+        if upload.bucket != req.bucket || upload.key != req.key {
+            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+        }
+
+        // Register the part (overwrites if same part_number uploaded again)
+        let part_state = PartState {
+            part_number: req.part_number,
+            etag: req.etag.clone(),
+            size: req.size,
+            last_modified: now,
+            stripes: req.stripes,  // Multiple stripes for large parts
+        };
+        upload.parts.insert(req.part_number, part_state);
+
+        debug!("Registered part {} for upload {}: size={}, etag={}",
+            req.part_number, req.upload_id, req.size, req.etag);
+
+        Ok(Response::new(RegisterPartResponse {
+            success: true,
+            etag: req.etag,
+        }))
+    }
+
+    async fn list_parts(
+        &self,
+        request: Request<ListPartsRequest>,
+    ) -> Result<Response<ListPartsResponse>, Status> {
+        let req = request.into_inner();
+
+        let uploads = self.multipart_uploads.read();
+        let upload = uploads.get(&req.upload_id).ok_or_else(|| {
+            Status::not_found(format!("multipart upload not found: {}", req.upload_id))
+        })?;
+
+        // Verify bucket/key match
+        if upload.bucket != req.bucket || upload.key != req.key {
+            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+        }
+
+        // Get parts sorted by part number, starting after marker
+        let max_parts = if req.max_parts == 0 { 1000 } else { req.max_parts.min(1000) };
+        let marker = req.part_number_marker;
+
+        let mut parts: Vec<PartMeta> = upload.parts.values()
+            .filter(|p| p.part_number > marker)
+            .map(|p| PartMeta {
+                part_number: p.part_number,
+                etag: p.etag.clone(),
+                size: p.size,
+                last_modified: p.last_modified,
+                stripes: p.stripes.clone(),  // Multiple stripes for large parts
+            })
+            .collect();
+
+        parts.sort_by_key(|p| p.part_number);
+
+        let is_truncated = parts.len() > max_parts as usize;
+        let parts: Vec<PartMeta> = parts.into_iter().take(max_parts as usize).collect();
+        let next_marker = parts.last().map(|p| p.part_number).unwrap_or(0);
+
+        Ok(Response::new(ListPartsResponse {
+            parts,
+            is_truncated,
+            next_part_number_marker: next_marker,
+            bucket: upload.bucket.clone(),
+            key: upload.key.clone(),
+            upload_id: upload.upload_id.clone(),
+        }))
+    }
+
+    /// Complete multipart upload
+    /// Validates parts and builds final object metadata with all stripes
+    async fn complete_multipart_upload(
+        &self,
+        request: Request<CompleteMultipartUploadRequest>,
+    ) -> Result<Response<CompleteMultipartUploadResponse>, Status> {
+        let req = request.into_inner();
+
+        // Get the upload state
+        let upload = {
+            let uploads = self.multipart_uploads.read();
+            uploads.get(&req.upload_id).cloned().ok_or_else(|| {
+                Status::not_found(format!("multipart upload not found: {}", req.upload_id))
+            })?
+        };
+
+        // Verify bucket/key match
+        if upload.bucket != req.bucket || upload.key != req.key {
+            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+        }
+
+        // Validate that all requested parts exist and ETags match
+        let mut stripes = Vec::new();
+        let mut total_size = 0u64;
+
+        for part_info in &req.parts {
+            let stored_part = upload.parts.get(&part_info.part_number).ok_or_else(|| {
+                Status::invalid_argument(format!("part {} not found", part_info.part_number))
+            })?;
+
+            // Verify ETag matches (normalize by removing quotes)
+            let req_etag = part_info.etag.trim_matches('"');
+            let stored_etag = stored_part.etag.trim_matches('"');
+            if req_etag != stored_etag {
+                return Err(Status::invalid_argument(format!(
+                    "ETag mismatch for part {}: expected {}, got {}",
+                    part_info.part_number, stored_etag, req_etag
+                )));
+            }
+
+            total_size += stored_part.size;
+
+            // Add all stripes for this part (large parts may have multiple stripes)
+            stripes.extend(stored_part.stripes.clone());
+        }
+
+        // Calculate multipart ETag: MD5 of concatenated part MD5s + "-" + part count
+        let final_etag = {
+            let mut concatenated_hashes = Vec::new();
+            for part_info in &req.parts {
+                if let Some(stored_part) = upload.parts.get(&part_info.part_number) {
+                    // Decode hex ETag and add to concatenated bytes
+                    let etag_clean = stored_part.etag.trim_matches('"');
+                    if let Ok(bytes) = hex::decode(etag_clean) {
+                        concatenated_hashes.extend(bytes);
+                    }
+                }
+            }
+            let hash = md5::compute(&concatenated_hashes);
+            format!("\"{:x}-{}\"", hash, req.parts.len())
+        };
+
+        let object_id = *Uuid::new_v4().as_bytes();
+        let now = Self::current_timestamp();
+
+        let object = ObjectMeta {
+            bucket: req.bucket.clone(),
+            key: req.key.clone(),
+            object_id: object_id.to_vec(),
+            size: total_size,
+            etag: final_etag,
+            content_type: upload.content_type.clone(),
+            created_at: upload.initiated,
+            modified_at: now,
+            storage_class: "STANDARD".to_string(),
+            user_metadata: upload.user_metadata.clone(),
+            version_id: String::new(),
+            is_delete_marker: false,
+            stripes,
+        };
+
+        // Remove the completed upload from state
+        self.multipart_uploads.write().remove(&req.upload_id);
+
+        info!("Completed multipart upload: bucket={}, key={}, upload_id={}, size={}, parts={}",
+            req.bucket, req.key, req.upload_id, total_size, req.parts.len());
+
+        Ok(Response::new(CompleteMultipartUploadResponse {
+            object: Some(object),
+        }))
+    }
+
+    async fn abort_multipart_upload(
+        &self,
+        request: Request<AbortMultipartUploadRequest>,
+    ) -> Result<Response<AbortMultipartUploadResponse>, Status> {
+        let req = request.into_inner();
+
+        // Remove the upload from state
+        let removed = self.multipart_uploads.write().remove(&req.upload_id);
+
+        if removed.is_some() {
+            info!("Aborted multipart upload: bucket={}, key={}, upload_id={}",
+                req.bucket, req.key, req.upload_id);
+        } else {
+            debug!("Abort for unknown upload_id={} (may already be completed)", req.upload_id);
+        }
+
+        // Note: Part data on OSDs should be cleaned up by background garbage collection
+        // using the __mpu/{upload_id}/* prefix
+
+        Ok(Response::new(AbortMultipartUploadResponse { success: true }))
+    }
+
+    async fn list_multipart_uploads(
+        &self,
+        request: Request<ListMultipartUploadsRequest>,
+    ) -> Result<Response<ListMultipartUploadsResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.bucket) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        let max_uploads = if req.max_uploads == 0 { 1000 } else { req.max_uploads.min(1000) };
+
+        // Filter and collect uploads for this bucket
+        let uploads_lock = self.multipart_uploads.read();
+        let mut uploads: Vec<MultipartUpload> = uploads_lock.values()
+            .filter(|u| u.bucket == req.bucket)
+            .filter(|u| req.prefix.is_empty() || u.key.starts_with(&req.prefix))
+            .filter(|u| {
+                if req.key_marker.is_empty() {
+                    true
+                } else if u.key > req.key_marker {
+                    true
+                } else if u.key == req.key_marker && !req.upload_id_marker.is_empty() {
+                    u.upload_id > req.upload_id_marker
+                } else {
+                    false
+                }
+            })
+            .map(|u| MultipartUpload {
+                key: u.key.clone(),
+                upload_id: u.upload_id.clone(),
+                initiated: u.initiated,
+                storage_class: "STANDARD".to_string(),
+            })
+            .collect();
+
+        // Sort by key, then upload_id
+        uploads.sort_by(|a, b| {
+            a.key.cmp(&b.key).then_with(|| a.upload_id.cmp(&b.upload_id))
+        });
+
+        let is_truncated = uploads.len() > max_uploads as usize;
+        let uploads: Vec<MultipartUpload> = uploads.into_iter().take(max_uploads as usize).collect();
+
+        let (next_key_marker, next_upload_id_marker) = uploads.last()
+            .map(|u| (u.key.clone(), u.upload_id.clone()))
+            .unwrap_or_default();
+
+        Ok(Response::new(ListMultipartUploadsResponse {
+            uploads,
+            next_key_marker,
+            next_upload_id_marker,
+            is_truncated,
+        }))
+    }
+
+    async fn set_bucket_policy(
+        &self,
+        request: Request<SetBucketPolicyRequest>,
+    ) -> Result<Response<SetBucketPolicyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.bucket) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        // Validate that the policy is valid JSON
+        if serde_json::from_str::<serde_json::Value>(&req.policy_json).is_err() {
+            return Err(Status::invalid_argument("invalid policy JSON"));
+        }
+
+        self.bucket_policies
+            .write()
+            .insert(req.bucket.clone(), req.policy_json);
+
+        info!("Set bucket policy for: {}", req.bucket);
+
+        Ok(Response::new(SetBucketPolicyResponse { success: true }))
+    }
+
+    async fn get_bucket_policy(
+        &self,
+        request: Request<GetBucketPolicyRequest>,
+    ) -> Result<Response<GetBucketPolicyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.bucket) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        let policies = self.bucket_policies.read();
+        let (policy_json, has_policy) = match policies.get(&req.bucket) {
+            Some(policy) => (policy.clone(), true),
+            None => (String::new(), false),
+        };
+
+        Ok(Response::new(GetBucketPolicyResponse {
+            policy_json,
+            has_policy,
+        }))
+    }
+
+    async fn delete_bucket_policy(
+        &self,
+        request: Request<DeleteBucketPolicyRequest>,
+    ) -> Result<Response<DeleteBucketPolicyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Check if bucket exists
+        if !self.buckets.read().contains_key(&req.bucket) {
+            return Err(Status::not_found("bucket not found"));
+        }
+
+        self.bucket_policies.write().remove(&req.bucket);
+
+        info!("Deleted bucket policy for: {}", req.bucket);
+
+        Ok(Response::new(DeleteBucketPolicyResponse { success: true }))
+    }
+
+    async fn register_osd(
+        &self,
+        request: Request<RegisterOsdRequest>,
+    ) -> Result<Response<RegisterOsdResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate node_id is 16 bytes
+        if req.node_id.len() != 16 {
+            return Err(Status::invalid_argument("node_id must be 16 bytes"));
+        }
+
+        let mut node_id = [0u8; 16];
+        node_id.copy_from_slice(&req.node_id);
+
+        // Parse disk IDs
+        let mut disk_ids = Vec::new();
+        for disk_id in &req.disk_ids {
+            if disk_id.len() != 16 {
+                return Err(Status::invalid_argument("disk_id must be 16 bytes"));
+            }
+            let mut id = [0u8; 16];
+            id.copy_from_slice(disk_id);
+            disk_ids.push(id);
+        }
+
+        // Register the OSD
+        let num_disks = disk_ids.len();
+        let node = OsdNode {
+            node_id,
+            address: req.address.clone(),
+            disk_ids,
+            failure_domain: None,
+        };
+
+        // Check if node already exists and update, or add new
+        let mut nodes = self.osd_nodes.write();
+        if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
+            existing.address = node.address.clone();
+            existing.disk_ids = node.disk_ids;
+            info!("Updated OSD registration: {} at {}", hex::encode(node_id), req.address);
+        } else {
+            info!("Registered new OSD: {} at {} with {} disks",
+                hex::encode(node_id), req.address, num_disks);
+            nodes.push(node);
+        }
+
+        // Get current topology version
+        let topology_version = self.topology.read().version;
+
+        Ok(Response::new(RegisterOsdResponse {
+            success: true,
+            topology_version,
+        }))
+    }
+
+    /// Get all active nodes for scatter-gather listing operations
+    async fn get_listing_nodes(
+        &self,
+        _request: Request<GetListingNodesRequest>,
+    ) -> Result<Response<GetListingNodesResponse>, Status> {
+        let topology = self.topology.read();
+        let osd_nodes = self.osd_nodes.read();
+
+        // Collect all active nodes from topology
+        let mut nodes: Vec<ListingNode> = topology
+            .active_nodes()
+            .enumerate()
+            .map(|(idx, node)| ListingNode {
+                node_id: node.id.as_bytes().to_vec(),
+                address: format!("http://{}", node.address),
+                shard_id: idx as u32, // Assign logical shard IDs in order
+            })
+            .collect();
+
+        // Also include legacy OSD nodes if no topology nodes exist
+        if nodes.is_empty() {
+            nodes = osd_nodes
+                .iter()
+                .enumerate()
+                .map(|(idx, node)| ListingNode {
+                    node_id: node.node_id.to_vec(),
+                    address: node.address.clone(),
+                    shard_id: idx as u32,
+                })
+                .collect();
+        }
+
+        debug!(
+            "GetListingNodes: returning {} nodes (topology_version={})",
+            nodes.len(),
+            topology.version
+        );
+
+        Ok(Response::new(GetListingNodesResponse {
+            nodes,
+            topology_version: topology.version,
+        }))
+    }
+
+    // =========== IAM Operations ===========
+
+    async fn create_user(
+        &self,
+        request: Request<CreateUserRequest>,
+    ) -> Result<Response<CreateUserResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.display_name.is_empty() {
+            return Err(Status::invalid_argument("display_name is required"));
+        }
+
+        // Check if user with same name exists
+        if self.users.read().values().any(|u| u.display_name == req.display_name) {
+            return Err(Status::already_exists("user with this name already exists"));
+        }
+
+        let user_id = Uuid::new_v4().to_string();
+        let now = Self::current_timestamp();
+
+        let user = StoredUser {
+            user_id: user_id.clone(),
+            display_name: req.display_name.clone(),
+            arn: format!("arn:objectio:iam::user/{}", req.display_name),
+            status: UserStatus::UserActive as i32,
+            created_at: now,
+            email: req.email.clone(),
+        };
+
+        self.users.write().insert(user_id.clone(), user.clone());
+        self.user_keys.write().insert(user_id.clone(), Vec::new());
+
+        info!("Created user: {}", req.display_name);
+
+        Ok(Response::new(CreateUserResponse {
+            user: Some(UserMeta {
+                user_id: user.user_id,
+                display_name: user.display_name,
+                arn: user.arn,
+                status: user.status,
+                created_at: user.created_at,
+                email: user.email,
+            }),
+        }))
+    }
+
+    async fn get_user(
+        &self,
+        request: Request<GetUserRequest>,
+    ) -> Result<Response<GetUserResponse>, Status> {
+        let req = request.into_inner();
+
+        let user = self.users.read()
+            .get(&req.user_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("user not found"))?;
+
+        Ok(Response::new(GetUserResponse {
+            user: Some(UserMeta {
+                user_id: user.user_id,
+                display_name: user.display_name,
+                arn: user.arn,
+                status: user.status,
+                created_at: user.created_at,
+                email: user.email,
+            }),
+        }))
+    }
+
+    async fn list_users(
+        &self,
+        request: Request<ListUsersRequest>,
+    ) -> Result<Response<ListUsersResponse>, Status> {
+        let req = request.into_inner();
+        let max_results = if req.max_results == 0 { 100 } else { req.max_results.min(1000) };
+
+        let users: Vec<UserMeta> = self.users.read()
+            .values()
+            .filter(|u| req.marker.is_empty() || u.user_id > req.marker)
+            .filter(|u| u.status != UserStatus::UserDeleted as i32)
+            .take(max_results as usize + 1)
+            .map(|u| UserMeta {
+                user_id: u.user_id.clone(),
+                display_name: u.display_name.clone(),
+                arn: u.arn.clone(),
+                status: u.status,
+                created_at: u.created_at,
+                email: u.email.clone(),
+            })
+            .collect();
+
+        let is_truncated = users.len() > max_results as usize;
+        let users: Vec<UserMeta> = users.into_iter().take(max_results as usize).collect();
+        let next_marker = users.last().map(|u| u.user_id.clone()).unwrap_or_default();
+
+        Ok(Response::new(ListUsersResponse {
+            users,
+            next_marker: if is_truncated { next_marker } else { String::new() },
+            is_truncated,
+        }))
+    }
+
+    async fn delete_user(
+        &self,
+        request: Request<DeleteUserRequest>,
+    ) -> Result<Response<DeleteUserResponse>, Status> {
+        let req = request.into_inner();
+
+        // Mark user as deleted (don't remove for audit trail)
+        let mut users = self.users.write();
+        let user = users.get_mut(&req.user_id)
+            .ok_or_else(|| Status::not_found("user not found"))?;
+        user.status = UserStatus::UserDeleted as i32;
+
+        // Deactivate all user's keys
+        let key_ids: Vec<String> = self.user_keys.read()
+            .get(&req.user_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut keys = self.access_keys.write();
+        for key_id in key_ids {
+            if let Some(key) = keys.get_mut(&key_id) {
+                key.status = KeyStatus::KeyInactive as i32;
+            }
+        }
+
+        info!("Deleted user: {}", req.user_id);
+
+        Ok(Response::new(DeleteUserResponse { success: true }))
+    }
+
+    async fn create_access_key(
+        &self,
+        request: Request<CreateAccessKeyRequest>,
+    ) -> Result<Response<CreateAccessKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        // Verify user exists and is active
+        let user = self.users.read()
+            .get(&req.user_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("user not found"))?;
+
+        if user.status != UserStatus::UserActive as i32 {
+            return Err(Status::failed_precondition("user is not active"));
+        }
+
+        let now = Self::current_timestamp();
+        let access_key_id = Self::generate_access_key_id();
+        let secret_access_key = Self::generate_secret_access_key();
+
+        let key = StoredAccessKey {
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+            user_id: req.user_id.clone(),
+            status: KeyStatus::KeyActive as i32,
+            created_at: now,
+        };
+
+        self.access_keys.write().insert(access_key_id.clone(), key.clone());
+        self.user_keys.write()
+            .entry(req.user_id.clone())
+            .or_default()
+            .push(access_key_id.clone());
+
+        info!("Created access key {} for user {}", access_key_id, req.user_id);
+
+        Ok(Response::new(CreateAccessKeyResponse {
+            access_key: Some(AccessKeyMeta {
+                access_key_id: key.access_key_id,
+                secret_access_key: key.secret_access_key, // Only returned on creation
+                user_id: key.user_id,
+                status: key.status,
+                created_at: key.created_at,
+            }),
+        }))
+    }
+
+    async fn list_access_keys(
+        &self,
+        request: Request<ListAccessKeysRequest>,
+    ) -> Result<Response<ListAccessKeysResponse>, Status> {
+        let req = request.into_inner();
+
+        let key_ids = self.user_keys.read()
+            .get(&req.user_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let keys = self.access_keys.read();
+        let access_keys: Vec<AccessKeyMeta> = key_ids.iter()
+            .filter_map(|id| keys.get(id))
+            .map(|k| AccessKeyMeta {
+                access_key_id: k.access_key_id.clone(),
+                secret_access_key: String::new(), // Don't return secret in list
+                user_id: k.user_id.clone(),
+                status: k.status,
+                created_at: k.created_at,
+            })
+            .collect();
+
+        Ok(Response::new(ListAccessKeysResponse { access_keys }))
+    }
+
+    async fn delete_access_key(
+        &self,
+        request: Request<DeleteAccessKeyRequest>,
+    ) -> Result<Response<DeleteAccessKeyResponse>, Status> {
+        let req = request.into_inner();
+
+        let key = self.access_keys.write().remove(&req.access_key_id);
+        if let Some(key) = key {
+            // Remove from user_keys
+            if let Some(keys) = self.user_keys.write().get_mut(&key.user_id) {
+                keys.retain(|id| id != &req.access_key_id);
+            }
+            info!("Deleted access key: {}", req.access_key_id);
+            Ok(Response::new(DeleteAccessKeyResponse { success: true }))
+        } else {
+            Err(Status::not_found("access key not found"))
+        }
+    }
+
+    async fn get_access_key_for_auth(
+        &self,
+        request: Request<GetAccessKeyForAuthRequest>,
+    ) -> Result<Response<GetAccessKeyForAuthResponse>, Status> {
+        let req = request.into_inner();
+
+        let key = self.access_keys.read()
+            .get(&req.access_key_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("access key not found"))?;
+
+        if key.status != KeyStatus::KeyActive as i32 {
+            return Err(Status::permission_denied("access key is inactive"));
+        }
+
+        let user = self.users.read()
+            .get(&key.user_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("user not found"))?;
+
+        if user.status != UserStatus::UserActive as i32 {
+            return Err(Status::permission_denied("user is not active"));
+        }
+
+        Ok(Response::new(GetAccessKeyForAuthResponse {
+            access_key: Some(AccessKeyMeta {
+                access_key_id: key.access_key_id,
+                secret_access_key: key.secret_access_key, // Include for auth verification
+                user_id: key.user_id,
+                status: key.status,
+                created_at: key.created_at,
+            }),
+            user: Some(UserMeta {
+                user_id: user.user_id,
+                display_name: user.display_name,
+                arn: user.arn,
+                status: user.status,
+                created_at: user.created_at,
+                email: user.email,
+            }),
+        }))
+    }
+}

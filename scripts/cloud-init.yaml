@@ -1,0 +1,302 @@
+#cloud-config
+#
+# ObjectIO Test VM Cloud-Init Configuration
+# Creates an Ubuntu 24.04 VM with 8 virtual disks for testing storage nodes
+#
+package_update: true
+package_upgrade: false
+
+packages:
+  - build-essential
+  - curl
+  - git
+  - util-linux
+  - e2fsprogs
+  - parted
+
+write_files:
+  # Main disk setup script
+  - path: /usr/local/bin/setup-objectio-disks.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      #
+      # Setup script for ObjectIO virtual disks
+      # Creates sparse files and loop devices for testing storage nodes
+      #
+      set -euo pipefail
+
+      DISK_DIR="/var/lib/objectio/disks"
+      NUM_DISKS=8
+      DISK_SIZE_GB=10
+      SUPERBLOCK_SIZE=4096  # 4KB superblock
+      LOOP_BASE=10  # Start from loop10 to avoid conflicts
+
+      log_info() {
+          echo "[INFO] $1"
+      }
+
+      log_error() {
+          echo "[ERROR] $1" >&2
+      }
+
+      create_disk_directory() {
+          log_info "Creating disk directory: $DISK_DIR"
+          mkdir -p "$DISK_DIR"
+          chmod 755 "$DISK_DIR"
+      }
+
+      create_sparse_disk() {
+          local disk_num=$1
+          local disk_file="${DISK_DIR}/disk${disk_num}.img"
+          local size_bytes=$((DISK_SIZE_GB * 1024 * 1024 * 1024))
+
+          if [[ -f "$disk_file" ]]; then
+              log_info "Disk $disk_num already exists: $disk_file"
+              return 0
+          fi
+
+          log_info "Creating sparse disk $disk_num: $disk_file (${DISK_SIZE_GB}GB)"
+
+          # Create sparse file using truncate (doesn't allocate actual space)
+          truncate -s "${size_bytes}" "$disk_file"
+
+          # Set permissions for raw I/O access
+          chmod 666 "$disk_file"
+
+          log_info "Disk $disk_num created successfully"
+      }
+
+      write_superblock() {
+          local disk_num=$1
+          local disk_file="${DISK_DIR}/disk${disk_num}.img"
+
+          log_info "Writing superblock placeholder to disk $disk_num"
+
+          # Create a 4KB superblock with ObjectIO magic number and metadata
+          # Layout:
+          #   Bytes 0-7:   Magic number "OBJIO001" (8 bytes)
+          #   Bytes 8-11:  Version (uint32 LE) = 1
+          #   Bytes 12-15: Disk ID (uint32 LE) = disk_num
+          #   Bytes 16-23: Created timestamp (uint64 LE) = seconds since epoch
+          #   Bytes 24-4095: Reserved (zeros)
+
+          local timestamp=$(date +%s)
+
+          # Write magic number
+          echo -n "OBJIO001" | dd of="$disk_file" bs=1 count=8 conv=notrunc 2>/dev/null
+
+          # Write version (little-endian 4 bytes) = 1
+          printf '\x01\x00\x00\x00' | dd of="$disk_file" bs=1 seek=8 count=4 conv=notrunc 2>/dev/null
+
+          # Write disk ID (little-endian 4 bytes)
+          printf "\\x$(printf '%02x' $disk_num)\\x00\\x00\\x00" | dd of="$disk_file" bs=1 seek=12 count=4 conv=notrunc 2>/dev/null
+
+          # Write timestamp (little-endian 8 bytes)
+          for i in 0 1 2 3 4 5 6 7; do
+              byte=$(( (timestamp >> (i * 8)) & 0xFF ))
+              printf "\\x$(printf '%02x' $byte)" | dd of="$disk_file" bs=1 seek=$((16 + i)) count=1 conv=notrunc 2>/dev/null
+          done
+
+          log_info "Superblock written to disk $disk_num"
+      }
+
+      setup_loop_device() {
+          local disk_num=$1
+          local disk_file="${DISK_DIR}/disk${disk_num}.img"
+          local loop_num=$((LOOP_BASE + disk_num))
+          local loop_device="/dev/loop${loop_num}"
+
+          # Create loop device node if it doesn't exist
+          if [[ ! -e "$loop_device" ]]; then
+              log_info "Creating loop device node $loop_device"
+              mknod "$loop_device" b 7 "$loop_num" 2>/dev/null || true
+          fi
+
+          # Check if already attached to our file
+          if losetup "$loop_device" 2>/dev/null | grep -q "$disk_file"; then
+              log_info "Loop device $loop_device already attached to $disk_file"
+              return 0
+          fi
+
+          # Detach if attached to something else
+          if losetup "$loop_device" 2>/dev/null | grep -q "/"; then
+              log_info "Detaching existing loop device $loop_device"
+              losetup -d "$loop_device" 2>/dev/null || true
+          fi
+
+          log_info "Setting up loop device $loop_device for $disk_file"
+          losetup "$loop_device" "$disk_file"
+
+          # Set permissions for raw I/O
+          chmod 666 "$loop_device"
+
+          log_info "Loop device $loop_device ready"
+      }
+
+      verify_superblock() {
+          local disk_num=$1
+          local disk_file="${DISK_DIR}/disk${disk_num}.img"
+
+          if [[ ! -f "$disk_file" ]]; then
+              echo "NOT FOUND"
+              return 1
+          fi
+
+          local magic=$(head -c 8 "$disk_file" 2>/dev/null || echo "")
+          if [[ "$magic" == "OBJIO001" ]]; then
+              # Read version
+              local version=$(od -An -tu4 -j8 -N4 "$disk_file" 2>/dev/null | tr -d ' ')
+              # Read disk ID
+              local disk_id=$(od -An -tu4 -j12 -N4 "$disk_file" 2>/dev/null | tr -d ' ')
+              echo "Valid (version=$version, disk_id=$disk_id)"
+              return 0
+          else
+              echo "Invalid or missing"
+              return 1
+          fi
+      }
+
+      show_disk_status() {
+          echo ""
+          echo "========================================"
+          echo "   ObjectIO Virtual Disk Status"
+          echo "========================================"
+          echo ""
+          echo "Disk Files:"
+          echo "----------------------------------------"
+          for i in $(seq 0 $((NUM_DISKS - 1))); do
+              local disk_file="${DISK_DIR}/disk${i}.img"
+              if [[ -f "$disk_file" ]]; then
+                  local actual_size=$(du -h "$disk_file" | cut -f1)
+                  local apparent_size=$(du -h --apparent-size "$disk_file" 2>/dev/null | cut -f1)
+                  printf "  disk%d.img: apparent=%s, actual=%s\n" "$i" "$apparent_size" "$actual_size"
+              else
+                  printf "  disk%d.img: NOT FOUND\n" "$i"
+              fi
+          done
+
+          echo ""
+          echo "Loop Devices:"
+          echo "----------------------------------------"
+          for i in $(seq 0 $((NUM_DISKS - 1))); do
+              local loop_num=$((LOOP_BASE + i))
+              local loop_device="/dev/loop${loop_num}"
+              if [[ -b "$loop_device" ]]; then
+                  local info=$(losetup "$loop_device" 2>/dev/null | awk '{print $6}' || echo "not attached")
+                  if [[ -z "$info" ]]; then
+                      info="not attached"
+                  fi
+                  printf "  /dev/loop%d -> %s\n" "$loop_num" "$info"
+              else
+                  printf "  /dev/loop%d: device not available\n" "$loop_num"
+              fi
+          done
+
+          echo ""
+          echo "Superblock Verification:"
+          echo "----------------------------------------"
+          for i in $(seq 0 $((NUM_DISKS - 1))); do
+              local status=$(verify_superblock "$i")
+              printf "  disk%d: %s\n" "$i" "$status"
+          done
+          echo ""
+      }
+
+      main() {
+          local action="${1:-setup}"
+
+          case "$action" in
+              setup)
+                  log_info "Setting up ObjectIO virtual disks..."
+                  create_disk_directory
+
+                  for i in $(seq 0 $((NUM_DISKS - 1))); do
+                      create_sparse_disk "$i"
+                      write_superblock "$i"
+                      setup_loop_device "$i"
+                  done
+
+                  # Set ownership for ubuntu user
+                  chown -R ubuntu:ubuntu "$DISK_DIR"
+
+                  show_disk_status
+                  log_info "Disk setup complete!"
+                  echo ""
+                  echo "Disks are ready for ObjectIO testing:"
+                  echo "  - Raw files: ${DISK_DIR}/disk{0-7}.img"
+                  echo "  - Loop devices: /dev/loop{10-17}"
+                  ;;
+
+              status)
+                  show_disk_status
+                  ;;
+
+              cleanup)
+                  log_info "Cleaning up ObjectIO virtual disks..."
+                  for i in $(seq 0 $((NUM_DISKS - 1))); do
+                      local loop_num=$((LOOP_BASE + i))
+                      local loop_device="/dev/loop${loop_num}"
+                      if losetup "$loop_device" 2>/dev/null | grep -q "/"; then
+                          log_info "Detaching $loop_device"
+                          losetup -d "$loop_device" 2>/dev/null || true
+                      fi
+                  done
+
+                  if [[ -d "$DISK_DIR" ]]; then
+                      log_info "Removing disk files from $DISK_DIR"
+                      rm -rf "$DISK_DIR"
+                  fi
+
+                  log_info "Cleanup complete!"
+                  ;;
+
+              *)
+                  echo "Usage: $0 [setup|status|cleanup]"
+                  echo ""
+                  echo "Commands:"
+                  echo "  setup   - Create sparse disk files, write superblocks, setup loop devices"
+                  echo "  status  - Show status of disk files, loop devices, and superblocks"
+                  echo "  cleanup - Detach loop devices and remove disk files"
+                  exit 1
+                  ;;
+          esac
+      }
+
+      main "$@"
+
+  # Helper script to list disks (for backward compatibility)
+  - path: /home/ubuntu/list-disks.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Quick disk status script
+      sudo /usr/local/bin/setup-objectio-disks.sh status
+
+  # Systemd service to restore loop devices on boot
+  - path: /etc/systemd/system/objectio-disks.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Setup ObjectIO disk loop devices
+      After=local-fs.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/setup-objectio-disks.sh setup
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Create disk directory structure
+  - mkdir -p /var/lib/objectio/disks
+  - chown -R ubuntu:ubuntu /var/lib/objectio
+
+  # Enable the systemd service for boot persistence
+  - systemctl daemon-reload
+  - systemctl enable objectio-disks.service
+
+  # Install Rust for the ubuntu user
+  - su - ubuntu -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable'
