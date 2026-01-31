@@ -7,13 +7,23 @@ mod block_service;
 mod service;
 
 use anyhow::Result;
+use axum::{
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 use block_service::BlockMetaService;
 use clap::Parser;
 use objectio_proto::block::block_service_server::BlockServiceServer;
 use objectio_proto::metadata::metadata_service_server::MetadataServiceServer;
 use service::{MetaService, OsdNode};
+use std::fmt::Write;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::net::TcpListener;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -63,6 +73,10 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Metrics server port (Prometheus)
+    #[arg(long, default_value = "9101")]
+    metrics_port: u16,
 }
 
 #[tokio::main]
@@ -125,12 +139,33 @@ async fn main() -> Result<()> {
     let block_service = BlockMetaService::new();
     info!("Block storage service initialized");
 
+    // Wrap services in Arc for sharing
+    let meta_service = Arc::new(meta_service);
+    let block_service = Arc::new(block_service);
+
+    // Create metrics state
+    let metrics_state = Arc::new(MetaMetricsState {
+        meta_service: meta_service.clone(),
+        block_service: block_service.clone(),
+        start_time: std::time::Instant::now(),
+    });
+
+    // Start metrics server
+    let metrics_port = args.metrics_port;
+    let metrics_state_clone = metrics_state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_metrics_server(metrics_port, metrics_state_clone).await {
+            error!("Metrics server error: {}", e);
+        }
+    });
+
     info!("Starting gRPC server on {}", addr);
+    info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
 
     // Start gRPC server with both metadata and block services
     Server::builder()
-        .add_service(MetadataServiceServer::new(meta_service))
-        .add_service(BlockServiceServer::new(block_service))
+        .add_service(MetadataServiceServer::from_arc(meta_service))
+        .add_service(BlockServiceServer::from_arc(block_service))
         .serve_with_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
             info!("Shutting down...");
@@ -138,6 +173,90 @@ async fn main() -> Result<()> {
         .await?;
 
     info!("Metadata Service shut down gracefully");
+
+    Ok(())
+}
+
+/// Metrics state for the Meta service
+struct MetaMetricsState {
+    meta_service: Arc<MetaService>,
+    block_service: Arc<BlockMetaService>,
+    start_time: std::time::Instant,
+}
+
+/// Metrics HTTP handler
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<MetaMetricsState>>,
+) -> impl IntoResponse {
+    let mut output = String::with_capacity(8 * 1024);
+
+    // Meta service uptime
+    let uptime = state.start_time.elapsed().as_secs();
+    writeln!(output, "# HELP objectio_meta_uptime_seconds Metadata service uptime").unwrap();
+    writeln!(output, "# TYPE objectio_meta_uptime_seconds counter").unwrap();
+    writeln!(output, "objectio_meta_uptime_seconds {}", uptime).unwrap();
+
+    // Get stats from meta service
+    let stats = state.meta_service.stats();
+
+    // Bucket and object counts
+    writeln!(output, "# HELP objectio_meta_buckets_total Total number of buckets").unwrap();
+    writeln!(output, "# TYPE objectio_meta_buckets_total gauge").unwrap();
+    writeln!(output, "objectio_meta_buckets_total {}", stats.bucket_count).unwrap();
+
+    writeln!(output, "# HELP objectio_meta_objects_total Total number of objects").unwrap();
+    writeln!(output, "# TYPE objectio_meta_objects_total gauge").unwrap();
+    writeln!(output, "objectio_meta_objects_total {}", stats.object_count).unwrap();
+
+    // OSD counts
+    writeln!(output, "# HELP objectio_meta_osds_total Total registered OSDs").unwrap();
+    writeln!(output, "# TYPE objectio_meta_osds_total gauge").unwrap();
+    writeln!(output, "objectio_meta_osds_total {}", stats.osd_count).unwrap();
+
+    // User counts
+    writeln!(output, "# HELP objectio_meta_users_total Total users").unwrap();
+    writeln!(output, "# TYPE objectio_meta_users_total gauge").unwrap();
+    writeln!(output, "objectio_meta_users_total {}", stats.user_count).unwrap();
+
+    // Get block service stats
+    let block_stats = state.block_service.stats();
+
+    writeln!(output, "# HELP objectio_meta_volumes_total Total block volumes").unwrap();
+    writeln!(output, "# TYPE objectio_meta_volumes_total gauge").unwrap();
+    writeln!(output, "objectio_meta_volumes_total {}", block_stats.volume_count).unwrap();
+
+    writeln!(output, "# HELP objectio_meta_snapshots_total Total snapshots").unwrap();
+    writeln!(output, "# TYPE objectio_meta_snapshots_total gauge").unwrap();
+    writeln!(output, "objectio_meta_snapshots_total {}", block_stats.snapshot_count).unwrap();
+
+    writeln!(output, "# HELP objectio_meta_attachments_total Total volume attachments").unwrap();
+    writeln!(output, "# TYPE objectio_meta_attachments_total gauge").unwrap();
+    writeln!(output, "objectio_meta_attachments_total {}", block_stats.attachment_count).unwrap();
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        output,
+    )
+}
+
+/// Health check handler
+async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, "OK")
+}
+
+/// Start the metrics HTTP server
+async fn start_metrics_server(port: u16, state: Arc<MetaMetricsState>) -> Result<()> {
+    let app = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(health_handler))
+        .with_state(state);
+
+    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    info!("Starting metrics server on {}", addr);
+
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

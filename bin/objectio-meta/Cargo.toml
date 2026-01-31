@@ -16,6 +16,7 @@ objectio-placement = { workspace = true }
 objectio-proto = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 config = { workspace = true }
 tracing = { workspace = true }

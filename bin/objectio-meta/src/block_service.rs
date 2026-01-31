@@ -103,6 +103,14 @@ pub struct BlockMetaService {
     attachments: RwLock<HashMap<String, StoredAttachment>>,
 }
 
+/// Statistics for the block metadata service
+#[derive(Debug, Clone, Default)]
+pub struct BlockMetaStats {
+    pub volume_count: u64,
+    pub snapshot_count: u64,
+    pub attachment_count: u64,
+}
+
 impl BlockMetaService {
     /// Create a new block metadata service
     pub fn new() -> Self {
@@ -113,6 +121,15 @@ impl BlockMetaService {
             volume_snapshots: RwLock::new(HashMap::new()),
             volume_chunks: RwLock::new(HashMap::new()),
             attachments: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get statistics for metrics
+    pub fn stats(&self) -> BlockMetaStats {
+        BlockMetaStats {
+            volume_count: self.volumes.read().len() as u64,
+            snapshot_count: self.snapshots.read().len() as u64,
+            attachment_count: self.attachments.read().len() as u64,
         }
     }
 

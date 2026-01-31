@@ -26,6 +26,28 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 use uuid::Uuid;
 
+/// Disk status information for metrics
+#[derive(Clone, Debug)]
+pub struct DiskStatusInfo {
+    pub path: String,
+    pub capacity: u64,
+    pub used: u64,
+    pub shard_count: u64,
+    pub status: String,
+    pub read_errors: u64,
+    pub write_errors: u64,
+}
+
+/// OSD status information for metrics
+#[derive(Clone, Debug)]
+pub struct OsdStatus {
+    pub disks: Vec<DiskStatusInfo>,
+    pub total_capacity: u64,
+    pub total_used: u64,
+    pub total_shards: u64,
+    pub uptime_secs: u64,
+}
+
 /// Shard location stored in memory (backed by MetadataStore for persistence)
 #[derive(Clone, Debug)]
 struct ShardLocation {
@@ -133,6 +155,46 @@ impl OsdService {
     /// Get disk count
     pub fn disk_count(&self) -> usize {
         self.disks.len()
+    }
+
+    /// Get OSD status for metrics
+    pub fn status(&self) -> OsdStatus {
+        let mut disks = Vec::new();
+        let mut total_capacity = 0u64;
+        let mut total_used = 0u64;
+        let mut total_shards = 0u64;
+
+        for (i, disk) in self.disks.iter().enumerate() {
+            let stats = disk.stats();
+            let capacity = disk.capacity();
+            let used = disk.used_space();
+            let shard_count = self.shard_index.read()
+                .values()
+                .filter(|loc| loc.disk_idx == i)
+                .count() as u64;
+
+            total_capacity += capacity;
+            total_used += used;
+            total_shards += shard_count;
+
+            disks.push(DiskStatusInfo {
+                path: disk.path().to_string_lossy().to_string(),
+                capacity,
+                used,
+                shard_count,
+                status: "healthy".to_string(), // TODO: Check actual health
+                read_errors: stats.read_errors,
+                write_errors: stats.write_errors,
+            });
+        }
+
+        OsdStatus {
+            disks,
+            total_capacity,
+            total_used,
+            total_shards,
+            uptime_secs: self.start_time.elapsed().as_secs(),
+        }
     }
 
     /// Select disk for write (round-robin)

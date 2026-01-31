@@ -5,16 +5,26 @@
 mod service;
 
 use anyhow::Result;
+use axum::{
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
 use clap::Parser;
+use objectio_block::metrics::{MetricsCollector, OsdMetrics, PrometheusExporter, HealthStatus};
 use objectio_proto::metadata::{
     metadata_service_client::MetadataServiceClient, FailureDomainInfo, RegisterOsdRequest,
 };
 use objectio_proto::storage::storage_service_server::StorageServiceServer;
 use serde::Deserialize;
 use service::OsdService;
+use std::fmt::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -52,6 +62,10 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Metrics server port (Prometheus)
+    #[arg(long, default_value = "9201")]
+    metrics_port: u16,
 }
 
 /// Configuration file structure
@@ -290,7 +304,29 @@ async fn main() -> Result<()> {
     // Wrap service in Arc for sharing
     let osd_service = Arc::new(osd_service);
 
+    // Create metrics state
+    let metrics_collector = Arc::new(MetricsCollector::default());
+    let metrics_state = Arc::new(OsdMetricsState {
+        osd_service: osd_service.clone(),
+        collector: metrics_collector.clone(),
+        exporter: PrometheusExporter::default(),
+        osd_id: node_id.clone(),
+        node_name: node_name.clone().unwrap_or_else(|| "unknown".to_string()),
+        failure_domain: failure_domain.clone(),
+        start_time: std::time::Instant::now(),
+    });
+
+    // Start metrics server
+    let metrics_port = args.metrics_port;
+    let metrics_state_clone = metrics_state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_metrics_server(metrics_port, metrics_state_clone).await {
+            error!("Metrics server error: {}", e);
+        }
+    });
+
     info!("Starting gRPC server on {}", addr);
+    info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
 
     // Start heartbeat task
     let heartbeat_meta_endpoint = meta_endpoint.clone();
@@ -382,6 +418,133 @@ async fn register_with_meta(
         address,
         response.into_inner().topology_version
     );
+
+    Ok(())
+}
+
+/// OSD metrics state for the HTTP server
+struct OsdMetricsState {
+    osd_service: Arc<OsdService>,
+    collector: Arc<MetricsCollector>,
+    exporter: PrometheusExporter,
+    osd_id: String,
+    node_name: String,
+    failure_domain: FailureDomainConfig,
+    start_time: std::time::Instant,
+}
+
+/// Metrics HTTP handler
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<OsdMetricsState>>,
+) -> impl IntoResponse {
+    let mut output = String::with_capacity(16 * 1024);
+
+    // OSD info
+    writeln!(output, "# HELP objectio_osd_info OSD information").unwrap();
+    writeln!(output, "# TYPE objectio_osd_info gauge").unwrap();
+    writeln!(
+        output,
+        "objectio_osd_info{{osd_id=\"{}\",node=\"{}\",rack=\"{}\",datacenter=\"{}\",region=\"{}\"}} 1",
+        state.osd_id, state.node_name, state.failure_domain.rack,
+        state.failure_domain.datacenter, state.failure_domain.region
+    ).unwrap();
+
+    // OSD uptime
+    let uptime = state.start_time.elapsed().as_secs();
+    writeln!(output, "# HELP objectio_osd_uptime_seconds OSD uptime in seconds").unwrap();
+    writeln!(output, "# TYPE objectio_osd_uptime_seconds counter").unwrap();
+    writeln!(output, "objectio_osd_uptime_seconds{{osd_id=\"{}\"}} {}", state.osd_id, uptime).unwrap();
+
+    // Get disk stats from OSD service
+    let status = state.osd_service.status();
+
+    // Total capacity and used
+    writeln!(output, "# HELP objectio_osd_capacity_bytes Total OSD capacity").unwrap();
+    writeln!(output, "# TYPE objectio_osd_capacity_bytes gauge").unwrap();
+    writeln!(output, "objectio_osd_capacity_bytes{{osd_id=\"{}\"}} {}", state.osd_id, status.total_capacity).unwrap();
+
+    writeln!(output, "# HELP objectio_osd_used_bytes Used space on OSD").unwrap();
+    writeln!(output, "# TYPE objectio_osd_used_bytes gauge").unwrap();
+    writeln!(output, "objectio_osd_used_bytes{{osd_id=\"{}\"}} {}", state.osd_id, status.total_used).unwrap();
+
+    // Shard count
+    writeln!(output, "# HELP objectio_osd_shards_total Total shards stored").unwrap();
+    writeln!(output, "# TYPE objectio_osd_shards_total gauge").unwrap();
+    writeln!(output, "objectio_osd_shards_total{{osd_id=\"{}\"}} {}", state.osd_id, status.total_shards).unwrap();
+
+    // Per-disk metrics
+    writeln!(output, "# HELP objectio_disk_capacity_bytes Disk capacity").unwrap();
+    writeln!(output, "# TYPE objectio_disk_capacity_bytes gauge").unwrap();
+    writeln!(output, "# HELP objectio_disk_used_bytes Disk used space").unwrap();
+    writeln!(output, "# TYPE objectio_disk_used_bytes gauge").unwrap();
+    writeln!(output, "# HELP objectio_disk_shards_total Shards on disk").unwrap();
+    writeln!(output, "# TYPE objectio_disk_shards_total gauge").unwrap();
+    writeln!(output, "# HELP objectio_disk_healthy Disk health status (1=healthy, 0=unhealthy)").unwrap();
+    writeln!(output, "# TYPE objectio_disk_healthy gauge").unwrap();
+
+    for disk in &status.disks {
+        let healthy = if disk.status == "healthy" { 1 } else { 0 };
+        writeln!(
+            output,
+            "objectio_disk_capacity_bytes{{osd_id=\"{}\",disk=\"{}\"}} {}",
+            state.osd_id, disk.path, disk.capacity
+        ).unwrap();
+        writeln!(
+            output,
+            "objectio_disk_used_bytes{{osd_id=\"{}\",disk=\"{}\"}} {}",
+            state.osd_id, disk.path, disk.used
+        ).unwrap();
+        writeln!(
+            output,
+            "objectio_disk_shards_total{{osd_id=\"{}\",disk=\"{}\"}} {}",
+            state.osd_id, disk.path, disk.shard_count
+        ).unwrap();
+        writeln!(
+            output,
+            "objectio_disk_healthy{{osd_id=\"{}\",disk=\"{}\"}} {}",
+            state.osd_id, disk.path, healthy
+        ).unwrap();
+    }
+
+    // Export block metrics if available
+    output.push_str(&state.exporter.export(&state.collector));
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        output,
+    )
+}
+
+/// Health check handler
+async fn health_handler(
+    axum::extract::State(state): axum::extract::State<Arc<OsdMetricsState>>,
+) -> impl IntoResponse {
+    let status = state.osd_service.status();
+    let healthy = status.disks.iter().all(|d| d.status == "healthy");
+
+    if healthy {
+        (StatusCode::OK, "OK")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "UNHEALTHY")
+    }
+}
+
+/// Start the metrics HTTP server
+async fn start_metrics_server(
+    port: u16,
+    state: Arc<OsdMetricsState>,
+) -> Result<()> {
+    let app = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(health_handler))
+        .with_state(state);
+
+    let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    info!("Starting metrics server on {}", addr);
+
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

@@ -14,8 +14,10 @@ objectio-common = { workspace = true }
 objectio-storage = { workspace = true }
 objectio-erasure = { workspace = true }
 objectio-proto = { workspace = true }
+objectio-block = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
+axum = { workspace = true }
 clap = { workspace = true }
 config = { workspace = true }
 tracing = { workspace = true }

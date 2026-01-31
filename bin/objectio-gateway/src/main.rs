@@ -12,13 +12,16 @@ use anyhow::Result;
 use auth_middleware::{auth_layer, AuthState};
 use axum::{
     extract::DefaultBodyLimit,
+    http::{header, StatusCode},
     middleware,
+    response::IntoResponse,
     routing::{delete, get, head, post, put},
     Router,
 };
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
+use objectio_s3::s3_metrics;
 use osd_pool::OsdPool;
 use s3::AppState;
 use scatter_gather::ScatterGatherEngine;
@@ -28,6 +31,16 @@ use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Prometheus metrics endpoint handler
+async fn metrics_handler() -> impl IntoResponse {
+    let metrics = s3_metrics().export_prometheus();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        metrics,
+    )
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "objectio-gateway")]
@@ -138,9 +151,15 @@ async fn main() -> Result<()> {
     let body_limit = DefaultBodyLimit::max(100 * 1024 * 1024);
     info!("Max single-part upload size: 100 MB");
 
+    // Metrics route (no auth required for Prometheus scraping)
+    let metrics_router = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(s3::health_check));
+
     let app = if !args.no_auth {
         info!("Authentication is ENABLED (credentials from metadata service)");
         info!("Admin API is ENABLED (requires 'admin' user credentials)");
+        info!("Metrics endpoint: /metrics (no auth)");
         Router::new()
             // Service endpoint (list buckets)
             .route("/", get(s3::list_buckets))
@@ -168,8 +187,6 @@ async fn main() -> Result<()> {
             // POST /{bucket}/{key}?uploads - initiate multipart upload
             // POST /{bucket}/{key}?uploadId=X - complete multipart upload
             .route("/{bucket}/{*key}", post(s3::post_object))
-            // Health endpoint (no auth)
-            .route("/health", get(s3::health_check))
             // Admin API (requires 'admin' user - checked in handlers)
             .route("/_admin/users", get(s3::admin_list_users))
             .route("/_admin/users", post(s3::admin_create_user))
@@ -181,9 +198,12 @@ async fn main() -> Result<()> {
             .layer(middleware::from_fn_with_state(auth_state, auth_layer))
             .layer(TraceLayer::new_for_http())
             .with_state(state)
+            // Merge unauthenticated routes (metrics, health)
+            .merge(metrics_router)
     } else {
         info!("Authentication is DISABLED (development mode)");
         info!("Admin API is ENABLED (no auth required in dev mode)");
+        info!("Metrics endpoint: /metrics");
         Router::new()
             // Service endpoint (list buckets)
             .route("/", get(s3::list_buckets))
@@ -211,8 +231,6 @@ async fn main() -> Result<()> {
             // POST /{bucket}/{key}?uploads - initiate multipart upload
             // POST /{bucket}/{key}?uploadId=X - complete multipart upload
             .route("/{bucket}/{*key}", post(s3::post_object))
-            // Health endpoint
-            .route("/health", get(s3::health_check))
             // Admin API (no auth in dev mode)
             .route("/_admin/users", get(s3::admin_list_users))
             .route("/_admin/users", post(s3::admin_create_user))
@@ -223,6 +241,8 @@ async fn main() -> Result<()> {
             .layer(body_limit)
             .layer(TraceLayer::new_for_http())
             .with_state(state)
+            // Merge metrics and health routes
+            .merge(metrics_router)
     };
 
     // Parse listen address

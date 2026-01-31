@@ -137,10 +137,37 @@ pub struct MetaService {
     user_keys: RwLock<HashMap<String, Vec<String>>>,
 }
 
+/// Statistics for the metadata service
+#[derive(Debug, Clone, Default)]
+pub struct MetaStats {
+    pub bucket_count: u64,
+    pub object_count: u64,
+    pub osd_count: u64,
+    pub user_count: u64,
+}
+
 impl MetaService {
     /// Create a new metadata service with default MDS 4+2 configuration
     pub fn new() -> Self {
         Self::with_ec_config(EcConfig::default())
+    }
+
+    /// Get statistics for metrics
+    pub fn stats(&self) -> MetaStats {
+        let bucket_count = self.buckets.read().len() as u64;
+        let object_count: u64 = self.buckets.read()
+            .values()
+            .map(|b| b.objects.len() as u64)
+            .sum();
+        let osd_count = self.osd_nodes.read().len() as u64;
+        let user_count = self.users.read().len() as u64;
+
+        MetaStats {
+            bucket_count,
+            object_count,
+            osd_count,
+            user_count,
+        }
     }
 
     /// Create a new metadata service with custom EC configuration

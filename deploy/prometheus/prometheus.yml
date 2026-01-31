@@ -1,0 +1,36 @@
+# ObjectIO Prometheus Configuration
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files: []
+
+scrape_configs:
+  # Gateway metrics (S3 API)
+  - job_name: 'objectio-gateway'
+    static_configs:
+      - targets: ['gateway:9000']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # Metadata service metrics
+  - job_name: 'objectio-meta'
+    static_configs:
+      - targets: ['meta1:9101', 'meta2:9101', 'meta3:9101']
+    scrape_interval: 15s
+
+  # OSD metrics (one per storage node)
+  - job_name: 'objectio-osd'
+    static_configs:
+      - targets: ['osd1:9201', 'osd2:9201', 'osd3:9201', 'osd4:9201', 'osd5:9201', 'osd6:9201', 'osd7:9201']
+    scrape_interval: 10s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
