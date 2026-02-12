@@ -2,11 +2,30 @@
 //!
 //! Tracks S3 operations, latencies, and error rates.
 
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::Instant;
+
+/// Protection configuration for capacity metrics
+#[derive(Debug, Clone)]
+pub struct ProtectionConfig {
+    /// Protection scheme: "ec", "lrc", or "replication"
+    pub scheme: String,
+    /// Data shards (k) — for EC/LRC. For replication, 1.
+    pub data_shards: u32,
+    /// Total parity shards (m) — for EC: parity, for LRC: local+global, for replication: replicas-1
+    pub parity_shards: u32,
+    /// Total shards (data + parity). For replication: replicas.
+    pub total_shards: u32,
+    /// Storage efficiency ratio (0.0 - 1.0): data_shards / total_shards
+    pub efficiency: f64,
+    /// LRC local parity (0 if not LRC)
+    pub lrc_local_parity: u32,
+    /// LRC global parity (0 if not LRC)
+    pub lrc_global_parity: u32,
+}
 
 /// S3 operation types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -130,6 +149,8 @@ pub struct S3Metrics {
     gateway: GatewayMetrics,
     /// Start time for uptime calculation
     start_time: Instant,
+    /// Protection configuration for capacity calculations
+    protection: RwLock<Option<ProtectionConfig>>,
 }
 
 impl S3Metrics {
@@ -139,7 +160,13 @@ impl S3Metrics {
             operations: RwLock::new(HashMap::new()),
             gateway: GatewayMetrics::default(),
             start_time: Instant::now(),
+            protection: RwLock::new(None),
         }
+    }
+
+    /// Set the protection configuration (called once at startup)
+    pub fn set_protection_config(&self, config: ProtectionConfig) {
+        *self.protection.write().unwrap() = Some(config);
     }
 
     /// Record an S3 operation
@@ -151,7 +178,7 @@ impl S3Metrics {
         response_bytes: u64,
         latency_us: u64,
     ) {
-        let mut ops = self.operations.write();
+        let mut ops = self.operations.write().unwrap();
         let metrics = ops.entry(op).or_insert_with(OperationMetrics::new);
         metrics.record(status_code, request_bytes, response_bytes, latency_us);
     }
@@ -174,7 +201,7 @@ impl S3Metrics {
 
     /// Update OSD connection count
     pub fn update_osd_connections(&self, osd_id: &str, count: u64) {
-        self.gateway.osd_connections.write().insert(osd_id.to_string(), count);
+        self.gateway.osd_connections.write().unwrap().insert(osd_id.to_string(), count);
     }
 
     /// Record scatter-gather operation
@@ -206,7 +233,7 @@ impl S3Metrics {
             self.gateway.total_connections.load(Ordering::Relaxed)).unwrap();
 
         // OSD connections
-        let osd_conns = self.gateway.osd_connections.read();
+        let osd_conns = self.gateway.osd_connections.read().unwrap();
         if !osd_conns.is_empty() {
             writeln!(output, "# HELP objectio_gateway_osd_connections Connections to each OSD").unwrap();
             writeln!(output, "# TYPE objectio_gateway_osd_connections gauge").unwrap();
@@ -228,43 +255,74 @@ impl S3Metrics {
             writeln!(output, "objectio_gateway_scatter_gather_latency_seconds_sum {}", sg_latency as f64 / 1_000_000.0).unwrap();
         }
 
+        // Protection configuration metrics
+        if let Some(ref prot) = *self.protection.read().unwrap() {
+            writeln!(output, "# HELP objectio_gateway_protection_data_shards Number of data shards (k)").unwrap();
+            writeln!(output, "# TYPE objectio_gateway_protection_data_shards gauge").unwrap();
+            writeln!(output, "objectio_gateway_protection_data_shards{{scheme=\"{}\"}} {}", prot.scheme, prot.data_shards).unwrap();
+
+            writeln!(output, "# HELP objectio_gateway_protection_parity_shards Number of parity shards (m)").unwrap();
+            writeln!(output, "# TYPE objectio_gateway_protection_parity_shards gauge").unwrap();
+            writeln!(output, "objectio_gateway_protection_parity_shards{{scheme=\"{}\"}} {}", prot.scheme, prot.parity_shards).unwrap();
+
+            writeln!(output, "# HELP objectio_gateway_protection_total_shards Total shards (data + parity)").unwrap();
+            writeln!(output, "# TYPE objectio_gateway_protection_total_shards gauge").unwrap();
+            writeln!(output, "objectio_gateway_protection_total_shards{{scheme=\"{}\"}} {}", prot.scheme, prot.total_shards).unwrap();
+
+            writeln!(output, "# HELP objectio_gateway_protection_efficiency Storage efficiency ratio (data/total)").unwrap();
+            writeln!(output, "# TYPE objectio_gateway_protection_efficiency gauge").unwrap();
+            writeln!(output, "objectio_gateway_protection_efficiency{{scheme=\"{}\"}} {:.6}", prot.scheme, prot.efficiency).unwrap();
+
+            if prot.scheme == "lrc" {
+                writeln!(output, "# HELP objectio_gateway_protection_lrc_local_parity LRC local parity shards").unwrap();
+                writeln!(output, "# TYPE objectio_gateway_protection_lrc_local_parity gauge").unwrap();
+                writeln!(output, "objectio_gateway_protection_lrc_local_parity {}", prot.lrc_local_parity).unwrap();
+
+                writeln!(output, "# HELP objectio_gateway_protection_lrc_global_parity LRC global parity shards").unwrap();
+                writeln!(output, "# TYPE objectio_gateway_protection_lrc_global_parity gauge").unwrap();
+                writeln!(output, "objectio_gateway_protection_lrc_global_parity {}", prot.lrc_global_parity).unwrap();
+            }
+        }
+
         // S3 operation metrics
-        let ops = self.operations.read();
+        let ops = self.operations.read().unwrap();
 
         // Requests total
         writeln!(output, "# HELP objectio_s3_requests_total Total S3 requests by operation and status").unwrap();
         writeln!(output, "# TYPE objectio_s3_requests_total counter").unwrap();
         for (op, metrics) in ops.iter() {
-            let total = metrics.requests_total.load(Ordering::Relaxed);
+            let op_name: &str = op.as_str();
             let success = metrics.requests_success.load(Ordering::Relaxed);
             let client_err = metrics.requests_client_error.load(Ordering::Relaxed);
             let server_err = metrics.requests_server_error.load(Ordering::Relaxed);
 
-            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"success\"}} {}", op.as_str(), success).unwrap();
-            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"client_error\"}} {}", op.as_str(), client_err).unwrap();
-            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"server_error\"}} {}", op.as_str(), server_err).unwrap();
+            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"success\"}} {}", op_name, success).unwrap();
+            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"client_error\"}} {}", op_name, client_err).unwrap();
+            writeln!(output, "objectio_s3_requests_total{{operation=\"{}\",status=\"server_error\"}} {}", op_name, server_err).unwrap();
         }
 
         // Request/response bytes
         writeln!(output, "# HELP objectio_s3_request_bytes_total Total request body bytes").unwrap();
         writeln!(output, "# TYPE objectio_s3_request_bytes_total counter").unwrap();
         for (op, metrics) in ops.iter() {
+            let op_name: &str = op.as_str();
             writeln!(output, "objectio_s3_request_bytes_total{{operation=\"{}\"}} {}",
-                op.as_str(), metrics.request_bytes_total.load(Ordering::Relaxed)).unwrap();
+                op_name, metrics.request_bytes_total.load(Ordering::Relaxed)).unwrap();
         }
 
         writeln!(output, "# HELP objectio_s3_response_bytes_total Total response body bytes").unwrap();
         writeln!(output, "# TYPE objectio_s3_response_bytes_total counter").unwrap();
         for (op, metrics) in ops.iter() {
+            let op_name: &str = op.as_str();
             writeln!(output, "objectio_s3_response_bytes_total{{operation=\"{}\"}} {}",
-                op.as_str(), metrics.response_bytes_total.load(Ordering::Relaxed)).unwrap();
+                op_name, metrics.response_bytes_total.load(Ordering::Relaxed)).unwrap();
         }
 
         // Latency histogram
         writeln!(output, "# HELP objectio_s3_request_duration_seconds S3 request duration histogram").unwrap();
         writeln!(output, "# TYPE objectio_s3_request_duration_seconds histogram").unwrap();
         for (op, metrics) in ops.iter() {
-            let op_name = op.as_str();
+            let op_name: &str = op.as_str();
             let total = metrics.requests_total.load(Ordering::Relaxed);
             let sum_us = metrics.latency_sum_us.load(Ordering::Relaxed);
 

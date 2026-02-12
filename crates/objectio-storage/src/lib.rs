@@ -15,6 +15,7 @@ pub mod layout;
 pub mod metadata;
 pub mod raw_io;
 pub mod repair;
+pub mod smart;
 pub mod wal;
 
 // Re-exports
@@ -30,4 +31,5 @@ pub use metadata::{
     ShardMeta,
 };
 pub use raw_io::{AlignedBuffer, RawFile};
+pub use smart::{DiskSmartHealth, SmartAttribute, SmartMonitor};
 pub use wal::{RecordType, SyncMode, WalRecord, WriteAheadLog, WriteOp};

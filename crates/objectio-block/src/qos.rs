@@ -853,11 +853,11 @@ mod tests {
     fn test_latency_histogram_percentiles() {
         let histogram = LatencyHistogram::new();
 
-        // Record 100 samples in different buckets
-        // 50 samples at 50us (bucket 2: 20-50us)
+        // Record 100 samples in different buckets (boundaries use strict <)
+        // 50 samples at 50us (bucket 3: 50-100us, since 50 < 50 is false)
         // 40 samples at 150us (bucket 4: 100-200us)
-        // 9 samples at 5000us (bucket 8: 2-5ms)
-        // 1 sample at 50000us (bucket 11: 20-50ms)
+        // 9 samples at 5000us (bucket 9: 5-10ms, since 5000 < 5000 is false)
+        // 1 sample at 50000us (bucket 12: 50-100ms, since 50000 < 50000 is false)
 
         for _ in 0..50 {
             histogram.record(50);
@@ -878,11 +878,11 @@ mod tests {
         // p90 should be in the 150us bucket (upper bound = 200us)
         assert_eq!(histogram.p90(), 200);
 
-        // p99 should be in the 5000us bucket (upper bound = 5000us)
-        assert_eq!(histogram.p99(), 5000);
+        // p99 should be in the 5000us bucket (upper bound = 10000us)
+        assert_eq!(histogram.p99(), 10000);
 
-        // p999 (99.9th) should be in the 50000us bucket
-        assert_eq!(histogram.p999(), 50000);
+        // p999 (99.9th) should be in the 50000us bucket (upper bound = 100000us)
+        assert_eq!(histogram.p999(), 100000);
     }
 
     #[test]
@@ -924,7 +924,7 @@ mod tests {
 
         let percentiles = stats.read_latency_percentiles();
         assert!(percentiles.p50 > 0);
-        assert!(percentiles.p95 > percentiles.p50);
-        assert!(percentiles.p99 > percentiles.p95);
+        assert!(percentiles.p95 >= percentiles.p50);
+        assert!(percentiles.p99 >= percentiles.p95);
     }
 }

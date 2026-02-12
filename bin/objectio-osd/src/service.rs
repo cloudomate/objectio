@@ -19,12 +19,136 @@ use objectio_storage::DiskManager;
 use parking_lot::RwLock;
 use prost::Message;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info};
 use uuid::Uuid;
+
+/// gRPC method metrics
+#[derive(Debug, Default)]
+pub struct GrpcMethodMetrics {
+    pub requests_total: AtomicU64,
+    pub requests_success: AtomicU64,
+    pub requests_error: AtomicU64,
+    pub latency_sum_us: AtomicU64,
+    pub bytes_sent: AtomicU64,
+    pub bytes_received: AtomicU64,
+}
+
+impl GrpcMethodMetrics {
+    pub fn record(&self, success: bool, latency_us: u64, bytes_in: u64, bytes_out: u64) {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.requests_success.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.requests_error.fetch_add(1, Ordering::Relaxed);
+        }
+        self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.bytes_received.fetch_add(bytes_in, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(bytes_out, Ordering::Relaxed);
+    }
+}
+
+/// gRPC metrics collector for OSD
+#[derive(Debug, Default)]
+pub struct GrpcMetrics {
+    pub write_shard: GrpcMethodMetrics,
+    pub read_shard: GrpcMethodMetrics,
+    pub delete_shard: GrpcMethodMetrics,
+    pub get_shard_meta: GrpcMethodMetrics,
+    pub list_shards: GrpcMethodMetrics,
+    pub put_object_meta: GrpcMethodMetrics,
+    pub get_object_meta: GrpcMethodMetrics,
+    pub delete_object_meta: GrpcMethodMetrics,
+    pub list_objects_meta: GrpcMethodMetrics,
+    pub health_check: GrpcMethodMetrics,
+    pub get_status: GrpcMethodMetrics,
+}
+
+impl GrpcMetrics {
+    /// Export metrics in Prometheus format
+    pub fn export_prometheus(&self, osd_id: &str) -> String {
+        let mut output = String::with_capacity(4 * 1024);
+
+        // Requests total by method and status
+        writeln!(output, "# HELP objectio_osd_grpc_requests_total Total gRPC requests by method and status").unwrap();
+        writeln!(output, "# TYPE objectio_osd_grpc_requests_total counter").unwrap();
+
+        let methods = [
+            ("WriteShard", &self.write_shard),
+            ("ReadShard", &self.read_shard),
+            ("DeleteShard", &self.delete_shard),
+            ("GetShardMeta", &self.get_shard_meta),
+            ("ListShards", &self.list_shards),
+            ("PutObjectMeta", &self.put_object_meta),
+            ("GetObjectMeta", &self.get_object_meta),
+            ("DeleteObjectMeta", &self.delete_object_meta),
+            ("ListObjectsMeta", &self.list_objects_meta),
+            ("HealthCheck", &self.health_check),
+            ("GetStatus", &self.get_status),
+        ];
+
+        for (method, metrics) in methods.iter() {
+            let success = metrics.requests_success.load(Ordering::Relaxed);
+            let error = metrics.requests_error.load(Ordering::Relaxed);
+            writeln!(
+                output,
+                "objectio_osd_grpc_requests_total{{osd_id=\"{}\",method=\"{}\",status=\"success\"}} {}",
+                osd_id, method, success
+            ).unwrap();
+            writeln!(
+                output,
+                "objectio_osd_grpc_requests_total{{osd_id=\"{}\",method=\"{}\",status=\"error\"}} {}",
+                osd_id, method, error
+            ).unwrap();
+        }
+
+        // Latency sum (for calculating average)
+        writeln!(output, "# HELP objectio_osd_grpc_latency_seconds_sum Sum of gRPC request latencies").unwrap();
+        writeln!(output, "# TYPE objectio_osd_grpc_latency_seconds_sum counter").unwrap();
+        for (method, metrics) in methods.iter() {
+            let sum_us = metrics.latency_sum_us.load(Ordering::Relaxed);
+            writeln!(
+                output,
+                "objectio_osd_grpc_latency_seconds_sum{{osd_id=\"{}\",method=\"{}\"}} {}",
+                osd_id, method, sum_us as f64 / 1_000_000.0
+            ).unwrap();
+        }
+
+        // Bytes sent/received
+        writeln!(output, "# HELP objectio_osd_grpc_bytes_received_total Total bytes received via gRPC").unwrap();
+        writeln!(output, "# TYPE objectio_osd_grpc_bytes_received_total counter").unwrap();
+        for (method, metrics) in methods.iter() {
+            let bytes = metrics.bytes_received.load(Ordering::Relaxed);
+            if bytes > 0 {
+                writeln!(
+                    output,
+                    "objectio_osd_grpc_bytes_received_total{{osd_id=\"{}\",method=\"{}\"}} {}",
+                    osd_id, method, bytes
+                ).unwrap();
+            }
+        }
+
+        writeln!(output, "# HELP objectio_osd_grpc_bytes_sent_total Total bytes sent via gRPC").unwrap();
+        writeln!(output, "# TYPE objectio_osd_grpc_bytes_sent_total counter").unwrap();
+        for (method, metrics) in methods.iter() {
+            let bytes = metrics.bytes_sent.load(Ordering::Relaxed);
+            if bytes > 0 {
+                writeln!(
+                    output,
+                    "objectio_osd_grpc_bytes_sent_total{{osd_id=\"{}\",method=\"{}\"}} {}",
+                    osd_id, method, bytes
+                ).unwrap();
+            }
+        }
+
+        output
+    }
+}
 
 /// Disk status information for metrics
 #[derive(Clone, Debug)]
@@ -70,6 +194,8 @@ pub struct OsdService {
     start_time: Instant,
     /// Round-robin disk selection for writes
     next_disk: RwLock<usize>,
+    /// gRPC metrics collector
+    grpc_metrics: Arc<GrpcMetrics>,
 }
 
 impl OsdService {
@@ -133,7 +259,13 @@ impl OsdService {
             meta_store: Arc::new(meta_store),
             start_time: Instant::now(),
             next_disk: RwLock::new(0),
+            grpc_metrics: Arc::new(GrpcMetrics::default()),
         })
+    }
+
+    /// Get gRPC metrics
+    pub fn grpc_metrics(&self) -> &Arc<GrpcMetrics> {
+        &self.grpc_metrics
     }
 
     /// Create OSD service with default metadata directory
@@ -167,7 +299,8 @@ impl OsdService {
         for (i, disk) in self.disks.iter().enumerate() {
             let stats = disk.stats();
             let capacity = disk.capacity();
-            let used = disk.used_space();
+            let free = disk.free_space();
+            let used = capacity.saturating_sub(free);
             let shard_count = self.shard_index.read()
                 .values()
                 .filter(|loc| loc.disk_idx == i)
@@ -178,13 +311,13 @@ impl OsdService {
             total_shards += shard_count;
 
             disks.push(DiskStatusInfo {
-                path: disk.path().to_string_lossy().to_string(),
+                path: disk.path().to_string(),
                 capacity,
                 used,
                 shard_count,
                 status: "healthy".to_string(), // TODO: Check actual health
-                read_errors: stats.read_errors,
-                write_errors: stats.write_errors,
+                read_errors: stats.read_errors.load(std::sync::atomic::Ordering::Relaxed),
+                write_errors: stats.write_errors.load(std::sync::atomic::Ordering::Relaxed),
             });
         }
 
@@ -241,8 +374,13 @@ impl StorageService for OsdService {
         &self,
         request: Request<WriteShardRequest>,
     ) -> Result<Response<WriteShardResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
-        let shard_id = req.shard_id.ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
+        let bytes_in = req.data.len() as u64;
+        let shard_id = req.shard_id.ok_or_else(|| {
+            self.grpc_metrics.write_shard.record(false, start.elapsed().as_micros() as u64, 0, 0);
+            Status::invalid_argument("missing shard_id")
+        })?;
 
         debug!(
             "WriteShard: object={}, stripe={}, pos={}, size={}",
@@ -292,7 +430,7 @@ impl StorageService for OsdService {
             disk_idx, block_num, req.data.len(), crc32c
         );
 
-        Ok(Response::new(WriteShardResponse {
+        let resp = WriteShardResponse {
             location: Some(BlockLocation {
                 node_id: self.node_id.to_vec(),
                 disk_id: self.disk_ids[disk_idx].to_vec(),
@@ -300,25 +438,40 @@ impl StorageService for OsdService {
                 size: req.data.len() as u32,
             }),
             timestamp,
-        }))
+        };
+        let bytes_out = resp.encoded_len() as u64;
+        self.grpc_metrics.write_shard.record(true, start.elapsed().as_micros() as u64, bytes_in, bytes_out);
+
+        Ok(Response::new(resp))
     }
 
     async fn read_shard(
         &self,
         request: Request<ReadShardRequest>,
     ) -> Result<Response<ReadShardResponse>, Status> {
+        let start = Instant::now();
         let req = request.into_inner();
-        let shard_id = req.shard_id.ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
+        let bytes_in = req.encoded_len() as u64;
+        let shard_id = req.shard_id.ok_or_else(|| {
+            self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
+            Status::invalid_argument("missing shard_id")
+        })?;
 
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
 
         let location = self.shard_index.read().get(&key).cloned()
-            .ok_or_else(|| Status::not_found("shard not found"))?;
+            .ok_or_else(|| {
+                self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
+                Status::not_found("shard not found")
+            })?;
 
         let disk = &self.disks[location.disk_idx];
 
         let (_header, data) = disk.read_block(location.block_num)
-            .map_err(|e| Status::internal(format!("read failed: {}", e)))?;
+            .map_err(|e| {
+                self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
+                Status::internal(format!("read failed: {}", e))
+            })?;
 
         debug!(
             "ReadShard: object={}, stripe={}, pos={}, size={}",
@@ -330,7 +483,7 @@ impl StorageService for OsdService {
 
         let timestamp = Self::current_timestamp();
 
-        Ok(Response::new(ReadShardResponse {
+        let resp = ReadShardResponse {
             data,
             checksum: Some(Checksum {
                 crc32c: location.crc32c,
@@ -338,7 +491,11 @@ impl StorageService for OsdService {
                 sha256: vec![],
             }),
             timestamp,
-        }))
+        };
+        let bytes_out = resp.data.len() as u64;
+        self.grpc_metrics.read_shard.record(true, start.elapsed().as_micros() as u64, bytes_in, bytes_out);
+
+        Ok(Response::new(resp))
     }
 
     async fn delete_shard(

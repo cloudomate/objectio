@@ -488,9 +488,9 @@ mod tests {
         let data = vec![0xCDu8; 2 * 1024 * 1024];
         cache.write("vol1", 512 * 1024, &data).unwrap();
 
-        // Should have 2 dirty chunks
+        // Should have 3 dirty chunks (512KB in chunk 0, 1MB in chunk 1, 512KB in chunk 2)
         let stats = cache.stats();
-        assert_eq!(stats.dirty_chunks, 2);
+        assert_eq!(stats.dirty_chunks, 3);
 
         // Read back should work
         let read = cache.read("vol1", 512 * 1024, 2 * 1024 * 1024).unwrap();

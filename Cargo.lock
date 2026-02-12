@@ -1890,6 +1890,7 @@ name = "objectio-meta"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.8",
  "clap",
  "config",
  "hex",
@@ -1932,10 +1933,12 @@ name = "objectio-osd"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.8",
  "clap",
  "config",
  "crc32c",
  "hex",
+ "objectio-block",
  "objectio-common",
  "objectio-erasure",
  "objectio-proto",
@@ -2010,6 +2013,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

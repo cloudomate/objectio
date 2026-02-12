@@ -103,12 +103,39 @@ pub struct BlockMetaService {
     attachments: RwLock<HashMap<String, StoredAttachment>>,
 }
 
+/// Per-volume statistics for metrics export
+#[derive(Debug, Clone)]
+pub struct VolumeStatEntry {
+    pub volume_id: String,
+    pub name: String,
+    pub pool: String,
+    pub size_bytes: u64,
+    pub used_bytes: u64,
+    pub qos: Option<VolumeQos>,
+}
+
+/// Per-snapshot statistics for metrics export
+#[derive(Debug, Clone)]
+pub struct SnapshotStatEntry {
+    pub snapshot_id: String,
+    pub volume_id: String,
+    pub name: String,
+    pub size_bytes: u64,
+}
+
 /// Statistics for the block metadata service
 #[derive(Debug, Clone, Default)]
 pub struct BlockMetaStats {
     pub volume_count: u64,
     pub snapshot_count: u64,
     pub attachment_count: u64,
+    pub volumes_by_state: HashMap<String, u64>,
+    pub volumes_provisioned_bytes: u64,
+    pub volumes_used_bytes: u64,
+    pub volumes: Vec<VolumeStatEntry>,
+    pub snapshots: Vec<SnapshotStatEntry>,
+    pub snapshots_space_bytes: u64,
+    pub attachments_by_type: HashMap<String, u64>,
 }
 
 impl BlockMetaService {
@@ -126,10 +153,74 @@ impl BlockMetaService {
 
     /// Get statistics for metrics
     pub fn stats(&self) -> BlockMetaStats {
+        let volumes = self.volumes.read();
+        let snapshots = self.snapshots.read();
+        let attachments = self.attachments.read();
+
+        // Volumes by state
+        let mut volumes_by_state: HashMap<String, u64> = HashMap::new();
+        let mut volumes_provisioned_bytes = 0u64;
+        let mut volumes_used_bytes = 0u64;
+        let mut volume_entries = Vec::with_capacity(volumes.len());
+
+        for vol in volumes.values() {
+            let state_name = match vol.state {
+                s if s == VolumeState::Creating as i32 => "creating",
+                s if s == VolumeState::Available as i32 => "available",
+                s if s == VolumeState::Attached as i32 => "attached",
+                s if s == VolumeState::Error as i32 => "error",
+                s if s == VolumeState::Deleting as i32 => "deleting",
+                _ => "unknown",
+            };
+            *volumes_by_state.entry(state_name.to_string()).or_default() += 1;
+            volumes_provisioned_bytes += vol.size_bytes;
+            volumes_used_bytes += vol.used_bytes;
+            volume_entries.push(VolumeStatEntry {
+                volume_id: vol.volume_id.clone(),
+                name: vol.name.clone(),
+                pool: vol.pool.clone(),
+                size_bytes: vol.size_bytes,
+                used_bytes: vol.used_bytes,
+                qos: vol.qos,
+            });
+        }
+
+        // Snapshots
+        let mut snapshots_space_bytes = 0u64;
+        let mut snapshot_entries = Vec::with_capacity(snapshots.len());
+        for snap in snapshots.values() {
+            snapshots_space_bytes += snap.size_bytes;
+            snapshot_entries.push(SnapshotStatEntry {
+                snapshot_id: snap.snapshot_id.clone(),
+                volume_id: snap.volume_id.clone(),
+                name: snap.name.clone(),
+                size_bytes: snap.size_bytes,
+            });
+        }
+
+        // Attachments by type
+        let mut attachments_by_type: HashMap<String, u64> = HashMap::new();
+        for att in attachments.values() {
+            let type_name = match att.target_type {
+                t if t == TargetType::Iscsi as i32 => "iscsi",
+                t if t == TargetType::Nvmeof as i32 => "nvmeof",
+                t if t == TargetType::Nbd as i32 => "nbd",
+                _ => "unknown",
+            };
+            *attachments_by_type.entry(type_name.to_string()).or_default() += 1;
+        }
+
         BlockMetaStats {
-            volume_count: self.volumes.read().len() as u64,
-            snapshot_count: self.snapshots.read().len() as u64,
-            attachment_count: self.attachments.read().len() as u64,
+            volume_count: volumes.len() as u64,
+            snapshot_count: snapshots.len() as u64,
+            attachment_count: attachments.len() as u64,
+            volumes_by_state,
+            volumes_provisioned_bytes,
+            volumes_used_bytes,
+            volumes: volume_entries,
+            snapshots: snapshot_entries,
+            snapshots_space_bytes,
+            attachments_by_type,
         }
     }
 

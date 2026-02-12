@@ -1,0 +1,38 @@
+# Prometheus config for datacore 3+2 deployment
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Gateway (S3 API + metrics on same port)
+  - job_name: 'objectio-gateway'
+    metrics_path: /metrics
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['gateway:9000']
+
+  # Meta nodes (metrics on :9101)
+  - job_name: 'objectio-meta'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['meta1:9101', 'meta2:9101', 'meta3:9101']
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.+):9101'
+        target_label: instance
+        replacement: '${1}'
+
+  # OSD nodes (metrics on :9201)
+  - job_name: 'objectio-osd'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['osd1:9201', 'osd2:9201', 'osd3:9201', 'osd4:9201', 'osd5:9201']
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.+):9201'
+        target_label: instance
+        replacement: '${1}'

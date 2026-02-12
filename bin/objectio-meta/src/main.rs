@@ -221,17 +221,101 @@ async fn metrics_handler(
     // Get block service stats
     let block_stats = state.block_service.stats();
 
-    writeln!(output, "# HELP objectio_meta_volumes_total Total block volumes").unwrap();
-    writeln!(output, "# TYPE objectio_meta_volumes_total gauge").unwrap();
-    writeln!(output, "objectio_meta_volumes_total {}", block_stats.volume_count).unwrap();
+    // --- Volume inventory metrics ---
 
-    writeln!(output, "# HELP objectio_meta_snapshots_total Total snapshots").unwrap();
-    writeln!(output, "# TYPE objectio_meta_snapshots_total gauge").unwrap();
-    writeln!(output, "objectio_meta_snapshots_total {}", block_stats.snapshot_count).unwrap();
+    writeln!(output, "# HELP objectio_block_volumes_total Total block volumes").unwrap();
+    writeln!(output, "# TYPE objectio_block_volumes_total gauge").unwrap();
+    writeln!(output, "objectio_block_volumes_total {}", block_stats.volume_count).unwrap();
 
-    writeln!(output, "# HELP objectio_meta_attachments_total Total volume attachments").unwrap();
-    writeln!(output, "# TYPE objectio_meta_attachments_total gauge").unwrap();
-    writeln!(output, "objectio_meta_attachments_total {}", block_stats.attachment_count).unwrap();
+    writeln!(output, "# HELP objectio_block_volumes_by_state Volume count by state").unwrap();
+    writeln!(output, "# TYPE objectio_block_volumes_by_state gauge").unwrap();
+    for state_name in &["available", "attached", "creating", "error", "deleting", "unknown"] {
+        let count = block_stats.volumes_by_state.get(*state_name).copied().unwrap_or(0);
+        writeln!(output, "objectio_block_volumes_by_state{{state=\"{}\"}} {}", state_name, count).unwrap();
+    }
+
+    writeln!(output, "# HELP objectio_block_volumes_provisioned_bytes Total provisioned bytes across all volumes").unwrap();
+    writeln!(output, "# TYPE objectio_block_volumes_provisioned_bytes gauge").unwrap();
+    writeln!(output, "objectio_block_volumes_provisioned_bytes {}", block_stats.volumes_provisioned_bytes).unwrap();
+
+    writeln!(output, "# HELP objectio_block_volumes_used_bytes Total used bytes across all volumes").unwrap();
+    writeln!(output, "# TYPE objectio_block_volumes_used_bytes gauge").unwrap();
+    writeln!(output, "objectio_block_volumes_used_bytes {}", block_stats.volumes_used_bytes).unwrap();
+
+    writeln!(output, "# HELP objectio_block_volume_size_bytes Provisioned size per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_size_bytes gauge").unwrap();
+    writeln!(output, "# HELP objectio_block_volume_used_bytes Used bytes per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_used_bytes gauge").unwrap();
+    writeln!(output, "# HELP objectio_block_volume_qos_max_iops Configured max IOPS per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_qos_max_iops gauge").unwrap();
+    writeln!(output, "# HELP objectio_block_volume_qos_min_iops Configured min IOPS per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_qos_min_iops gauge").unwrap();
+    writeln!(output, "# HELP objectio_block_volume_qos_max_bandwidth_bps Configured max bandwidth per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_qos_max_bandwidth_bps gauge").unwrap();
+    writeln!(output, "# HELP objectio_block_volume_qos_burst_iops Configured burst IOPS per volume").unwrap();
+    writeln!(output, "# TYPE objectio_block_volume_qos_burst_iops gauge").unwrap();
+
+    for vol in &block_stats.volumes {
+        writeln!(output,
+            "objectio_block_volume_size_bytes{{volume_id=\"{}\",name=\"{}\",pool=\"{}\"}} {}",
+            vol.volume_id, vol.name, vol.pool, vol.size_bytes
+        ).unwrap();
+        writeln!(output,
+            "objectio_block_volume_used_bytes{{volume_id=\"{}\",name=\"{}\",pool=\"{}\"}} {}",
+            vol.volume_id, vol.name, vol.pool, vol.used_bytes
+        ).unwrap();
+
+        if let Some(qos) = &vol.qos {
+            writeln!(output,
+                "objectio_block_volume_qos_max_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
+                vol.volume_id, vol.name, qos.max_iops
+            ).unwrap();
+            writeln!(output,
+                "objectio_block_volume_qos_min_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
+                vol.volume_id, vol.name, qos.min_iops
+            ).unwrap();
+            writeln!(output,
+                "objectio_block_volume_qos_max_bandwidth_bps{{volume_id=\"{}\",name=\"{}\"}} {}",
+                vol.volume_id, vol.name, qos.max_bandwidth_bps
+            ).unwrap();
+            writeln!(output,
+                "objectio_block_volume_qos_burst_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
+                vol.volume_id, vol.name, qos.burst_iops
+            ).unwrap();
+        }
+    }
+
+    // --- Snapshot metrics ---
+
+    writeln!(output, "# HELP objectio_block_snapshots_total Total snapshots").unwrap();
+    writeln!(output, "# TYPE objectio_block_snapshots_total gauge").unwrap();
+    writeln!(output, "objectio_block_snapshots_total {}", block_stats.snapshot_count).unwrap();
+
+    writeln!(output, "# HELP objectio_block_snapshots_space_bytes Total snapshot space").unwrap();
+    writeln!(output, "# TYPE objectio_block_snapshots_space_bytes gauge").unwrap();
+    writeln!(output, "objectio_block_snapshots_space_bytes {}", block_stats.snapshots_space_bytes).unwrap();
+
+    writeln!(output, "# HELP objectio_block_snapshot_size_bytes Snapshot logical size").unwrap();
+    writeln!(output, "# TYPE objectio_block_snapshot_size_bytes gauge").unwrap();
+    for snap in &block_stats.snapshots {
+        writeln!(output,
+            "objectio_block_snapshot_size_bytes{{snapshot_id=\"{}\",volume_id=\"{}\",name=\"{}\"}} {}",
+            snap.snapshot_id, snap.volume_id, snap.name, snap.size_bytes
+        ).unwrap();
+    }
+
+    // --- Attachment metrics ---
+
+    writeln!(output, "# HELP objectio_block_attachments_total Total active attachments").unwrap();
+    writeln!(output, "# TYPE objectio_block_attachments_total gauge").unwrap();
+    writeln!(output, "objectio_block_attachments_total {}", block_stats.attachment_count).unwrap();
+
+    writeln!(output, "# HELP objectio_block_attachments_by_type Attachment count by target type").unwrap();
+    writeln!(output, "# TYPE objectio_block_attachments_by_type gauge").unwrap();
+    for type_name in &["iscsi", "nvmeof", "nbd", "unknown"] {
+        let count = block_stats.attachments_by_type.get(*type_name).copied().unwrap_or(0);
+        writeln!(output, "objectio_block_attachments_by_type{{type=\"{}\"}} {}", type_name, count).unwrap();
+    }
 
     (
         StatusCode::OK,

@@ -4,6 +4,7 @@
 //! Credentials are managed by the metadata service for persistence.
 
 mod auth_middleware;
+mod metrics_middleware;
 mod osd_pool;
 mod s3;
 mod scatter_gather;
@@ -21,7 +22,7 @@ use axum::{
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
-use objectio_s3::s3_metrics;
+use objectio_s3::{s3_metrics, ProtectionConfig};
 use osd_pool::OsdPool;
 use s3::AppState;
 use scatter_gather::ScatterGatherEngine;
@@ -71,6 +72,22 @@ struct Args {
     #[arg(long, default_value = "2")]
     ec_m: u32,
 
+    /// Protection scheme: ec (MDS erasure coding), lrc (locally repairable codes), replication
+    #[arg(long, default_value = "ec")]
+    protection: String,
+
+    /// LRC local parity shards (only used when --protection=lrc)
+    #[arg(long, default_value = "0")]
+    lrc_local_parity: u32,
+
+    /// LRC global parity shards (only used when --protection=lrc)
+    #[arg(long, default_value = "0")]
+    lrc_global_parity: u32,
+
+    /// Number of replicas (only used when --protection=replication)
+    #[arg(long, default_value = "3")]
+    replicas: u32,
+
     /// Disable authentication (for development)
     #[arg(long, default_value_t = false)]
     no_auth: bool,
@@ -101,6 +118,55 @@ async fn main() -> Result<()> {
     info!("Starting ObjectIO Gateway");
     info!("Metadata endpoint: {}", args.meta_endpoint);
     info!("OSD endpoint: {}", args.osd_endpoint);
+
+    // Register protection config for Prometheus metrics
+    let protection_config = match args.protection.as_str() {
+        "lrc" => {
+            let total = args.ec_k + args.lrc_local_parity + args.lrc_global_parity;
+            info!("Protection: LRC k={} l={} g={} (total={}, efficiency={:.1}%)",
+                args.ec_k, args.lrc_local_parity, args.lrc_global_parity, total,
+                (f64::from(args.ec_k) / f64::from(total)) * 100.0);
+            ProtectionConfig {
+                scheme: "lrc".to_string(),
+                data_shards: args.ec_k,
+                parity_shards: args.lrc_local_parity + args.lrc_global_parity,
+                total_shards: total,
+                efficiency: f64::from(args.ec_k) / f64::from(total),
+                lrc_local_parity: args.lrc_local_parity,
+                lrc_global_parity: args.lrc_global_parity,
+            }
+        }
+        "replication" => {
+            info!("Protection: Replication replicas={} (efficiency={:.1}%)",
+                args.replicas, (1.0 / f64::from(args.replicas)) * 100.0);
+            ProtectionConfig {
+                scheme: "replication".to_string(),
+                data_shards: 1,
+                parity_shards: args.replicas - 1,
+                total_shards: args.replicas,
+                efficiency: 1.0 / f64::from(args.replicas),
+                lrc_local_parity: 0,
+                lrc_global_parity: 0,
+            }
+        }
+        _ => {
+            // Default: MDS erasure coding
+            let total = args.ec_k + args.ec_m;
+            info!("Protection: EC (MDS) k={} m={} (total={}, efficiency={:.1}%)",
+                args.ec_k, args.ec_m, total,
+                (f64::from(args.ec_k) / f64::from(total)) * 100.0);
+            ProtectionConfig {
+                scheme: "ec".to_string(),
+                data_shards: args.ec_k,
+                parity_shards: args.ec_m,
+                total_shards: total,
+                efficiency: f64::from(args.ec_k) / f64::from(total),
+                lrc_local_parity: 0,
+                lrc_global_parity: 0,
+            }
+        }
+    };
+    s3_metrics().set_protection_config(protection_config);
 
     // Connect to metadata service
     let meta_client = MetadataServiceClient::connect(args.meta_endpoint.clone())
@@ -151,16 +217,14 @@ async fn main() -> Result<()> {
     let body_limit = DefaultBodyLimit::max(100 * 1024 * 1024);
     info!("Max single-part upload size: 100 MB");
 
-    // Metrics route (no auth required for Prometheus scraping)
-    let metrics_router = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .route("/health", get(s3::health_check));
-
     let app = if !args.no_auth {
         info!("Authentication is ENABLED (credentials from metadata service)");
         info!("Admin API is ENABLED (requires 'admin' user credentials)");
         info!("Metrics endpoint: /metrics (no auth)");
         Router::new()
+            // Metrics and health routes FIRST (no auth, must come before wildcards)
+            .route("/metrics", get(metrics_handler))
+            .route("/health", get(s3::health_check))
             // Service endpoint (list buckets)
             .route("/", get(s3::list_buckets))
             // Bucket operations (including ?policy and ?uploads query params)
@@ -196,15 +260,17 @@ async fn main() -> Result<()> {
             .route("/_admin/access-keys/{access_key_id}", delete(s3::admin_delete_access_key))
             .layer(body_limit.clone())
             .layer(middleware::from_fn_with_state(auth_state, auth_layer))
+            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
             .with_state(state)
-            // Merge unauthenticated routes (metrics, health)
-            .merge(metrics_router)
     } else {
         info!("Authentication is DISABLED (development mode)");
         info!("Admin API is ENABLED (no auth required in dev mode)");
         info!("Metrics endpoint: /metrics");
         Router::new()
+            // Metrics and health routes FIRST (must come before wildcards)
+            .route("/metrics", get(metrics_handler))
+            .route("/health", get(s3::health_check))
             // Service endpoint (list buckets)
             .route("/", get(s3::list_buckets))
             // Bucket operations (including ?policy and ?uploads query params)
@@ -239,10 +305,9 @@ async fn main() -> Result<()> {
             .route("/_admin/users/{user_id}/access-keys", post(s3::admin_create_access_key))
             .route("/_admin/access-keys/{access_key_id}", delete(s3::admin_delete_access_key))
             .layer(body_limit)
+            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
             .with_state(state)
-            // Merge metrics and health routes
-            .merge(metrics_router)
     };
 
     // Parse listen address

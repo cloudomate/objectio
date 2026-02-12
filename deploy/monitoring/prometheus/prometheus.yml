@@ -1,0 +1,44 @@
+# ObjectIO Prometheus Configuration
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alerting (optional - configure alertmanager if needed)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+# Rule files (optional)
+# rule_files:
+#   - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # ObjectIO Gateway (S3 API metrics)
+  - job_name: 'objectio-gateway'
+    static_configs:
+      - targets: ['gateway:9000']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ObjectIO Metadata Services (3-node Raft cluster)
+  - job_name: 'objectio-meta'
+    static_configs:
+      - targets: ['meta1:9101', 'meta2:9101', 'meta3:9101']
+    scrape_interval: 15s
+
+  # ObjectIO OSDs (5 nodes for 3+2 EC)
+  - job_name: 'objectio-osd'
+    static_configs:
+      - targets: ['osd1:9201', 'osd2:9201', 'osd3:9201', 'osd4:9201', 'osd5:9201']
+    scrape_interval: 15s
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.+):9201'
+        target_label: osd_instance
+        replacement: '${1}'

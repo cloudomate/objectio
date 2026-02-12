@@ -17,6 +17,7 @@ use objectio_proto::metadata::{
     metadata_service_client::MetadataServiceClient, FailureDomainInfo, RegisterOsdRequest,
 };
 use objectio_proto::storage::storage_service_server::StorageServiceServer;
+use objectio_storage::SmartMonitor;
 use serde::Deserialize;
 use service::OsdService;
 use std::fmt::Write;
@@ -225,7 +226,8 @@ async fn main() -> Result<()> {
     // Initialize OSD service
     let data_path = PathBuf::from(&data_dir);
     info!("Data directory: {}", data_dir);
-    let osd_service = match OsdService::new(disks, block_size as u32, data_path) {
+    let disk_paths = disks.clone();
+    let osd_service = match OsdService::new(disk_paths, block_size as u32, data_path) {
         Ok(s) => s,
         Err(e) => {
             error!("Failed to initialize OSD: {}", e);
@@ -304,6 +306,17 @@ async fn main() -> Result<()> {
     // Wrap service in Arc for sharing
     let osd_service = Arc::new(osd_service);
 
+    // Create SMART monitor
+    let smart_monitor = Arc::new(SmartMonitor::new(&node_id, Duration::from_secs(300)));
+    let disk_devices = disks.clone();
+
+    // Check if SMART monitoring is available
+    if SmartMonitor::is_available() {
+        info!("SMART monitoring available - disk health will be tracked");
+    } else {
+        warn!("SMART monitoring unavailable (smartctl not found) - disk health metrics will be limited");
+    }
+
     // Create metrics state
     let metrics_collector = Arc::new(MetricsCollector::default());
     let metrics_state = Arc::new(OsdMetricsState {
@@ -314,6 +327,8 @@ async fn main() -> Result<()> {
         node_name: node_name.clone().unwrap_or_else(|| "unknown".to_string()),
         failure_domain: failure_domain.clone(),
         start_time: std::time::Instant::now(),
+        smart_monitor: smart_monitor.clone(),
+        disk_devices: disk_devices.clone(),
     });
 
     // Start metrics server
@@ -431,6 +446,8 @@ struct OsdMetricsState {
     node_name: String,
     failure_domain: FailureDomainConfig,
     start_time: std::time::Instant,
+    smart_monitor: Arc<SmartMonitor>,
+    disk_devices: Vec<String>,
 }
 
 /// Metrics HTTP handler
@@ -508,6 +525,13 @@ async fn metrics_handler(
 
     // Export block metrics if available
     output.push_str(&state.exporter.export(&state.collector));
+
+    // Export gRPC metrics
+    output.push_str(&state.osd_service.grpc_metrics().export_prometheus(&state.osd_id));
+
+    // Check SMART metrics (will only poll if interval has elapsed)
+    state.smart_monitor.check_if_needed(&state.disk_devices);
+    output.push_str(&state.smart_monitor.export_prometheus());
 
     (
         StatusCode::OK,

@@ -155,11 +155,10 @@ impl MetaService {
     /// Get statistics for metrics
     pub fn stats(&self) -> MetaStats {
         let bucket_count = self.buckets.read().len() as u64;
-        let object_count: u64 = self.buckets.read()
-            .values()
-            .map(|b| b.objects.len() as u64)
-            .sum();
-        let osd_count = self.osd_nodes.read().len() as u64;
+        // Note: Object counts are tracked per-OSD, not in metadata service
+        // This would need to aggregate from OSD health reports in a full implementation
+        let object_count = 0u64;
+        let osd_count = self.topology.read().all_nodes().count() as u64;
         let user_count = self.users.read().len() as u64;
 
         MetaStats {

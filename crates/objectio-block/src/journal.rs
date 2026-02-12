@@ -401,9 +401,10 @@ impl WriteJournal {
         reader.seek(SeekFrom::Start(28)) // 8 + 4 + 8 + 8 bytes
             .map_err(|e| BlockError::Journal(format!("failed to seek past header: {}", e)))?;
 
-        let mut entries = Vec::new();
-        let checkpoint = self.last_checkpoint.load(Ordering::SeqCst);
+        let mut all_entries = Vec::new();
+        let mut last_checkpoint_seq = self.last_checkpoint.load(Ordering::SeqCst);
 
+        // Scan all entries, tracking the last checkpoint seen on disk
         loop {
             match JournalEntry::deserialize(&mut reader) {
                 Ok(entry) => {
@@ -411,16 +412,21 @@ impl WriteJournal {
                         warn!("Journal entry {} failed checksum, stopping recovery", entry.sequence);
                         break;
                     }
-                    // Only keep entries after the last checkpoint
-                    if entry.sequence > checkpoint {
-                        if entry.entry_type == EntryType::Write {
-                            entries.push(entry);
-                        }
+                    if entry.entry_type == EntryType::Checkpoint {
+                        last_checkpoint_seq = entry.sequence;
+                    } else {
+                        all_entries.push(entry);
                     }
                 }
                 Err(_) => break, // EOF or corruption
             }
         }
+
+        // Only keep write entries after the last checkpoint
+        let entries: Vec<_> = all_entries
+            .into_iter()
+            .filter(|e| e.sequence > last_checkpoint_seq && e.entry_type == EntryType::Write)
+            .collect();
 
         info!("Recovered {} journal entries", entries.len());
         Ok(entries)
@@ -509,7 +515,7 @@ mod tests {
         assert_eq!(recovered.volume_id, "vol-123");
         assert_eq!(recovered.chunk_id, 5);
         assert_eq!(recovered.offset, 1024);
-        assert_eq!(recovered.data.unwrap().len(), 100);
+        assert_eq!(recovered.data.as_ref().unwrap().len(), 100);
         assert!(recovered.verify());
     }
 

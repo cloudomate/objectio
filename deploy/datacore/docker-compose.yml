@@ -1,0 +1,210 @@
+# ObjectIO Datacore Deployment
+# EC 3+2 with 5 OSDs, each backed by a 10GB Docker local volume as disk
+#
+# Usage:
+#   docker compose up -d     # Start cluster
+#   docker compose down      # Stop cluster
+#   docker compose down -v   # Stop + delete all data
+#   docker compose logs -f   # View logs
+#
+# Test:
+#   aws --endpoint-url http://localhost:9000 s3 mb s3://test
+#   objectio-cli -e http://localhost:9100 volume list
+#
+# Each OSD gets a Docker local volume (10GB, ext4) mounted as /data/disk0.
+# Docker creates folders under /var/lib/docker/volumes/ on the host.
+
+x-meta-common: &meta-common
+  image: cr.imys.in/objectio/objectio-meta:latest
+  networks:
+    - objectio-net
+  restart: unless-stopped
+
+x-osd-common: &osd-common
+  image: cr.imys.in/objectio/objectio-osd:latest
+  user: root
+  networks:
+    - objectio-net
+  restart: unless-stopped
+  depends_on:
+    - meta1
+
+services:
+  # ==========================================================================
+  # S3 Gateway (EC 3+2)
+  # ==========================================================================
+  gateway:
+    image: cr.imys.in/objectio/objectio-gateway:latest
+    hostname: gateway
+    ports:
+      - "9000:9000"
+    command:
+      - "--listen"
+      - "0.0.0.0:9000"
+      - "--meta-endpoint"
+      - "http://meta1:9100"
+      - "--ec-k"
+      - "3"
+      - "--ec-m"
+      - "2"
+      - "--no-auth"
+      - "--log-level"
+      - "info"
+    depends_on:
+      - meta1
+      - meta2
+      - meta3
+    networks:
+      - objectio-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ==========================================================================
+  # Metadata Service (3-node Raft cluster)
+  # ==========================================================================
+  meta1:
+    <<: *meta-common
+    hostname: meta1
+    command:
+      - "--node-id"
+      - "1"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta1-data:/var/lib/objectio
+    ports:
+      - "9100:9100"
+
+  meta2:
+    <<: *meta-common
+    hostname: meta2
+    command:
+      - "--node-id"
+      - "2"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta2-data:/var/lib/objectio
+    ports:
+      - "9102:9100"
+
+  meta3:
+    <<: *meta-common
+    hostname: meta3
+    command:
+      - "--node-id"
+      - "3"
+      - "--listen"
+      - "0.0.0.0:9100"
+      - "--peers"
+      - "meta1:9100,meta2:9100,meta3:9100"
+      - "--log-level"
+      - "info"
+    volumes:
+      - meta3-data:/var/lib/objectio
+    ports:
+      - "9103:9100"
+
+  # ==========================================================================
+  # OSDs (5 nodes for 3+2 erasure coding)
+  # Each OSD gets a Docker volume mounted as its disk at /data/disk0
+  # ==========================================================================
+  osd1:
+    <<: *osd-common
+    hostname: osd1
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    volumes:
+      - ./config/osd1.toml:/etc/objectio/osd.toml:ro
+      - osd1-data:/data/disk0
+      - osd1-state:/var/lib/objectio
+    ports:
+      - "9200:9200"
+
+  osd2:
+    <<: *osd-common
+    hostname: osd2
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    volumes:
+      - ./config/osd2.toml:/etc/objectio/osd.toml:ro
+      - osd2-data:/data/disk0
+      - osd2-state:/var/lib/objectio
+    ports:
+      - "9202:9200"
+
+  osd3:
+    <<: *osd-common
+    hostname: osd3
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    volumes:
+      - ./config/osd3.toml:/etc/objectio/osd.toml:ro
+      - osd3-data:/data/disk0
+      - osd3-state:/var/lib/objectio
+    ports:
+      - "9203:9200"
+
+  osd4:
+    <<: *osd-common
+    hostname: osd4
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    volumes:
+      - ./config/osd4.toml:/etc/objectio/osd.toml:ro
+      - osd4-data:/data/disk0
+      - osd4-state:/var/lib/objectio
+    ports:
+      - "9204:9200"
+
+  osd5:
+    <<: *osd-common
+    hostname: osd5
+    command:
+      - "--config"
+      - "/etc/objectio/osd.toml"
+    volumes:
+      - ./config/osd5.toml:/etc/objectio/osd.toml:ro
+      - osd5-data:/data/disk0
+      - osd5-state:/var/lib/objectio
+    ports:
+      - "9205:9200"
+
+networks:
+  objectio-net:
+    driver: bridge
+
+volumes:
+  # Meta state (Raft logs + metadata DB)
+  meta1-data:
+  meta2-data:
+  meta3-data:
+  # OSD data disks (10GB each, simulated via Docker volumes)
+  osd1-data:
+  osd2-data:
+  osd3-data:
+  osd4-data:
+  osd5-data:
+  # OSD state (WAL, metadata cache)
+  osd1-state:
+  osd2-state:
+  osd3-state:
+  osd4-state:
+  osd5-state:
