@@ -67,7 +67,9 @@ impl UserStore {
         let user = User::new(display_name);
         let user_clone = user.clone();
         users.insert(user.user_id.clone(), user);
-        self.user_keys.write().insert(user_clone.user_id.clone(), Vec::new());
+        self.user_keys
+            .write()
+            .insert(user_clone.user_id.clone(), Vec::new());
 
         Ok(user_clone)
     }

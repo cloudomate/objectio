@@ -48,7 +48,9 @@ pub mod evaluators;
 
 // Re-export core types
 pub use error::AuthError;
-pub use policy::{BucketPolicy, Effect, PolicyDecision, PolicyEvaluator, PolicyStatement, Principal};
+pub use policy::{
+    BucketPolicy, Effect, PolicyDecision, PolicyEvaluator, PolicyStatement, Principal,
+};
 pub use sigv2::SigV2Verifier;
 pub use sigv4::SigV4Verifier;
 pub use store::UserStore;

@@ -258,10 +258,7 @@ impl OpenFgaEvaluator {
 
     /// Perform a check request to OpenFGA
     async fn check(&self, tuple: &TupleKey) -> Result<bool, ExternalPolicyError> {
-        let url = format!(
-            "{}/stores/{}/check",
-            self.config.url, self.config.store_id
-        );
+        let url = format!("{}/stores/{}/check", self.config.url, self.config.store_id);
 
         let consistency = match self.config.consistency {
             ConsistencyMode::MinimizeLatency => Some("MINIMIZE_LATENCY".to_string()),
@@ -311,10 +308,7 @@ impl OpenFgaEvaluator {
             return Ok(());
         }
 
-        let url = format!(
-            "{}/stores/{}/write",
-            self.config.url, self.config.store_id
-        );
+        let url = format!("{}/stores/{}/write", self.config.url, self.config.store_id);
 
         let request = WriteRequest {
             writes: WriteTuples { tuple_keys: tuples },
@@ -354,10 +348,7 @@ impl OpenFgaEvaluator {
             return Ok(());
         }
 
-        let url = format!(
-            "{}/stores/{}/write",
-            self.config.url, self.config.store_id
-        );
+        let url = format!("{}/stores/{}/write", self.config.url, self.config.store_id);
 
         let request = WriteRequest {
             writes: WriteTuples { tuple_keys: vec![] },

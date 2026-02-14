@@ -234,10 +234,7 @@ impl SigV4Verifier {
                 // Decode first (in case already encoded), then re-encode
                 let decoded_key = url_decode(key);
                 let decoded_value = url_decode(value);
-                Some((
-                    url_encode(&decoded_key),
-                    url_encode(&decoded_value),
-                ))
+                Some((url_encode(&decoded_key), url_encode(&decoded_value)))
             })
             .collect();
 

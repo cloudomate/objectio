@@ -7,7 +7,7 @@
 use crate::error::AuthError;
 use crate::store::UserStore;
 use crate::user::AuthResult;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use http::Request;
@@ -233,10 +233,7 @@ impl SigV2Verifier {
                 if let Ok(value_str) = value.to_str() {
                     // Trim whitespace and collapse multiple spaces
                     let trimmed = value_str.split_whitespace().collect::<Vec<_>>().join(" ");
-                    amz_headers
-                        .entry(name_lower)
-                        .or_default()
-                        .push(trimmed);
+                    amz_headers.entry(name_lower).or_default().push(trimmed);
                 }
             }
         }
@@ -348,14 +345,14 @@ mod tests {
         let verifier = SigV2Verifier::new(user_store);
 
         // Wrong prefix
-        assert!(verifier
-            .parse_authorization_header("Bearer token")
-            .is_err());
+        assert!(verifier.parse_authorization_header("Bearer token").is_err());
 
         // Missing signature
-        assert!(verifier
-            .parse_authorization_header("AWS AKIAIOSFODNN7EXAMPLE")
-            .is_err());
+        assert!(
+            verifier
+                .parse_authorization_header("AWS AKIAIOSFODNN7EXAMPLE")
+                .is_err()
+        );
     }
 
     #[test]
@@ -364,7 +361,8 @@ mod tests {
         let verifier = SigV2Verifier::new(user_store);
 
         // Test with known values from AWS documentation
-        let string_to_sign = "GET\n\n\nTue, 27 Mar 2007 19:36:42 +0000\n/awsexamplebucket1/photos/puppy.jpg";
+        let string_to_sign =
+            "GET\n\n\nTue, 27 Mar 2007 19:36:42 +0000\n/awsexamplebucket1/photos/puppy.jpg";
         let secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 
         let signature = verifier.calculate_signature(secret_key, string_to_sign);
@@ -383,7 +381,10 @@ mod tests {
             .uri("/bucket/key")
             .body(())
             .unwrap();
-        assert_eq!(verifier.build_canonicalized_resource(&request), "/bucket/key");
+        assert_eq!(
+            verifier.build_canonicalized_resource(&request),
+            "/bucket/key"
+        );
 
         // With sub-resource
         let request = http::Request::builder()

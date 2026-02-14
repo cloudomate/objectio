@@ -141,10 +141,7 @@ impl PolicyEvaluatorChain {
     }
 
     /// Evaluate policy, falling back if primary fails
-    pub async fn evaluate(
-        &self,
-        request: &ExternalPolicyRequest,
-    ) -> ExternalPolicyDecision {
+    pub async fn evaluate(&self, request: &ExternalPolicyRequest) -> ExternalPolicyDecision {
         match self.primary.evaluate(request).await {
             Ok(decision) => decision,
             Err(e) => {
@@ -247,8 +244,8 @@ impl ExternalPolicyEvaluator for DenyAllEvaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::AuthenticatedIdentity;
     use crate::external_policy::S3Action;
+    use crate::provider::AuthenticatedIdentity;
 
     #[tokio::test]
     async fn test_allow_all_evaluator() {

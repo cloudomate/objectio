@@ -27,7 +27,11 @@ pub struct AuthenticatedIdentity {
 
 impl AuthenticatedIdentity {
     /// Create a new authenticated identity
-    pub fn new(subject: impl Into<String>, provider: impl Into<String>, arn: impl Into<String>) -> Self {
+    pub fn new(
+        subject: impl Into<String>,
+        provider: impl Into<String>,
+        arn: impl Into<String>,
+    ) -> Self {
         Self {
             subject: subject.into(),
             display_name: None,
@@ -219,11 +223,12 @@ mod tests {
 
     #[test]
     fn test_authenticated_identity_builder() {
-        let identity = AuthenticatedIdentity::new("user123", "builtin", "arn:obio:iam::objectio:user/user123")
-            .with_display_name("Test User")
-            .with_email("test@example.com")
-            .with_attribute("groups", vec!["admins".to_string(), "users".to_string()])
-            .with_expiry(1234567890);
+        let identity =
+            AuthenticatedIdentity::new("user123", "builtin", "arn:obio:iam::objectio:user/user123")
+                .with_display_name("Test User")
+                .with_email("test@example.com")
+                .with_attribute("groups", vec!["admins".to_string(), "users".to_string()])
+                .with_expiry(1234567890);
 
         assert_eq!(identity.subject, "user123");
         assert_eq!(identity.display_name, Some("Test User".to_string()));
@@ -235,7 +240,10 @@ mod tests {
     #[test]
     fn test_auth_request_helpers() {
         let mut headers = http::HeaderMap::new();
-        headers.insert("authorization", "AWS4-HMAC-SHA256 Credential=...".parse().unwrap());
+        headers.insert(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=...".parse().unwrap(),
+        );
 
         let request = AuthRequest::new("GET", "/bucket/key", &headers);
         assert!(request.has_sigv4_auth());

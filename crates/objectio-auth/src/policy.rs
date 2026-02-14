@@ -248,15 +248,17 @@ impl<'de> Deserialize<'de> for Principal {
                                 let arns: Result<Vec<String>, _> = arr
                                     .into_iter()
                                     .map(|v| {
-                                        v.as_str()
-                                            .map(|s| s.to_string())
-                                            .ok_or_else(|| de::Error::custom("expected string in OBIO array"))
+                                        v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                                            de::Error::custom("expected string in OBIO array")
+                                        })
                                     })
                                     .collect();
                                 obio_principals = Some(arns?);
                             }
                             _ => {
-                                return Err(de::Error::custom("OBIO must be \"*\", string, or array"));
+                                return Err(de::Error::custom(
+                                    "OBIO must be \"*\", string, or array",
+                                ));
                             }
                         }
                     } else {
@@ -323,7 +325,9 @@ impl<'de> Deserialize<'de> for ActionList {
                     .collect();
                 Ok(ActionList(strings?))
             }
-            _ => Err(serde::de::Error::custom("expected string or array of strings")),
+            _ => Err(serde::de::Error::custom(
+                "expected string or array of strings",
+            )),
         }
     }
 }
@@ -376,7 +380,9 @@ impl<'de> Deserialize<'de> for ResourceList {
                     .collect();
                 Ok(ResourceList(strings?))
             }
-            _ => Err(serde::de::Error::custom("expected string or array of strings")),
+            _ => Err(serde::de::Error::custom(
+                "expected string or array of strings",
+            )),
         }
     }
 }
@@ -447,7 +453,11 @@ pub struct RequestContext {
 
 impl RequestContext {
     /// Create a new request context
-    pub fn new(user_arn: impl Into<String>, action: impl Into<String>, resource: impl Into<String>) -> Self {
+    pub fn new(
+        user_arn: impl Into<String>,
+        action: impl Into<String>,
+        resource: impl Into<String>,
+    ) -> Self {
         Self {
             user_arn: user_arn.into(),
             action: action.into(),
@@ -549,13 +559,18 @@ impl PolicyEvaluator {
 
     /// Check if resource matches
     fn matches_resource(&self, resources: &ResourceList, request_resource: &str) -> bool {
-        resources.0.iter().any(|resource| {
-            self.matches_pattern(resource, request_resource)
-        })
+        resources
+            .0
+            .iter()
+            .any(|resource| self.matches_pattern(resource, request_resource))
     }
 
     /// Check if conditions match
-    fn matches_conditions(&self, conditions: &Option<Conditions>, context: &RequestContext) -> bool {
+    fn matches_conditions(
+        &self,
+        conditions: &Option<Conditions>,
+        context: &RequestContext,
+    ) -> bool {
         let conditions = match conditions {
             Some(c) => c,
             None => return true, // No conditions means match
@@ -565,7 +580,11 @@ impl PolicyEvaluator {
         if let Some(ref string_equals) = conditions.string_equals {
             for (key, expected) in string_equals {
                 let actual = self.get_condition_value(key, context);
-                if !expected.as_vec().iter().any(|e| Some(*e) == actual.as_deref()) {
+                if !expected
+                    .as_vec()
+                    .iter()
+                    .any(|e| Some(*e) == actual.as_deref())
+                {
                     return false;
                 }
             }
@@ -575,7 +594,11 @@ impl PolicyEvaluator {
         if let Some(ref string_not_equals) = conditions.string_not_equals {
             for (key, not_expected) in string_not_equals {
                 let actual = self.get_condition_value(key, context);
-                if not_expected.as_vec().iter().any(|e| Some(*e) == actual.as_deref()) {
+                if not_expected
+                    .as_vec()
+                    .iter()
+                    .any(|e| Some(*e) == actual.as_deref())
+                {
                     return false;
                 }
             }
@@ -588,7 +611,11 @@ impl PolicyEvaluator {
                     Some(v) => v,
                     None => return false,
                 };
-                if !patterns.as_vec().iter().any(|p| self.matches_pattern(p, &actual)) {
+                if !patterns
+                    .as_vec()
+                    .iter()
+                    .any(|p| self.matches_pattern(p, &actual))
+                {
                     return false;
                 }
             }
@@ -598,7 +625,11 @@ impl PolicyEvaluator {
         if let Some(ref ip_conditions) = conditions.ip_address {
             if let Some(source_ip) = context.source_ip {
                 for (_key, cidrs) in ip_conditions {
-                    if !cidrs.as_vec().iter().any(|cidr| self.ip_matches_cidr(&source_ip, cidr)) {
+                    if !cidrs
+                        .as_vec()
+                        .iter()
+                        .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
+                    {
                         return false;
                     }
                 }
@@ -609,7 +640,11 @@ impl PolicyEvaluator {
         if let Some(ref not_ip_conditions) = conditions.not_ip_address {
             if let Some(source_ip) = context.source_ip {
                 for (_key, cidrs) in not_ip_conditions {
-                    if cidrs.as_vec().iter().any(|cidr| self.ip_matches_cidr(&source_ip, cidr)) {
+                    if cidrs
+                        .as_vec()
+                        .iter()
+                        .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
+                    {
                         return false;
                     }
                 }
@@ -753,7 +788,10 @@ mod tests {
         );
 
         let evaluator = PolicyEvaluator::new();
-        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::ImplicitDeny);
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
     }
 
     #[test]
@@ -761,7 +799,9 @@ mod tests {
         let evaluator = PolicyEvaluator::new();
 
         assert!(evaluator.matches_pattern("arn:obio:s3:::bucket/*", "arn:obio:s3:::bucket/key"));
-        assert!(evaluator.matches_pattern("arn:obio:s3:::bucket/*", "arn:obio:s3:::bucket/prefix/key"));
+        assert!(
+            evaluator.matches_pattern("arn:obio:s3:::bucket/*", "arn:obio:s3:::bucket/prefix/key")
+        );
         assert!(!evaluator.matches_pattern("arn:obio:s3:::bucket/*", "arn:obio:s3:::other/key"));
         assert!(evaluator.matches_pattern("s3:*", "s3:GetObject"));
         assert!(evaluator.matches_pattern("*", "anything"));

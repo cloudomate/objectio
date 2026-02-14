@@ -56,13 +56,13 @@ impl IdentityProvider for BuiltinSigV4Provider {
     ) -> Result<AuthenticatedIdentity, AuthProviderError> {
         // Build an http::Request from the AuthRequest for the verifier
         // The verifier needs a full http::Request, so we construct a minimal one
-        let mut builder = http::Request::builder()
-            .method(request.method)
-            .uri(if let Some(query) = request.query {
+        let mut builder = http::Request::builder().method(request.method).uri(
+            if let Some(query) = request.query {
                 format!("{}?{}", request.path, query)
             } else {
                 request.path.to_string()
-            });
+            },
+        );
 
         // Copy headers
         for (name, value) in request.headers.iter() {
@@ -99,11 +99,8 @@ impl IdentityProvider for BuiltinSigV4Provider {
         let user = self.user_store.get_user(&auth_result.user_id).ok();
 
         // Convert to AuthenticatedIdentity
-        let mut identity = AuthenticatedIdentity::new(
-            &auth_result.user_id,
-            "builtin",
-            &auth_result.user_arn,
-        );
+        let mut identity =
+            AuthenticatedIdentity::new(&auth_result.user_id, "builtin", &auth_result.user_arn);
 
         if let Some(user) = user {
             identity.display_name = Some(user.display_name.clone());
@@ -158,10 +155,7 @@ mod tests {
         let provider = BuiltinSigV4Provider::new(user_store, "us-east-1");
 
         let mut headers = http::HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Bearer some-token".parse().unwrap(),
-        );
+        headers.insert("authorization", "Bearer some-token".parse().unwrap());
 
         let request = AuthRequest::new("GET", "/bucket/key", &headers);
         assert!(!provider.can_handle(&request));
