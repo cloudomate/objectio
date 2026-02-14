@@ -19,7 +19,7 @@
 #   RUST_VERSION - Rust version (default: 1.92)
 #   FEATURES - Override cargo features (default: auto-detect based on arch)
 
-ARG RUST_VERSION=1.92
+ARG RUST_VERSION=1.93
 
 # =============================================================================
 # Stage 1: Builder base with Rust and build dependencies

@@ -138,7 +138,7 @@ impl PlacementTemplate {
         }
 
         // Calculate domain slots needed
-        let domain_slots = l + ((g + 1) / 2); // local groups + global parity domains
+        let domain_slots = l + (g + 1).div_ceil(2); // local groups + global parity domains
 
         Self {
             name: format!("lrc_{}_{}_{}", k, l, g),
@@ -578,7 +578,7 @@ mod tests {
 
         // Count selections across many objects
         let mut selection_count: HashMap<NodeId, usize> = HashMap::new();
-        for i in 0..1000 {
+        for _i in 0..1000 {
             let object_id = ObjectId::new();
             let selected = crush.hrw_select_n(&object_id, &nodes, 1);
             if let Some((node_id, _)) = selected.first() {

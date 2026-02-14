@@ -129,7 +129,7 @@ impl PlacementPolicy {
 
                 Ok(PlacementResult {
                     storage_class: class_name.to_string(),
-                    protection: class.protection.clone(),
+                    protection: class.protection,
                     shards,
                 })
             }
@@ -171,7 +171,7 @@ impl PlacementPolicy {
 
                 Ok(PlacementResult {
                     storage_class: class_name.to_string(),
-                    protection: class.protection.clone(),
+                    protection: class.protection,
                     shards,
                 })
             }
@@ -205,7 +205,7 @@ impl PlacementPolicy {
 
                 Ok(PlacementResult {
                     storage_class: class_name.to_string(),
-                    protection: class.protection.clone(),
+                    protection: class.protection,
                     shards,
                 })
             }
@@ -247,6 +247,7 @@ impl PlacementPolicy {
     }
 
     /// Place a shard for LRC repair, preferring nodes in the same local group's domain
+    #[allow(clippy::too_many_arguments)]
     pub fn place_lrc_shard(
         &self,
         object_id: &ObjectId,

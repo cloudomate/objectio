@@ -165,10 +165,7 @@ impl CrushMap {
         // Get list of available domains
         let mut domain_keys: Vec<&String> = domain_nodes.keys().collect();
         // Sort deterministically based on hash
-        domain_keys.sort_by_key(|k| {
-            let domain_hash = xxhash_rust::xxh64::xxh64(k.as_bytes(), base_hash);
-            domain_hash
-        });
+        domain_keys.sort_by_key(|k| xxhash_rust::xxh64::xxh64(k.as_bytes(), base_hash));
 
         let mut position: u8 = 0;
         let empty_string = String::new();

@@ -18,7 +18,7 @@
 # Configuration
 DOCKER_REGISTRY ?=
 DOCKER_TAG ?= latest
-RUST_VERSION ?= 1.92
+RUST_VERSION ?= 1.93
 PLATFORMS ?= linux/amd64,linux/arm64
 BUILDX_BUILDER ?= objectio-builder
 
