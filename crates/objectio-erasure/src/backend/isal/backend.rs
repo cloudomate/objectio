@@ -143,14 +143,14 @@ impl ErasureBackend for IsalBackend {
         let data_all_present = (0..self.k).all(|i| shards[i].is_some());
         if data_all_present {
             let mut result = Vec::with_capacity(self.k + self.m);
-            for i in 0..self.k {
-                result.push(shards[i].unwrap().to_vec());
+            for shard in shards.iter().take(self.k) {
+                result.push(shard.unwrap().to_vec());
             }
             // Re-encode parity
             let data_refs: Vec<&[u8]> = result.iter().map(|s| s.as_slice()).collect();
             let encoded = self.encode(&data_refs, shard_size)?;
-            for i in self.k..self.k + self.m {
-                result.push(encoded[i].clone());
+            for item in encoded.iter().skip(self.k).take(self.m) {
+                result.push(item.clone());
             }
             return Ok(result);
         }
@@ -160,17 +160,17 @@ impl ErasureBackend for IsalBackend {
         let mut data: Vec<Vec<u8>> = Vec::with_capacity(self.k);
         let mut parity: Vec<Vec<u8>> = Vec::with_capacity(self.m);
 
-        for i in 0..self.k {
-            if let Some(shard) = shards[i] {
-                data.push(shard.to_vec());
+        for shard in shards.iter().take(self.k) {
+            if let Some(s) = shard {
+                data.push(s.to_vec());
             } else {
                 data.push(vec![0u8; shard_size]);
             }
         }
 
-        for i in self.k..self.k + self.m {
-            if let Some(shard) = shards[i] {
-                parity.push(shard.to_vec());
+        for shard in shards.iter().skip(self.k).take(self.m) {
+            if let Some(s) = shard {
+                parity.push(s.to_vec());
             } else {
                 parity.push(vec![0u8; shard_size]);
             }
@@ -243,7 +243,10 @@ impl IsalLrcBackend {
                 "local_parity_shards must be > 0".into(),
             ));
         }
-        if config.data_shards % config.local_parity_shards != 0 {
+        if !config
+            .data_shards
+            .is_multiple_of(config.local_parity_shards)
+        {
             return Err(ErasureError::InvalidConfig(
                 "data_shards must be divisible by local_parity_shards".into(),
             ));
