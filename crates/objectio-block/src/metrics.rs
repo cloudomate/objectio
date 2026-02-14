@@ -39,6 +39,7 @@ use parking_lot::RwLock;
 use crate::qos::{LatencyHistogram, LatencyPercentiles, VolumeRateLimiter};
 
 /// Bucket boundaries for Prometheus histogram (in seconds)
+#[allow(dead_code)]
 const PROMETHEUS_BUCKET_BOUNDARIES: &[f64] = &[
     0.00001, // 10us
     0.00002, // 20us
@@ -157,6 +158,7 @@ pub struct ClusterMetrics {
 
 /// Metrics collector that aggregates metrics from various sources
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct MetricsCollector {
     /// Volume metrics indexed by volume_id
     volumes: RwLock<HashMap<String, VolumeMetrics>>,
@@ -878,7 +880,7 @@ pub fn export_histogram_prometheus(
     let buckets = histogram.bucket_counts();
     let mut cumulative = 0u64;
 
-    for (i, (boundary_us, count)) in buckets.iter().enumerate() {
+    for (_i, (boundary_us, count)) in buckets.iter().enumerate() {
         cumulative += count;
         let boundary_secs = *boundary_us as f64 / 1_000_000.0;
 

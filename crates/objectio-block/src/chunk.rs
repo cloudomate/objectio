@@ -127,7 +127,7 @@ impl ChunkMapper {
 
     /// Calculate the number of chunks needed for a volume of the given size
     pub fn chunks_for_size(&self, size_bytes: u64) -> u64 {
-        (size_bytes + self.chunk_size - 1) / self.chunk_size
+        size_bytes.div_ceil(self.chunk_size)
     }
 
     /// Calculate the chunk-aligned size for a volume

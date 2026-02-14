@@ -242,19 +242,19 @@ impl VolumeRateLimiter {
     /// Returns true if the I/O can proceed, false if throttled
     pub fn try_acquire(&self, io_size_bytes: u64) -> bool {
         // Check IOPS limit
-        if let Some(ref bucket) = self.iops_bucket {
-            if !bucket.try_acquire(1) {
-                self.stats.record_throttled();
-                return false;
-            }
+        if let Some(ref bucket) = self.iops_bucket
+            && !bucket.try_acquire(1)
+        {
+            self.stats.record_throttled();
+            return false;
         }
 
         // Check bandwidth limit
-        if let Some(ref bucket) = self.bandwidth_bucket {
-            if !bucket.try_acquire(io_size_bytes) {
-                self.stats.record_throttled();
-                return false;
-            }
+        if let Some(ref bucket) = self.bandwidth_bucket
+            && !bucket.try_acquire(io_size_bytes)
+        {
+            self.stats.record_throttled();
+            return false;
         }
 
         true

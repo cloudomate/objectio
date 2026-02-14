@@ -130,8 +130,10 @@ impl WriteCache {
 
     /// Create a new write cache with journaling enabled
     pub fn with_journal<P: AsRef<Path>>(chunk_mapper: Arc<ChunkMapper>, journal_path: P) -> Self {
-        let mut config = CacheConfig::default();
-        config.journal_path = Some(journal_path.as_ref().to_string_lossy().to_string());
+        let config = CacheConfig {
+            journal_path: Some(journal_path.as_ref().to_string_lossy().to_string()),
+            ..CacheConfig::default()
+        };
         Self::new(chunk_mapper, config)
     }
 
@@ -245,10 +247,10 @@ impl WriteCache {
         }
 
         // Check if journal needs rotation
-        if let Some(ref journal) = self.journal {
-            if journal.needs_rotation() {
-                debug!("Journal needs rotation");
-            }
+        if let Some(ref journal) = self.journal
+            && journal.needs_rotation()
+        {
+            debug!("Journal needs rotation");
         }
 
         Ok(())

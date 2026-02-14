@@ -105,6 +105,7 @@ pub struct StoredSnapshot {
 }
 
 /// Stored chunk reference
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct StoredChunkRef {
     pub chunk_id: u64,
@@ -283,7 +284,7 @@ impl BlockMetaService {
             parent_snapshot_id: vol.parent_snapshot_id.clone(),
             chunk_size_bytes: vol.chunk_size_bytes,
             metadata: vol.metadata.clone(),
-            qos: vol.qos.clone(),
+            qos: vol.qos,
         }
     }
 
@@ -312,6 +313,7 @@ impl BlockMetaService {
     }
 
     /// Get chunk reference for a volume
+    #[allow(dead_code)]
     pub fn get_chunk(&self, volume_id: &str, chunk_id: u64) -> Option<StoredChunkRef> {
         self.volume_chunks
             .read()
@@ -320,17 +322,16 @@ impl BlockMetaService {
     }
 
     /// Set chunk reference for a volume
+    #[allow(dead_code)]
     pub fn set_chunk(&self, volume_id: &str, chunk_id: u64, chunk_ref: StoredChunkRef) {
         if let Some(chunks) = self.volume_chunks.write().get_mut(volume_id) {
             // Update used_bytes on new chunk
             let is_new = !chunks.contains_key(&chunk_id);
             chunks.insert(chunk_id, chunk_ref.clone());
 
-            if is_new {
-                if let Some(vol) = self.volumes.write().get_mut(volume_id) {
-                    vol.used_bytes += chunk_ref.size_bytes;
-                    vol.updated_at = Self::current_timestamp();
-                }
+            if is_new && let Some(vol) = self.volumes.write().get_mut(volume_id) {
+                vol.used_bytes += chunk_ref.size_bytes;
+                vol.updated_at = Self::current_timestamp();
             }
         }
     }
@@ -708,7 +709,7 @@ impl BlockService for BlockMetaService {
             .volumes
             .read()
             .get(&snapshot.volume_id)
-            .and_then(|v| v.qos.clone());
+            .and_then(|v| v.qos);
 
         let volume = StoredVolume {
             volume_id: volume_id.clone(),
@@ -909,7 +910,7 @@ impl BlockService for BlockMetaService {
             .unwrap_or(DEFAULT_CHUNK_SIZE as u64);
 
         let start_chunk = req.offset_bytes / chunk_size;
-        let end_chunk = (req.offset_bytes + req.length_bytes + chunk_size - 1) / chunk_size;
+        let end_chunk = (req.offset_bytes + req.length_bytes).div_ceil(chunk_size);
 
         if let Some(chunks) = self.volume_chunks.write().get_mut(&req.volume_id) {
             for chunk_id in start_chunk..end_chunk {

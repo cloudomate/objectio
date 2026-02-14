@@ -104,9 +104,9 @@ impl OperationMetrics {
     fn record(&self, status_code: u16, request_bytes: u64, response_bytes: u64, latency_us: u64) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
 
-        if status_code >= 200 && status_code < 300 {
+        if (200..300).contains(&status_code) {
             self.requests_success.fetch_add(1, Ordering::Relaxed);
-        } else if status_code >= 400 && status_code < 500 {
+        } else if (400..500).contains(&status_code) {
             self.requests_client_error.fetch_add(1, Ordering::Relaxed);
         } else if status_code >= 500 {
             self.requests_server_error.fetch_add(1, Ordering::Relaxed);
@@ -182,7 +182,7 @@ impl S3Metrics {
         latency_us: u64,
     ) {
         let mut ops = self.operations.write().unwrap();
-        let metrics = ops.entry(op).or_insert_with(OperationMetrics::new);
+        let metrics = ops.entry(op).or_default();
         metrics.record(status_code, request_bytes, response_bytes, latency_us);
     }
 

@@ -97,7 +97,7 @@ impl Volume {
 
     /// Get the number of chunks in this volume
     pub fn chunk_count(&self) -> u64 {
-        (self.size_bytes + self.chunk_size - 1) / self.chunk_size
+        self.size_bytes.div_ceil(self.chunk_size)
     }
 
     /// Check if the volume can be modified

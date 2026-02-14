@@ -101,6 +101,7 @@ pub enum EcConfig {
     /// MDS (Maximum Distance Separable) Reed-Solomon
     Mds { k: u8, m: u8 },
     /// LRC (Locally Repairable Codes)
+    #[allow(dead_code)]
     Lrc { k: u8, l: u8, g: u8 },
     /// Simple replication (no erasure coding)
     /// count=1: single disk, no redundancy
@@ -199,6 +200,7 @@ pub struct MetaStats {
 
 impl MetaService {
     /// Create a new metadata service with default MDS 4+2 configuration
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::with_ec_config(EcConfig::default())
     }
@@ -263,14 +265,11 @@ impl MetaService {
                 .cloned();
             if let Some(admin_user) = user {
                 let keys = self.user_keys.read();
-                if let Some(key_ids) = keys.get(&admin_user.user_id) {
-                    if let Some(first_key_id) = key_ids.first() {
-                        if let Some(key) = self.access_keys.read().get(first_key_id) {
-                            return Some((
-                                key.access_key_id.clone(),
-                                key.secret_access_key.clone(),
-                            ));
-                        }
+                if let Some(key_ids) = keys.get(&admin_user.user_id)
+                    && let Some(first_key_id) = key_ids.first()
+                {
+                    if let Some(key) = self.access_keys.read().get(first_key_id) {
+                        return Some((key.access_key_id.clone(), key.secret_access_key.clone()));
                     }
                 }
             }
@@ -347,7 +346,7 @@ impl MetaService {
     pub fn register_osd(&self, node: OsdNode) {
         info!(
             "Registering OSD node: {} at {}",
-            hex::encode(&node.node_id),
+            hex::encode(node.node_id),
             node.address
         );
         self.osd_nodes.write().push(node.clone());
@@ -412,7 +411,7 @@ impl MetaService {
 
         debug!(
             "Updated CRUSH topology with node {}",
-            hex::encode(&osd_node.node_id)
+            hex::encode(osd_node.node_id)
         );
     }
 
@@ -1155,9 +1154,7 @@ impl MetadataService for MetaService {
             .filter(|u| u.bucket == req.bucket)
             .filter(|u| req.prefix.is_empty() || u.key.starts_with(&req.prefix))
             .filter(|u| {
-                if req.key_marker.is_empty() {
-                    true
-                } else if u.key > req.key_marker {
+                if req.key_marker.is_empty() || u.key > req.key_marker {
                     true
                 } else if u.key == req.key_marker && !req.upload_id_marker.is_empty() {
                     u.upload_id > req.upload_id_marker

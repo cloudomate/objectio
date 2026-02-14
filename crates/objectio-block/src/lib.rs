@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! ObjectIO Block Storage
 //!
 //! This crate provides block storage capabilities on top of ObjectIO's

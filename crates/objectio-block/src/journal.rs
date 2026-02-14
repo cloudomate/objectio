@@ -278,6 +278,7 @@ impl WriteJournal {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .map_err(|e| BlockError::Journal(format!("failed to open journal: {}", e)))?;
 
@@ -294,7 +295,7 @@ impl WriteJournal {
             // New journal - write header
             let mut writer = BufWriter::new(file);
             Self::write_header(&mut writer, 0, 0)?;
-            let file = writer
+            let _file = writer
                 .into_inner()
                 .map_err(|e| BlockError::Journal(format!("flush failed: {}", e)))?;
             (0, 0)
@@ -303,7 +304,6 @@ impl WriteJournal {
         // Reopen for appending
         let file = OpenOptions::new()
             .read(true)
-            .write(true)
             .append(true)
             .open(&path)
             .map_err(|e| BlockError::Journal(format!("failed to reopen journal: {}", e)))?;
@@ -460,23 +460,18 @@ impl WriteJournal {
         let mut last_checkpoint_seq = self.last_checkpoint.load(Ordering::SeqCst);
 
         // Scan all entries, tracking the last checkpoint seen on disk
-        loop {
-            match JournalEntry::deserialize(&mut reader) {
-                Ok(entry) => {
-                    if !entry.verify() {
-                        warn!(
-                            "Journal entry {} failed checksum, stopping recovery",
-                            entry.sequence
-                        );
-                        break;
-                    }
-                    if entry.entry_type == EntryType::Checkpoint {
-                        last_checkpoint_seq = entry.sequence;
-                    } else {
-                        all_entries.push(entry);
-                    }
-                }
-                Err(_) => break, // EOF or corruption
+        while let Ok(entry) = JournalEntry::deserialize(&mut reader) {
+            if !entry.verify() {
+                warn!(
+                    "Journal entry {} failed checksum, stopping recovery",
+                    entry.sequence
+                );
+                break;
+            }
+            if entry.entry_type == EntryType::Checkpoint {
+                last_checkpoint_seq = entry.sequence;
+            } else {
+                all_entries.push(entry);
             }
         }
 
@@ -513,6 +508,7 @@ impl WriteJournal {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&self.path)
             .map_err(|e| BlockError::Journal(format!("failed to create new journal: {}", e)))?;
 
