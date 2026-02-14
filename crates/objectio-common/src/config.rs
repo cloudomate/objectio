@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 /// Root configuration for ObjectIO
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Node configuration
     pub node: NodeConfig,
@@ -20,18 +20,6 @@ pub struct Config {
     pub s3: S3Config,
     /// Cluster configuration
     pub cluster: ClusterConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            node: NodeConfig::default(),
-            storage: StorageConfig::default(),
-            network: NetworkConfig::default(),
-            s3: S3Config::default(),
-            cluster: ClusterConfig::default(),
-        }
-    }
 }
 
 /// Node identity and role configuration
@@ -143,20 +131,15 @@ impl Default for WalConfig {
 }
 
 /// WAL synchronization mode
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub enum WalSyncMode {
     /// Sync after every write (safest, slowest)
     EveryWrite,
     /// Sync only on commit (balanced)
+    #[default]
     OnCommit,
     /// Batch syncs at interval (fastest, less durable)
     Batched,
-}
-
-impl Default for WalSyncMode {
-    fn default() -> Self {
-        Self::OnCommit
-    }
 }
 
 /// Network configuration

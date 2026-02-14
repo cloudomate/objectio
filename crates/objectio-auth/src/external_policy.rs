@@ -111,7 +111,7 @@ impl S3Action {
     }
 
     /// Parse from action string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_action(s: &str) -> Option<Self> {
         match s {
             "s3:GetObject" => Some(S3Action::GetObject),
             "s3:PutObject" => Some(S3Action::PutObject),

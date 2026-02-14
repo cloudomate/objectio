@@ -744,24 +744,20 @@ pub struct GeoReplication {
 }
 
 /// Replication synchronization mode
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncMode {
     /// Wait for all replicas before acknowledging write
     Sync,
     /// Acknowledge write after local commit, replicate asynchronously
+    #[default]
     Async,
 }
 
-impl Default for SyncMode {
-    fn default() -> Self {
-        Self::Async
-    }
-}
-
 /// Node status
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeStatus {
     /// Node is healthy and accepting requests
+    #[default]
     Active,
     /// Node is being drained (no new data, serving reads)
     Draining,
@@ -771,16 +767,11 @@ pub enum NodeStatus {
     Decommissioning,
 }
 
-impl Default for NodeStatus {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
 /// Disk status
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiskStatus {
     /// Disk is healthy
+    #[default]
     Healthy,
     /// Disk has errors but is still operational
     Degraded,
@@ -788,12 +779,6 @@ pub enum DiskStatus {
     Failed,
     /// Disk is being rebuilt
     Rebuilding,
-}
-
-impl Default for DiskStatus {
-    fn default() -> Self {
-        Self::Healthy
-    }
 }
 
 #[cfg(test)]

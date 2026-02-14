@@ -622,31 +622,31 @@ impl PolicyEvaluator {
         }
 
         // Check IpAddress
-        if let Some(ref ip_conditions) = conditions.ip_address {
-            if let Some(source_ip) = context.source_ip {
-                for (_key, cidrs) in ip_conditions {
-                    if !cidrs
-                        .as_vec()
-                        .iter()
-                        .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
-                    {
-                        return false;
-                    }
+        if let (Some(ref ip_conditions), Some(source_ip)) =
+            (&conditions.ip_address, context.source_ip)
+        {
+            for cidrs in ip_conditions.values() {
+                if !cidrs
+                    .as_vec()
+                    .iter()
+                    .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
+                {
+                    return false;
                 }
             }
         }
 
         // Check NotIpAddress
-        if let Some(ref not_ip_conditions) = conditions.not_ip_address {
-            if let Some(source_ip) = context.source_ip {
-                for (_key, cidrs) in not_ip_conditions {
-                    if cidrs
-                        .as_vec()
-                        .iter()
-                        .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
-                    {
-                        return false;
-                    }
+        if let (Some(ref not_ip_conditions), Some(source_ip)) =
+            (&conditions.not_ip_address, context.source_ip)
+        {
+            for cidrs in not_ip_conditions.values() {
+                if cidrs
+                    .as_vec()
+                    .iter()
+                    .any(|cidr| self.ip_matches_cidr(&source_ip, cidr))
+                {
+                    return false;
                 }
             }
         }
@@ -688,11 +688,11 @@ impl PolicyEvaluator {
             return true;
         }
 
-        if let Some((network, _prefix)) = cidr.split_once('/') {
-            if let Ok(network_ip) = network.parse::<IpAddr>() {
-                // Simple check - in production use proper CIDR matching
-                return ip == &network_ip;
-            }
+        if let Some((network, _prefix)) = cidr.split_once('/')
+            && let Ok(network_ip) = network.parse::<IpAddr>()
+        {
+            // Simple check - in production use proper CIDR matching
+            return ip == &network_ip;
         }
 
         // Try exact IP match

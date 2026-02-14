@@ -4,30 +4,20 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// User status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserStatus {
+    #[default]
     Active,
     Suspended,
     Deleted,
 }
 
-impl Default for UserStatus {
-    fn default() -> Self {
-        Self::Active
-    }
-}
-
 /// Access key status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyStatus {
+    #[default]
     Active,
     Inactive,
-}
-
-impl Default for KeyStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// A user account

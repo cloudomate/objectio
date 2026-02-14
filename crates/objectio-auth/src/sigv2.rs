@@ -229,12 +229,12 @@ impl SigV2Verifier {
 
         for (name, value) in request.headers().iter() {
             let name_lower = name.as_str().to_lowercase();
-            if name_lower.starts_with("x-amz-") {
-                if let Ok(value_str) = value.to_str() {
-                    // Trim whitespace and collapse multiple spaces
-                    let trimmed = value_str.split_whitespace().collect::<Vec<_>>().join(" ");
-                    amz_headers.entry(name_lower).or_default().push(trimmed);
-                }
+            if name_lower.starts_with("x-amz-")
+                && let Ok(value_str) = value.to_str()
+            {
+                // Trim whitespace and collapse multiple spaces
+                let trimmed = value_str.split_whitespace().collect::<Vec<_>>().join(" ");
+                amz_headers.entry(name_lower).or_default().push(trimmed);
             }
         }
 
