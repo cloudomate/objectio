@@ -622,8 +622,7 @@ impl PolicyEvaluator {
         }
 
         // Check IpAddress
-        if let (Some(ip_conditions), Some(source_ip)) =
-            (&conditions.ip_address, context.source_ip)
+        if let (Some(ip_conditions), Some(source_ip)) = (&conditions.ip_address, context.source_ip)
         {
             for cidrs in ip_conditions.values() {
                 if !cidrs
