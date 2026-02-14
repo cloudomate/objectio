@@ -186,39 +186,39 @@ docker-lint:
 
 ## Start local cluster (3 meta + 6 OSD + 1 gateway)
 cluster-up: docker
-	docker compose -f docker-compose.cluster.yml up -d
+	docker compose -f deploy/local-cluster/docker-compose.yml up -d
 
 ## Stop local cluster
 cluster-down:
-	docker compose -f docker-compose.cluster.yml down
+	docker compose -f deploy/local-cluster/docker-compose.yml down
 
 ## Stop cluster and remove volumes
 cluster-clean:
-	docker compose -f docker-compose.cluster.yml down -v
+	docker compose -f deploy/local-cluster/docker-compose.yml down -v
 
 ## View cluster logs
 cluster-logs:
-	docker compose -f docker-compose.cluster.yml logs -f
+	docker compose -f deploy/local-cluster/docker-compose.yml logs -f
 
 ## View gateway logs
 cluster-logs-gateway:
-	docker compose -f docker-compose.cluster.yml logs -f gateway
+	docker compose -f deploy/local-cluster/docker-compose.yml logs -f gateway
 
 ## View meta logs
 cluster-logs-meta:
-	docker compose -f docker-compose.cluster.yml logs -f meta1 meta2 meta3
+	docker compose -f deploy/local-cluster/docker-compose.yml logs -f meta1 meta2 meta3
 
 ## View OSD logs
 cluster-logs-osd:
-	docker compose -f docker-compose.cluster.yml logs -f osd1 osd2 osd3 osd4 osd5 osd6
+	docker compose -f deploy/local-cluster/docker-compose.yml logs -f osd1 osd2 osd3 osd4 osd5 osd6
 
 ## Check cluster status
 cluster-status:
-	docker compose -f docker-compose.cluster.yml ps
+	docker compose -f deploy/local-cluster/docker-compose.yml ps
 
 ## Run CLI in cluster network
 cluster-cli:
-	docker compose -f docker-compose.cluster.yml run --rm \
+	docker compose -f deploy/local-cluster/docker-compose.yml run --rm \
 		-e OBJECTIO_META_ENDPOINTS=meta1:9100,meta2:9100,meta3:9100 \
 		objectio-cli $(ARGS)
 

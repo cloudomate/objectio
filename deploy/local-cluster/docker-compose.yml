@@ -2,9 +2,12 @@
 # Runs a complete ObjectIO cluster for development and testing
 #
 # Usage:
-#   docker compose -f docker-compose.cluster.yml up -d          # Start cluster
-#   docker compose -f docker-compose.cluster.yml down -v        # Stop and cleanup
-#   docker compose -f docker-compose.cluster.yml logs -f        # View logs
+#   docker compose -f deploy/local-cluster/docker-compose.yml up -d          # Start cluster
+#   docker compose -f deploy/local-cluster/docker-compose.yml down -v        # Stop and cleanup
+#   docker compose -f deploy/local-cluster/docker-compose.yml logs -f        # View logs
+#
+# Or via Makefile:
+#   make cluster-up / cluster-down / cluster-logs
 #
 # Services:
 #   - gateway: S3 API endpoint at http://localhost:9000
@@ -18,7 +21,7 @@
 x-meta-common: &meta-common
   image: objectio-meta:latest
   build:
-    context: .
+    context: ../..
     dockerfile: Dockerfile
     target: meta
   networks:
@@ -28,7 +31,7 @@ x-meta-common: &meta-common
 x-osd-common: &osd-common
   image: objectio-osd:latest
   build:
-    context: .
+    context: ../..
     dockerfile: Dockerfile
     target: osd
   networks:
@@ -42,7 +45,7 @@ services:
   gateway:
     image: objectio-gateway:latest
     build:
-      context: .
+      context: ../..
       dockerfile: Dockerfile
       target: gateway
     ports:

@@ -145,6 +145,31 @@ fn parse_range_header(range_header: &str, total_size: u64) -> Option<ByteRange> 
     Some(ByteRange { start, end })
 }
 
+/// Given a byte range and stripe metadata, return `(stripe_index, stripe_byte_offset)`
+/// pairs for only the stripes that overlap the range.
+fn overlapping_stripes(stripes: &[StripeMeta], object_size: u64, range: &ByteRange) -> Vec<(usize, u64)> {
+    let mut offset = 0u64;
+    let mut result = Vec::new();
+    for (idx, stripe) in stripes.iter().enumerate() {
+        let effective_size = if stripe.data_size > 0 {
+            stripe.data_size
+        } else if stripes.len() == 1 {
+            object_size
+        } else {
+            // Multi-stripe without data_size: include conservatively
+            // (the stripe loop will error out for this case)
+            0
+        };
+        let stripe_end = offset + effective_size;
+        // Include stripe if it overlaps the range, or if we can't determine its size
+        if effective_size == 0 || (offset <= range.end && stripe_end > range.start) {
+            result.push((idx, offset));
+        }
+        offset = stripe_end;
+    }
+    result
+}
+
 /// Check bucket policy and return error response if access is denied
 async fn check_bucket_policy(
     state: &AppState,
@@ -1902,10 +1927,46 @@ pub async fn get_object(
         );
     }
 
-    // Read all stripes (supports multipart uploads with multiple stripes)
-    let mut all_data = Vec::with_capacity(object.size as usize);
+    // Resolve byte range before fetching any stripe data
+    let total_size = object.size;
+    let resolved_range = match range_header {
+        Some(range_str) => match parse_range_header(range_str, total_size) {
+            Some(range) => Some(range),
+            None => {
+                // Invalid range — return 416 without fetching any stripes
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("Content-Range", format!("bytes */{total_size}"))
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        },
+        None => None,
+    };
 
-    for (stripe_idx, stripe) in object.stripes.iter().enumerate() {
+    // Determine which stripes to fetch (skip non-overlapping stripes for range requests)
+    let stripe_plan: Vec<(usize, u64)> = if let Some(ref range) = resolved_range {
+        overlapping_stripes(&object.stripes, total_size, range)
+    } else {
+        // Full object: all stripes, offsets unused since we don't slice
+        object
+            .stripes
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, 0u64))
+            .collect()
+    };
+
+    // Pre-allocate with appropriate capacity
+    let capacity = if let Some(ref range) = resolved_range {
+        (range.end - range.start + 1) as usize
+    } else {
+        object.size as usize
+    };
+    let mut all_data = Vec::with_capacity(capacity);
+
+    for &(stripe_idx, stripe_byte_offset) in &stripe_plan {
+        let stripe = &object.stripes[stripe_idx];
         let ec_k = stripe.ec_k as usize;
         let ec_m = stripe.ec_m as usize;
         let stripe_ec_type = ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
@@ -1974,7 +2035,15 @@ pub async fn get_object(
                         } else {
                             data
                         };
-                        all_data.extend(actual_data);
+                        if let Some(ref range) = resolved_range {
+                            let stripe_end = stripe_byte_offset + stripe_data_size as u64;
+                            let slice_start = range.start.saturating_sub(stripe_byte_offset) as usize;
+                            let slice_end = std::cmp::min(range.end + 1, stripe_end)
+                                .saturating_sub(stripe_byte_offset) as usize;
+                            all_data.extend_from_slice(&actual_data[slice_start..slice_end]);
+                        } else {
+                            all_data.extend(actual_data);
+                        }
                         data_read = true;
                         break;
                     }
@@ -2150,61 +2219,55 @@ pub async fn get_object(
             }
         };
 
-        all_data.extend(stripe_data);
-    }
-
-    info!(
-        "Read object: {}/{}, size={}, stripes={}",
-        bucket, key, all_data.len(), object.stripes.len()
-    );
-
-    let data = all_data;
-    let total_size = data.len() as u64;
-
-    // Handle Range request
-    if let Some(range_str) = range_header {
-        if let Some(range) = parse_range_header(range_str, total_size) {
-            let start = range.start as usize;
-            let end = range.end as usize;
-            let partial_data = data[start..=end].to_vec();
-            let content_range = format!("bytes {}-{}/{}", range.start, range.end, total_size);
-
-            let builder = Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, &object.content_type)
-                .header(header::CONTENT_LENGTH, partial_data.len().to_string())
-                .header(header::CONTENT_RANGE, content_range)
-                .header("ETag", &object.etag)
-                .header("Accept-Ranges", "bytes")
-                .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
-
-            // Add user metadata headers
-            let builder = add_metadata_headers(builder, &object.user_metadata);
-
-            return builder.body(Body::from(partial_data)).unwrap();
+        if let Some(ref range) = resolved_range {
+            let stripe_end = stripe_byte_offset + stripe_data_size as u64;
+            let slice_start = range.start.saturating_sub(stripe_byte_offset) as usize;
+            let slice_end = std::cmp::min(range.end + 1, stripe_end)
+                .saturating_sub(stripe_byte_offset) as usize;
+            all_data.extend_from_slice(&stripe_data[slice_start..slice_end]);
         } else {
-            // Invalid range - return 416 Range Not Satisfiable
-            return Response::builder()
-                .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                .header("Content-Range", format!("bytes */{}", total_size))
-                .body(Body::empty())
-                .unwrap();
+            all_data.extend(stripe_data);
         }
     }
 
-    // Full content response
-    let builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, &object.content_type)
-        .header(header::CONTENT_LENGTH, data.len().to_string())
-        .header("ETag", &object.etag)
-        .header("Accept-Ranges", "bytes")
-        .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
+    info!(
+        "Read object: {}/{}, size={}, stripes_fetched={}/{}",
+        bucket,
+        key,
+        all_data.len(),
+        stripe_plan.len(),
+        object.stripes.len()
+    );
 
-    // Add user metadata headers
-    let builder = add_metadata_headers(builder, &object.user_metadata);
+    // Build response — range requests already have sliced data
+    if let Some(ref range) = resolved_range {
+        let content_range = format!("bytes {}-{}/{total_size}", range.start, range.end);
 
-    builder.body(Body::from(data)).unwrap()
+        let builder = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, &object.content_type)
+            .header(header::CONTENT_LENGTH, all_data.len().to_string())
+            .header(header::CONTENT_RANGE, content_range)
+            .header("ETag", &object.etag)
+            .header("Accept-Ranges", "bytes")
+            .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
+
+        let builder = add_metadata_headers(builder, &object.user_metadata);
+
+        builder.body(Body::from(all_data)).unwrap()
+    } else {
+        let builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, &object.content_type)
+            .header(header::CONTENT_LENGTH, all_data.len().to_string())
+            .header("ETag", &object.etag)
+            .header("Accept-Ranges", "bytes")
+            .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
+
+        let builder = add_metadata_headers(builder, &object.user_metadata);
+
+        builder.body(Body::from(all_data)).unwrap()
+    }
 }
 
 /// Helper to get node address from metadata service

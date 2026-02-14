@@ -1,5 +1,5 @@
 # ObjectIO Monitoring Stack
-# Run with: docker-compose -f docker-compose.monitoring.yml up -d
+# Run with: docker compose -f deploy/local-cluster/docker-compose.monitoring.yml up -d
 #
 # Services:
 #   - Prometheus: http://localhost:9090
@@ -9,14 +9,12 @@
 #   - ObjectIO services running with metrics endpoints exposed
 #   - Update deploy/prometheus/prometheus.yml with your service addresses
 
-version: '3.8'
-
 services:
   prometheus:
     image: prom/prometheus:v2.48.0
     container_name: objectio-prometheus
     volumes:
-      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -36,8 +34,8 @@ services:
     container_name: objectio-grafana
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
@@ -52,22 +50,6 @@ services:
       - prometheus
     restart: unless-stopped
 
-  # Optional: Alertmanager for alerts
-  # alertmanager:
-  #   image: prom/alertmanager:v0.26.0
-  #   container_name: objectio-alertmanager
-  #   volumes:
-  #     - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-  #     - alertmanager_data:/alertmanager
-  #   command:
-  #     - '--config.file=/etc/alertmanager/alertmanager.yml'
-  #     - '--storage.path=/alertmanager'
-  #   ports:
-  #     - "9093:9093"
-  #   networks:
-  #     - objectio
-  #   restart: unless-stopped
-
 networks:
   objectio:
     name: objectio-network
@@ -78,5 +60,3 @@ volumes:
     name: objectio-prometheus-data
   grafana_data:
     name: objectio-grafana-data
-  # alertmanager_data:
-  #   name: objectio-alertmanager-data

@@ -2,11 +2,10 @@
 # Supports both raw block devices and folder-emulated disks
 #
 # Usage:
-#   # With raw disks (production):
-#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f deploy/prod/docker-compose.yml up -d
 #
 #   # With folder-emulated disks (testing):
-#   DISK_MODE=folder docker compose -f docker-compose.prod.yml up -d
+#   DISK_MODE=folder docker compose -f deploy/prod/docker-compose.yml up -d
 #
 # Environment variables:
 #   DISK_MODE=raw|folder (default: raw)

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: cr.imys.in/objectio
+
+jobs:
+  ci:
+    name: fmt + lint + test
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build CI base image
+        run: docker build --target deps -t objectio-ci:${{ github.run_id }} .
+
+      - name: Check formatting
+        run: >
+          docker run --rm
+          -v ci-target-${{ github.run_id }}:/build/target
+          objectio-ci:${{ github.run_id }}
+          cargo fmt --all -- --check
+
+      - name: Clippy
+        run: >
+          docker run --rm
+          -v ci-target-${{ github.run_id }}:/build/target
+          objectio-ci:${{ github.run_id }}
+          cargo clippy --workspace --all-targets --features isal -- -D warnings
+
+      - name: Tests
+        run: >
+          docker run --rm
+          -v ci-target-${{ github.run_id }}:/build/target
+          objectio-ci:${{ github.run_id }}
+          cargo test --workspace --features isal
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker volume rm ci-target-${{ github.run_id }} || true
+          docker rmi objectio-ci:${{ github.run_id }} || true
+
+  build-and-push:
+    name: Build & Push Docker Images
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to registry
+        run: echo "$REGISTRY_PASSWORD" | docker login cr.imys.in -u "$REGISTRY_USER" --password-stdin
+
+      - name: Build and push images
+        run: |
+          SHA_SHORT=$(git rev-parse --short HEAD)
+
+          for PAIR in gateway:objectio-gateway meta:objectio-meta osd:objectio-osd cli:objectio-cli all:objectio; do
+            TARGET="${PAIR%%:*}"
+            IMAGE="${PAIR##*:}"
+            echo "::group::Building $IMAGE (target: $TARGET)"
+            docker build \
+              --target "$TARGET" \
+              -t "$REGISTRY/$IMAGE:latest" \
+              -t "$REGISTRY/$IMAGE:$SHA_SHORT" \
+              .
+            docker push "$REGISTRY/$IMAGE:latest"
+            docker push "$REGISTRY/$IMAGE:$SHA_SHORT"
+            echo "::endgroup::"
+          done
+
+      - name: Cleanup
+        if: always()
+        run: docker image prune -f --filter "until=168h"

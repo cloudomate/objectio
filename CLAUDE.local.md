@@ -1,6 +1,6 @@
 # CLAUDE.local.md
 
-Local development context for deploying ObjectIO to myvm / datacore.
+Local development context for deploying ObjectIO to datacore.
 
 ## Container Registry
 
@@ -14,45 +14,26 @@ All images are pushed to:
 - `cr.imys.in/objectio/objectio-cli:<tag>`
 - `cr.imys.in/objectio/objectio:<tag>` (all-in-one)
 
-## Build Host
+## CI / CD
 
-Build natively on myvm (x86_64) instead of cross-compiling from macOS.
+GitHub Actions (`.github/workflows/ci.yml`) runs on a **self-hosted runner** (x86_64):
 
-```bash
-# SSH access
-ssh -i ~/.ssh/onekey ubuntu@myvm.lan
+1. **CI job**: Builds the `deps` Dockerfile stage, runs fmt + clippy + test inside Docker containers.
+2. **Build & Push job** (main branch only, after CI passes): Builds all Docker targets, tags `:latest` + `:$SHA_SHORT`, pushes to `cr.imys.in/objectio/`.
 
-# Sync repo to myvm (from dev machine)
-rsync -az --delete --exclude target/ --exclude .git/ --exclude '.DS_Store' \
-  -e "ssh -i ~/.ssh/onekey" \
-  /Users/ys/coderepo/objectio/ ubuntu@myvm.lan:~/objectio/
+The self-hosted runner has `REGISTRY_USER` and `REGISTRY_PASSWORD` set as environment variables for `docker login cr.imys.in`.
 
-# Build all images on myvm (native x86_64, ISA-L enabled)
-ssh -i ~/.ssh/onekey ubuntu@myvm.lan "cd ~/objectio && \
-  docker build --target gateway -t cr.imys.in/objectio/objectio-gateway:latest . && \
-  docker build --target meta -t cr.imys.in/objectio/objectio-meta:latest . && \
-  docker build --target osd -t cr.imys.in/objectio/objectio-osd:latest . && \
-  docker build --target cli -t cr.imys.in/objectio/objectio-cli:latest ."
-
-# Push all images from myvm
-ssh -i ~/.ssh/onekey ubuntu@myvm.lan "\
-  docker push cr.imys.in/objectio/objectio-gateway:latest && \
-  docker push cr.imys.in/objectio/objectio-meta:latest && \
-  docker push cr.imys.in/objectio/objectio-osd:latest && \
-  docker push cr.imys.in/objectio/objectio-cli:latest"
-```
+Push to `main` → CI passes → images built & pushed → pull on datacore.
 
 ## Datacore Deployment
 
 - **Host**: datacore / 192.168.4.102 (x86_64)
-- **SSH**: `ssh -i ~/.ssh/onekey ys@192.168.4.102`
-- **Config/docker compose**: `/data/objectio/`
+- **SSH**: `ssh datacore` (see `~/.ssh/config`)
+- **Compose file on host**: `/data/objectio/` (uses `deploy/datacore/docker-compose.yml`)
 - **EC scheme**: 3+2 (3 data + 2 parity, 5 OSDs)
 - **Disks**: Docker volumes, each OSD creates a 10GB `disk.raw` file inside its volume
 - **Topology**: 3 meta (Raft) + 5 OSD + 1 gateway
 - **Docker network**: `objectio_objectio-net`
-
-Note: myvm is the **build host only** (compile + push images). The cluster runs on **datacore**.
 
 ### OSD disk notes
 
@@ -77,31 +58,55 @@ The OSD auto-creates a 10GB sparse `disk.raw` on first start.
 ### Deploy / update
 
 ```bash
-# 1. Sync + build + push (from dev machine to myvm build host)
-rsync -az --delete --exclude target/ --exclude .git/ --exclude '.DS_Store' \
-  -e "ssh -i ~/.ssh/onekey" \
-  /Users/ys/coderepo/objectio/ ubuntu@myvm.lan:~/objectio/
+# Pull latest images and restart (on datacore)
+ssh datacore "cd /data/objectio && docker compose pull && docker compose up -d"
+```
 
-ssh -i ~/.ssh/onekey ubuntu@myvm.lan "cd ~/objectio && \
+Images are built and pushed automatically by CI on push to `main`. Manual build if needed:
+
+```bash
+# Build + push from datacore (or any x86_64 host with Docker)
+ssh datacore "cd /data/objectio && \
   docker build --target gateway -t cr.imys.in/objectio/objectio-gateway:latest . && \
-  docker build --target meta -t cr.imys.in/objectio/objectio-meta:latest . && \
-  docker build --target osd -t cr.imys.in/objectio/objectio-osd:latest . && \
-  docker build --target cli -t cr.imys.in/objectio/objectio-cli:latest . && \
+  docker build --target meta    -t cr.imys.in/objectio/objectio-meta:latest . && \
+  docker build --target osd     -t cr.imys.in/objectio/objectio-osd:latest . && \
+  docker build --target cli     -t cr.imys.in/objectio/objectio-cli:latest . && \
   docker push cr.imys.in/objectio/objectio-gateway:latest && \
   docker push cr.imys.in/objectio/objectio-meta:latest && \
   docker push cr.imys.in/objectio/objectio-osd:latest && \
   docker push cr.imys.in/objectio/objectio-cli:latest"
-
-# 2. Restart cluster (on datacore)
-ssh -i ~/.ssh/onekey ys@192.168.4.102 "cd /data/objectio && \
-  docker compose pull && docker compose up -d"
 ```
 
 ### Clean restart (wipes all data)
 
 ```bash
-ssh -i ~/.ssh/onekey ys@192.168.4.102 "cd /data/objectio && \
-  docker compose down -v && docker compose up -d"
+ssh datacore "cd /data/objectio && docker compose down -v && docker compose up -d"
+```
+
+### Test with S3
+
+```bash
+# Create bucket
+aws --endpoint-url http://192.168.4.102:9000 s3 mb s3://test
+
+# Upload
+echo "hello objectio" | aws --endpoint-url http://192.168.4.102:9000 s3 cp - s3://test/hello.txt
+
+# Download
+aws --endpoint-url http://192.168.4.102:9000 s3 cp s3://test/hello.txt -
+
+# Range read (first 5 bytes → 206 Partial Content)
+curl -r 0-4 http://192.168.4.102:9000/test/hello.txt
+
+# Upload large file (multi-stripe)
+dd if=/dev/urandom bs=1M count=20 of=/tmp/bigfile
+aws --endpoint-url http://192.168.4.102:9000 s3 cp /tmp/bigfile s3://test/bigfile
+
+# Range read on large file (should only fetch 1 stripe, not all)
+curl -r 0-1023 http://192.168.4.102:9000/test/bigfile -o /dev/null -w '%{http_code}\n'  # 206
+
+# List
+aws --endpoint-url http://192.168.4.102:9000 s3 ls s3://test/
 ```
 
 ### CLI against datacore
@@ -120,6 +125,7 @@ Prometheus and Grafana run on **datacore** alongside the cluster.
 - **Prometheus**: `http://192.168.4.102:9090` (container: `objectio-prometheus`)
 - **Grafana**: `http://192.168.4.102:3002` (container: `grafana-dev`, credentials: `admin/admin`)
 - **Monitoring config**: `/data/objectio/monitoring/` on datacore
+- **Monitoring compose**: `deploy/monitoring/docker-compose.monitoring.yml`
 - **Datasource**: `prometheus-objectio` (uid: `cfby2ljdndt6oa`)
 
 Grafana is a shared `grafana-dev` instance (not managed by objectio compose). Dashboards are imported via API.
@@ -129,21 +135,20 @@ Grafana is a shared `grafana-dev` instance (not managed by objectio compose). Da
 ```bash
 # Sync monitoring config to datacore
 rsync -az --delete --exclude '.DS_Store' \
-  -e "ssh -i ~/.ssh/onekey" \
-  /Users/ys/coderepo/objectio/deploy/monitoring/ ys@192.168.4.102:/data/objectio/monitoring/
+  -e "ssh -i ~/.ssh/ifinia" \
+  deploy/monitoring/ datacore:/data/objectio/monitoring/
 
 # Restart Prometheus (picks up new scrape config)
-ssh -i ~/.ssh/onekey ys@192.168.4.102 "cd /data/objectio/monitoring && \
+ssh datacore "cd /data/objectio/monitoring && \
   docker compose -f docker-compose.monitoring.yml restart objectio-prometheus"
 ```
 
 ### Import/update a Grafana dashboard
 
 ```bash
-# Import a dashboard JSON into grafana-dev
 cat deploy/monitoring/grafana/dashboards/<dashboard>.json | \
   python3 -c 'import json,sys; print(json.dumps({"dashboard":json.load(sys.stdin),"overwrite":True,"folderId":0}))' | \
-  ssh -i ~/.ssh/onekey ys@192.168.4.102 \
+  ssh datacore \
     "curl -s -X POST http://localhost:3002/api/dashboards/db -u admin:admin -H 'Content-Type: application/json' -d @-"
 ```
 
