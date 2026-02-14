@@ -447,9 +447,7 @@ impl BlockFooter {
 
         cursor.write_all(&self.data_checksum.to_le_bytes()).unwrap();
         cursor.write_all(&self.sequence.to_le_bytes()).unwrap();
-        cursor
-            .write_all(&[0u8; Self::SIZE - 16])
-            .unwrap(); // Padding
+        cursor.write_all(&[0u8; Self::SIZE - 16]).unwrap(); // Padding
         cursor.write_all(&self.magic.to_le_bytes()).unwrap();
 
         buf

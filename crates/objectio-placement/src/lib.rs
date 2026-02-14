@@ -36,5 +36,5 @@ pub use policy::{PlacementPolicy, PlacementResult, ShardPlacement};
 pub use topology::{ClusterTopology, NodeInfo, RackInfo};
 
 // CRUSH 2.0 exports
-pub use crush2::{Crush2, HrwPlacement, PlacementTemplate, ShardRole, StripeGroup};
 pub use crush2::templates;
+pub use crush2::{Crush2, HrwPlacement, PlacementTemplate, ShardRole, StripeGroup};

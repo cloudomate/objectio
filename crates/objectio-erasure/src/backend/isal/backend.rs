@@ -4,11 +4,11 @@
 //! The crate bundles ISA-L source and compiles it during build, so no system
 //! library installation is required (but nasm, autoconf, automake, libtool are needed).
 
+use crate::ErasureError;
 use crate::backend::{
     BackendCapabilities, BackendResult, ErasureBackend, LocalGroup, LrcBackend, LrcConfig,
     LrcEncodedData,
 };
-use crate::ErasureError;
 use erasure_isa_l::erasure::ErasureCode;
 use std::num::NonZeroUsize;
 
@@ -44,9 +44,7 @@ impl IsalBackend {
         let m = parity_shards as usize;
 
         if k + m > 255 {
-            return Err(ErasureError::InvalidConfig(
-                "k + m must be <= 255".into(),
-            ));
+            return Err(ErasureError::InvalidConfig("k + m must be <= 255".into()));
         }
 
         // Use Reed-Solomon (Vandermonde) matrix - more reliable than Cauchy

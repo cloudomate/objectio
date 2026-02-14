@@ -426,7 +426,10 @@ impl ErasureType {
     /// Get the LRC parameters if this is LRC type
     pub const fn lrc_params(&self) -> Option<(u8, u8)> {
         match self {
-            Self::Lrc { local_parity, global_parity } => Some((*local_parity, *global_parity)),
+            Self::Lrc {
+                local_parity,
+                global_parity,
+            } => Some((*local_parity, *global_parity)),
             Self::Mds => None,
         }
     }
@@ -472,7 +475,10 @@ impl ErasureConfig {
         Self {
             data_shards,
             parity_shards: local_parity + global_parity,
-            ec_type: ErasureType::Lrc { local_parity, global_parity },
+            ec_type: ErasureType::Lrc {
+                local_parity,
+                global_parity,
+            },
         }
     }
 
@@ -656,10 +662,17 @@ impl ProtectionType {
     #[must_use]
     pub fn total_shards(&self) -> u8 {
         match self {
-            Self::ErasureCoding { data_shards, parity_shards, .. } => data_shards + parity_shards,
-            Self::Lrc { data_shards, local_parity, global_parity, .. } => {
-                data_shards + local_parity + global_parity
-            }
+            Self::ErasureCoding {
+                data_shards,
+                parity_shards,
+                ..
+            } => data_shards + parity_shards,
+            Self::Lrc {
+                data_shards,
+                local_parity,
+                global_parity,
+                ..
+            } => data_shards + local_parity + global_parity,
             Self::Replication { replicas, .. } => *replicas,
         }
     }
@@ -682,7 +695,11 @@ impl ProtectionType {
     #[must_use]
     pub fn local_group_size(&self) -> Option<u8> {
         match self {
-            Self::Lrc { data_shards, local_parity, .. } => Some(*data_shards / *local_parity),
+            Self::Lrc {
+                data_shards,
+                local_parity,
+                ..
+            } => Some(*data_shards / *local_parity),
             _ => None,
         }
     }

@@ -10,19 +10,19 @@ mod s3;
 mod scatter_gather;
 
 use anyhow::Result;
-use auth_middleware::{auth_layer, AuthState};
+use auth_middleware::{AuthState, auth_layer};
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{delete, get, head, post, put},
-    Router,
 };
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
-use objectio_s3::{s3_metrics, ProtectionConfig};
+use objectio_s3::{ProtectionConfig, s3_metrics};
 use osd_pool::OsdPool;
 use s3::AppState;
 use scatter_gather::ScatterGatherEngine;
@@ -38,7 +38,10 @@ async fn metrics_handler() -> impl IntoResponse {
     let metrics = s3_metrics().export_prometheus();
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         metrics,
     )
 }
@@ -123,9 +126,14 @@ async fn main() -> Result<()> {
     let protection_config = match args.protection.as_str() {
         "lrc" => {
             let total = args.ec_k + args.lrc_local_parity + args.lrc_global_parity;
-            info!("Protection: LRC k={} l={} g={} (total={}, efficiency={:.1}%)",
-                args.ec_k, args.lrc_local_parity, args.lrc_global_parity, total,
-                (f64::from(args.ec_k) / f64::from(total)) * 100.0);
+            info!(
+                "Protection: LRC k={} l={} g={} (total={}, efficiency={:.1}%)",
+                args.ec_k,
+                args.lrc_local_parity,
+                args.lrc_global_parity,
+                total,
+                (f64::from(args.ec_k) / f64::from(total)) * 100.0
+            );
             ProtectionConfig {
                 scheme: "lrc".to_string(),
                 data_shards: args.ec_k,
@@ -137,8 +145,11 @@ async fn main() -> Result<()> {
             }
         }
         "replication" => {
-            info!("Protection: Replication replicas={} (efficiency={:.1}%)",
-                args.replicas, (1.0 / f64::from(args.replicas)) * 100.0);
+            info!(
+                "Protection: Replication replicas={} (efficiency={:.1}%)",
+                args.replicas,
+                (1.0 / f64::from(args.replicas)) * 100.0
+            );
             ProtectionConfig {
                 scheme: "replication".to_string(),
                 data_shards: 1,
@@ -152,9 +163,13 @@ async fn main() -> Result<()> {
         _ => {
             // Default: MDS erasure coding
             let total = args.ec_k + args.ec_m;
-            info!("Protection: EC (MDS) k={} m={} (total={}, efficiency={:.1}%)",
-                args.ec_k, args.ec_m, total,
-                (f64::from(args.ec_k) / f64::from(total)) * 100.0);
+            info!(
+                "Protection: EC (MDS) k={} m={} (total={}, efficiency={:.1}%)",
+                args.ec_k,
+                args.ec_m,
+                total,
+                (f64::from(args.ec_k) / f64::from(total)) * 100.0
+            );
             ProtectionConfig {
                 scheme: "ec".to_string(),
                 data_shards: args.ec_k,
@@ -189,7 +204,10 @@ async fn main() -> Result<()> {
         )
         .await
     {
-        tracing::warn!("Failed to connect to initial OSD: {}. Will connect on demand.", e);
+        tracing::warn!(
+            "Failed to connect to initial OSD: {}. Will connect on demand.",
+            e
+        );
     } else {
         info!("Connected to initial OSD at {}", args.osd_endpoint);
     }
@@ -255,9 +273,18 @@ async fn main() -> Result<()> {
             .route("/_admin/users", get(s3::admin_list_users))
             .route("/_admin/users", post(s3::admin_create_user))
             .route("/_admin/users/{user_id}", delete(s3::admin_delete_user))
-            .route("/_admin/users/{user_id}/access-keys", get(s3::admin_list_access_keys))
-            .route("/_admin/users/{user_id}/access-keys", post(s3::admin_create_access_key))
-            .route("/_admin/access-keys/{access_key_id}", delete(s3::admin_delete_access_key))
+            .route(
+                "/_admin/users/{user_id}/access-keys",
+                get(s3::admin_list_access_keys),
+            )
+            .route(
+                "/_admin/users/{user_id}/access-keys",
+                post(s3::admin_create_access_key),
+            )
+            .route(
+                "/_admin/access-keys/{access_key_id}",
+                delete(s3::admin_delete_access_key),
+            )
             .layer(body_limit.clone())
             .layer(middleware::from_fn_with_state(auth_state, auth_layer))
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
@@ -301,9 +328,18 @@ async fn main() -> Result<()> {
             .route("/_admin/users", get(s3::admin_list_users))
             .route("/_admin/users", post(s3::admin_create_user))
             .route("/_admin/users/{user_id}", delete(s3::admin_delete_user))
-            .route("/_admin/users/{user_id}/access-keys", get(s3::admin_list_access_keys))
-            .route("/_admin/users/{user_id}/access-keys", post(s3::admin_create_access_key))
-            .route("/_admin/access-keys/{access_key_id}", delete(s3::admin_delete_access_key))
+            .route(
+                "/_admin/users/{user_id}/access-keys",
+                get(s3::admin_list_access_keys),
+            )
+            .route(
+                "/_admin/users/{user_id}/access-keys",
+                post(s3::admin_create_access_key),
+            )
+            .route(
+                "/_admin/access-keys/{access_key_id}",
+                delete(s3::admin_delete_access_key),
+            )
             .layer(body_limit)
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
@@ -311,9 +347,10 @@ async fn main() -> Result<()> {
     };
 
     // Parse listen address
-    let addr: SocketAddr = args.listen.parse().map_err(|e| {
-        anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e)
-    })?;
+    let addr: SocketAddr = args
+        .listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e))?;
 
     info!("Starting S3 API server on {}", addr);
 

@@ -4,8 +4,7 @@
 //! and feature flags.
 
 use super::{
-    BackendCapabilities, ErasureBackend, LrcBackend, LrcConfig, RustSimdBackend,
-    RustSimdLrcBackend,
+    BackendCapabilities, ErasureBackend, LrcBackend, LrcConfig, RustSimdBackend, RustSimdLrcBackend,
 };
 use crate::ErasureError;
 use std::sync::Arc;

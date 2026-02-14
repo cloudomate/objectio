@@ -40,21 +40,21 @@ use crate::qos::{LatencyHistogram, LatencyPercentiles, VolumeRateLimiter};
 
 /// Bucket boundaries for Prometheus histogram (in seconds)
 const PROMETHEUS_BUCKET_BOUNDARIES: &[f64] = &[
-    0.00001,  // 10us
-    0.00002,  // 20us
-    0.00005,  // 50us
-    0.0001,   // 100us
-    0.0002,   // 200us
-    0.0005,   // 500us
-    0.001,    // 1ms
-    0.002,    // 2ms
-    0.005,    // 5ms
-    0.01,     // 10ms
-    0.02,     // 20ms
-    0.05,     // 50ms
-    0.1,      // 100ms
-    0.2,      // 200ms
-    0.5,      // 500ms
+    0.00001, // 10us
+    0.00002, // 20us
+    0.00005, // 50us
+    0.0001,  // 100us
+    0.0002,  // 200us
+    0.0005,  // 500us
+    0.001,   // 1ms
+    0.002,   // 2ms
+    0.005,   // 5ms
+    0.01,    // 10ms
+    0.02,    // 20ms
+    0.05,    // 50ms
+    0.1,     // 100ms
+    0.2,     // 200ms
+    0.5,     // 500ms
 ];
 
 /// Volume metrics snapshot
@@ -183,7 +183,12 @@ impl MetricsCollector {
     }
 
     /// Update volume metrics from rate limiter
-    pub fn update_volume_from_limiter(&self, limiter: &VolumeRateLimiter, size_bytes: u64, used_bytes: u64) {
+    pub fn update_volume_from_limiter(
+        &self,
+        limiter: &VolumeRateLimiter,
+        size_bytes: u64,
+        used_bytes: u64,
+    ) {
         let stats = limiter.stats();
         let config = limiter.config();
 
@@ -207,12 +212,16 @@ impl MetricsCollector {
             iops_utilization: limiter.iops_utilization(),
         };
 
-        self.volumes.write().insert(limiter.volume_id().to_string(), metrics);
+        self.volumes
+            .write()
+            .insert(limiter.volume_id().to_string(), metrics);
     }
 
     /// Update volume metrics directly
     pub fn update_volume(&self, metrics: VolumeMetrics) {
-        self.volumes.write().insert(metrics.volume_id.clone(), metrics);
+        self.volumes
+            .write()
+            .insert(metrics.volume_id.clone(), metrics);
     }
 
     /// Update OSD metrics
@@ -300,7 +309,11 @@ impl PrometheusExporter {
         }
 
         // Volume size
-        self.write_help(output, "volume_size_bytes", "Provisioned volume size in bytes");
+        self.write_help(
+            output,
+            "volume_size_bytes",
+            "Provisioned volume size in bytes",
+        );
         self.write_type(output, "volume_size_bytes", "gauge");
         for vol in &volumes {
             self.write_metric_with_labels(
@@ -372,7 +385,11 @@ impl PrometheusExporter {
         }
 
         // Throttled I/Os
-        self.write_help(output, "volume_throttled_ios_total", "Total I/Os throttled by QoS");
+        self.write_help(
+            output,
+            "volume_throttled_ios_total",
+            "Total I/Os throttled by QoS",
+        );
         self.write_type(output, "volume_throttled_ios_total", "counter");
         for vol in &volumes {
             self.write_metric_with_labels(
@@ -384,7 +401,11 @@ impl PrometheusExporter {
         }
 
         // IOPS utilization
-        self.write_help(output, "volume_iops_utilization", "Current IOPS utilization (0-1)");
+        self.write_help(
+            output,
+            "volume_iops_utilization",
+            "Current IOPS utilization (0-1)",
+        );
         self.write_type(output, "volume_iops_utilization", "gauge");
         for vol in &volumes {
             self.write_metric_with_labels(
@@ -396,17 +417,35 @@ impl PrometheusExporter {
         }
 
         // Read latency percentiles (as summary)
-        self.write_help(output, "volume_read_latency_seconds", "Read latency in seconds");
+        self.write_help(
+            output,
+            "volume_read_latency_seconds",
+            "Read latency in seconds",
+        );
         self.write_type(output, "volume_read_latency_seconds", "summary");
         for vol in &volumes {
-            self.export_latency_summary(output, "volume_read_latency_seconds", &vol.volume_id, &vol.read_latency);
+            self.export_latency_summary(
+                output,
+                "volume_read_latency_seconds",
+                &vol.volume_id,
+                &vol.read_latency,
+            );
         }
 
         // Write latency percentiles (as summary)
-        self.write_help(output, "volume_write_latency_seconds", "Write latency in seconds");
+        self.write_help(
+            output,
+            "volume_write_latency_seconds",
+            "Write latency in seconds",
+        );
         self.write_type(output, "volume_write_latency_seconds", "summary");
         for vol in &volumes {
-            self.export_latency_summary(output, "volume_write_latency_seconds", &vol.volume_id, &vol.write_latency);
+            self.export_latency_summary(
+                output,
+                "volume_write_latency_seconds",
+                &vol.volume_id,
+                &vol.write_latency,
+            );
         }
 
         // QoS configuration
@@ -440,7 +479,11 @@ impl PrometheusExporter {
         }
 
         // OSD health status
-        self.write_help(output, "osd_health", "OSD health status (1=healthy, 0.5=warning, 0=error)");
+        self.write_help(
+            output,
+            "osd_health",
+            "OSD health status (1=healthy, 0.5=warning, 0=error)",
+        );
         self.write_type(output, "osd_health", "gauge");
         for osd in &osds {
             self.write_metric_with_labels(
@@ -544,13 +587,23 @@ impl PrometheusExporter {
         self.write_help(output, "osd_read_latency_seconds", "OSD read latency");
         self.write_type(output, "osd_read_latency_seconds", "summary");
         for osd in &osds {
-            self.export_latency_summary(output, "osd_read_latency_seconds", &osd.osd_id, &osd.read_latency);
+            self.export_latency_summary(
+                output,
+                "osd_read_latency_seconds",
+                &osd.osd_id,
+                &osd.read_latency,
+            );
         }
 
         self.write_help(output, "osd_write_latency_seconds", "OSD write latency");
         self.write_type(output, "osd_write_latency_seconds", "summary");
         for osd in &osds {
-            self.export_latency_summary(output, "osd_write_latency_seconds", &osd.osd_id, &osd.write_latency);
+            self.export_latency_summary(
+                output,
+                "osd_write_latency_seconds",
+                &osd.osd_id,
+                &osd.write_latency,
+            );
         }
     }
 
@@ -566,26 +619,50 @@ impl PrometheusExporter {
         self.write_type(output, "cluster_osds_healthy", "gauge");
         self.write_metric(output, "cluster_osds_healthy", cluster.healthy_osds as f64);
 
-        self.write_help(output, "cluster_osds_warning", "Number of OSDs in warning state");
+        self.write_help(
+            output,
+            "cluster_osds_warning",
+            "Number of OSDs in warning state",
+        );
         self.write_type(output, "cluster_osds_warning", "gauge");
         self.write_metric(output, "cluster_osds_warning", cluster.warning_osds as f64);
 
-        self.write_help(output, "cluster_osds_error", "Number of OSDs in error state");
+        self.write_help(
+            output,
+            "cluster_osds_error",
+            "Number of OSDs in error state",
+        );
         self.write_type(output, "cluster_osds_error", "gauge");
         self.write_metric(output, "cluster_osds_error", cluster.error_osds as f64);
 
         // Cluster capacity
         self.write_help(output, "cluster_capacity_bytes", "Total cluster capacity");
         self.write_type(output, "cluster_capacity_bytes", "gauge");
-        self.write_metric(output, "cluster_capacity_bytes", cluster.total_capacity_bytes as f64);
+        self.write_metric(
+            output,
+            "cluster_capacity_bytes",
+            cluster.total_capacity_bytes as f64,
+        );
 
         self.write_help(output, "cluster_used_bytes", "Used cluster capacity");
         self.write_type(output, "cluster_used_bytes", "gauge");
-        self.write_metric(output, "cluster_used_bytes", cluster.used_capacity_bytes as f64);
+        self.write_metric(
+            output,
+            "cluster_used_bytes",
+            cluster.used_capacity_bytes as f64,
+        );
 
-        self.write_help(output, "cluster_available_bytes", "Available cluster capacity");
+        self.write_help(
+            output,
+            "cluster_available_bytes",
+            "Available cluster capacity",
+        );
         self.write_type(output, "cluster_available_bytes", "gauge");
-        self.write_metric(output, "cluster_available_bytes", cluster.available_capacity_bytes as f64);
+        self.write_metric(
+            output,
+            "cluster_available_bytes",
+            cluster.available_capacity_bytes as f64,
+        );
 
         // Cluster I/O
         self.write_help(output, "cluster_read_iops", "Total cluster read IOPS");
@@ -594,76 +671,147 @@ impl PrometheusExporter {
 
         self.write_help(output, "cluster_write_iops", "Total cluster write IOPS");
         self.write_type(output, "cluster_write_iops", "gauge");
-        self.write_metric(output, "cluster_write_iops", cluster.total_write_iops as f64);
+        self.write_metric(
+            output,
+            "cluster_write_iops",
+            cluster.total_write_iops as f64,
+        );
 
         // Volumes
         self.write_help(output, "cluster_volumes_total", "Total number of volumes");
         self.write_type(output, "cluster_volumes_total", "gauge");
-        self.write_metric(output, "cluster_volumes_total", cluster.total_volumes as f64);
+        self.write_metric(
+            output,
+            "cluster_volumes_total",
+            cluster.total_volumes as f64,
+        );
 
-        self.write_help(output, "cluster_volumes_attached", "Number of attached volumes");
+        self.write_help(
+            output,
+            "cluster_volumes_attached",
+            "Number of attached volumes",
+        );
         self.write_type(output, "cluster_volumes_attached", "gauge");
-        self.write_metric(output, "cluster_volumes_attached", cluster.attached_volumes as f64);
+        self.write_metric(
+            output,
+            "cluster_volumes_attached",
+            cluster.attached_volumes as f64,
+        );
 
-        self.write_help(output, "cluster_provisioned_bytes", "Total provisioned capacity");
+        self.write_help(
+            output,
+            "cluster_provisioned_bytes",
+            "Total provisioned capacity",
+        );
         self.write_type(output, "cluster_provisioned_bytes", "gauge");
-        self.write_metric(output, "cluster_provisioned_bytes", cluster.total_provisioned_bytes as f64);
+        self.write_metric(
+            output,
+            "cluster_provisioned_bytes",
+            cluster.total_provisioned_bytes as f64,
+        );
 
         // QoS
-        self.write_help(output, "cluster_throttled_ios_total", "Total throttled I/Os");
+        self.write_help(
+            output,
+            "cluster_throttled_ios_total",
+            "Total throttled I/Os",
+        );
         self.write_type(output, "cluster_throttled_ios_total", "counter");
-        self.write_metric(output, "cluster_throttled_ios_total", cluster.total_throttled_ios as f64);
+        self.write_metric(
+            output,
+            "cluster_throttled_ios_total",
+            cluster.total_throttled_ios as f64,
+        );
 
-        self.write_help(output, "cluster_reserved_iops", "Total reserved IOPS (min_iops sum)");
+        self.write_help(
+            output,
+            "cluster_reserved_iops",
+            "Total reserved IOPS (min_iops sum)",
+        );
         self.write_type(output, "cluster_reserved_iops", "gauge");
-        self.write_metric(output, "cluster_reserved_iops", cluster.total_reserved_iops as f64);
+        self.write_metric(
+            output,
+            "cluster_reserved_iops",
+            cluster.total_reserved_iops as f64,
+        );
 
         // Recovery
-        self.write_help(output, "cluster_degraded_objects", "Number of degraded objects");
+        self.write_help(
+            output,
+            "cluster_degraded_objects",
+            "Number of degraded objects",
+        );
         self.write_type(output, "cluster_degraded_objects", "gauge");
-        self.write_metric(output, "cluster_degraded_objects", cluster.degraded_objects as f64);
+        self.write_metric(
+            output,
+            "cluster_degraded_objects",
+            cluster.degraded_objects as f64,
+        );
 
-        self.write_help(output, "cluster_recovering_objects", "Objects being recovered");
+        self.write_help(
+            output,
+            "cluster_recovering_objects",
+            "Objects being recovered",
+        );
         self.write_type(output, "cluster_recovering_objects", "gauge");
-        self.write_metric(output, "cluster_recovering_objects", cluster.recovering_objects as f64);
+        self.write_metric(
+            output,
+            "cluster_recovering_objects",
+            cluster.recovering_objects as f64,
+        );
     }
 
-    fn export_latency_summary(&self, output: &mut String, name: &str, id: &str, latency: &LatencyPercentiles) {
-        let id_label = if name.starts_with("volume") { "volume_id" } else { "osd_id" };
+    fn export_latency_summary(
+        &self,
+        output: &mut String,
+        name: &str,
+        id: &str,
+        latency: &LatencyPercentiles,
+    ) {
+        let id_label = if name.starts_with("volume") {
+            "volume_id"
+        } else {
+            "osd_id"
+        };
 
         // p50
         let _ = writeln!(
             output,
             "{}_{}{{{id_label}=\"{id}\",quantile=\"0.5\"}} {}",
-            self.prefix, name,
+            self.prefix,
+            name,
             latency.p50 as f64 / 1_000_000.0
         );
         // p90
         let _ = writeln!(
             output,
             "{}_{}{{{id_label}=\"{id}\",quantile=\"0.9\"}} {}",
-            self.prefix, name,
+            self.prefix,
+            name,
             latency.p90 as f64 / 1_000_000.0
         );
         // p95
         let _ = writeln!(
             output,
             "{}_{}{{{id_label}=\"{id}\",quantile=\"0.95\"}} {}",
-            self.prefix, name,
+            self.prefix,
+            name,
             latency.p95 as f64 / 1_000_000.0
         );
         // p99
         let _ = writeln!(
             output,
             "{}_{}{{{id_label}=\"{id}\",quantile=\"0.99\"}} {}",
-            self.prefix, name,
+            self.prefix,
+            name,
             latency.p99 as f64 / 1_000_000.0
         );
         // p999
         let _ = writeln!(
             output,
             "{}_{}{{{id_label}=\"{id}\",quantile=\"0.999\"}} {}",
-            self.prefix, name,
+            self.prefix,
+            name,
             latency.p999 as f64 / 1_000_000.0
         );
     }
@@ -680,12 +828,25 @@ impl PrometheusExporter {
         let _ = writeln!(output, "{}_{} {}", self.prefix, name, value);
     }
 
-    fn write_metric_with_labels(&self, output: &mut String, name: &str, value: f64, labels: &[(&str, &str)]) {
+    fn write_metric_with_labels(
+        &self,
+        output: &mut String,
+        name: &str,
+        value: f64,
+        labels: &[(&str, &str)],
+    ) {
         let labels_str: Vec<String> = labels
             .iter()
             .map(|(k, v)| format!("{}=\"{}\"", k, v))
             .collect();
-        let _ = writeln!(output, "{}_{}{{{}}} {}", self.prefix, name, labels_str.join(","), value);
+        let _ = writeln!(
+            output,
+            "{}_{}{{{}}} {}",
+            self.prefix,
+            name,
+            labels_str.join(","),
+            value
+        );
     }
 }
 
@@ -756,7 +917,11 @@ pub fn export_histogram_prometheus(
         let _ = writeln!(output, "{prefix}_{name}_count {}", histogram.count());
     } else {
         let _ = writeln!(output, "{prefix}_{name}_sum{{{base_labels}}} {sum_secs}");
-        let _ = writeln!(output, "{prefix}_{name}_count{{{base_labels}}} {}", histogram.count());
+        let _ = writeln!(
+            output,
+            "{prefix}_{name}_count{{{base_labels}}} {}",
+            histogram.count()
+        );
     }
 }
 
@@ -835,8 +1000,8 @@ mod tests {
     #[test]
     fn test_histogram_export() {
         let histogram = LatencyHistogram::new();
-        histogram.record(50);   // 50us
-        histogram.record(150);  // 150us
+        histogram.record(50); // 50us
+        histogram.record(150); // 150us
         histogram.record(5000); // 5ms
 
         let mut output = String::new();

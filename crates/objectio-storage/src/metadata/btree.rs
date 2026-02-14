@@ -114,7 +114,10 @@ impl BTreeIndex {
                 // Extract LSN from filename: meta_<lsn>.snapshot
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(lsn_str) = name_str.strip_prefix("meta_").and_then(|s| s.strip_suffix(".snapshot")) {
+                if let Some(lsn_str) = name_str
+                    .strip_prefix("meta_")
+                    .and_then(|s| s.strip_suffix(".snapshot"))
+                {
                     lsn_str.parse::<u64>().ok().map(|lsn| (entry.path(), lsn))
                 } else {
                     None
@@ -176,7 +179,8 @@ impl BTreeIndex {
             self.entry_count.fetch_add(1, Ordering::Relaxed);
         }
         self.update_lsn(lsn);
-        self.mutations_since_snapshot.fetch_add(1, Ordering::Relaxed);
+        self.mutations_since_snapshot
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Delete a key
@@ -188,7 +192,8 @@ impl BTreeIndex {
             self.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
         self.update_lsn(lsn);
-        self.mutations_since_snapshot.fetch_add(1, Ordering::Relaxed);
+        self.mutations_since_snapshot
+            .fetch_add(1, Ordering::Relaxed);
 
         removed
     }
@@ -288,7 +293,10 @@ impl BTreeIndex {
         // Write to temporary file first
         let snapshot_name = format!("meta_{}.snapshot", lsn);
         let snapshot_path = self.config.snapshot_dir.join(&snapshot_name);
-        let temp_path = self.config.snapshot_dir.join(format!("{}.tmp", snapshot_name));
+        let temp_path = self
+            .config
+            .snapshot_dir
+            .join(format!("{}.tmp", snapshot_name));
 
         {
             let file = OpenOptions::new()
@@ -349,7 +357,10 @@ impl BTreeIndex {
             .filter_map(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if let Some(lsn_str) = name_str.strip_prefix("meta_").and_then(|s| s.strip_suffix(".snapshot")) {
+                if let Some(lsn_str) = name_str
+                    .strip_prefix("meta_")
+                    .and_then(|s| s.strip_suffix(".snapshot"))
+                {
                     lsn_str.parse::<u64>().ok().map(|lsn| (entry.path(), lsn))
                 } else {
                     None
@@ -395,13 +406,11 @@ impl BTreeIndex {
 
     /// Update LSN if higher
     fn update_lsn(&self, lsn: u64) {
-        let _ = self.lsn.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-            if lsn > current {
-                Some(lsn)
-            } else {
-                None
-            }
-        });
+        let _ = self
+            .lsn
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if lsn > current { Some(lsn) } else { None }
+            });
     }
 
     /// Get all entries (for debugging/testing)
@@ -450,15 +459,15 @@ mod tests {
 
         // Insert some block metadata
         for i in 1..=5 {
-            index.put(MetadataKey::block(i), format!("block_{}", i).into_bytes(), i);
+            index.put(
+                MetadataKey::block(i),
+                format!("block_{}", i).into_bytes(),
+                i,
+            );
         }
 
         // Insert some object metadata
-        index.put(
-            MetadataKey::object(&[1u8; 16]),
-            b"object_1".to_vec(),
-            10,
-        );
+        index.put(MetadataKey::object(&[1u8; 16]), b"object_1".to_vec(), 10);
 
         // Scan for blocks (prefix 'b')
         let block_prefix = MetadataKey(vec![b'b']);
@@ -478,7 +487,11 @@ mod tests {
         // Create and populate index
         let index = BTreeIndex::new(config.clone());
         for i in 1..=100 {
-            index.put(MetadataKey::block(i), format!("value_{}", i).into_bytes(), i);
+            index.put(
+                MetadataKey::block(i),
+                format!("value_{}", i).into_bytes(),
+                i,
+            );
         }
 
         // Write snapshot

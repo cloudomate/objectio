@@ -220,7 +220,7 @@ pub trait LrcBackend: ErasureBackend {
     ///
     /// Produces data shards, local parity shards, and global parity shards.
     fn encode_lrc(&self, data_shards: &[&[u8]], shard_size: usize)
-        -> BackendResult<LrcEncodedData>;
+    -> BackendResult<LrcEncodedData>;
 
     /// Decode using local parity group (fast path for single-shard recovery)
     ///

@@ -14,11 +14,11 @@
 
 use crate::raw_io::{AlignedBuffer, RawFile};
 use objectio_common::{Error, Result};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::Mutex;
 
 /// WAL record magic number
 const WAL_RECORD_MAGIC: u32 = 0x57414C52; // "WALR"
@@ -154,8 +154,12 @@ impl WalHeader {
         cursor.write_all(&self.magic.to_le_bytes()).unwrap();
         cursor.write_all(&self.version.to_le_bytes()).unwrap();
         cursor.write_all(&self.write_offset.to_le_bytes()).unwrap();
-        cursor.write_all(&self.last_committed_txn.to_le_bytes()).unwrap();
-        cursor.write_all(&self.last_checkpoint.to_le_bytes()).unwrap();
+        cursor
+            .write_all(&self.last_committed_txn.to_le_bytes())
+            .unwrap();
+        cursor
+            .write_all(&self.last_checkpoint.to_le_bytes())
+            .unwrap();
         cursor.write_all(&self.checksum.to_le_bytes()).unwrap();
         buf
     }

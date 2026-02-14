@@ -331,8 +331,7 @@ impl BlockBitmap {
             Self::clear_in_slice(&mut data, block);
         }
 
-        self.free_blocks
-            .fetch_add(extent.length, Ordering::Relaxed);
+        self.free_blocks.fetch_add(extent.length, Ordering::Relaxed);
 
         // Update hint
         let hint = self.search_hint.load(Ordering::Relaxed);

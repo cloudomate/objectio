@@ -2,31 +2,82 @@
 
 use objectio_common::{NodeId, NodeStatus};
 use objectio_placement::{
-    topology::{ClusterTopology, DiskInfo, FailureDomainInfo, NodeInfo},
     Crush2, PlacementTemplate, ShardRole,
+    topology::{ClusterTopology, DiskInfo, FailureDomainInfo, NodeInfo},
 };
 use objectio_proto::metadata::{
-    metadata_service_server::MetadataService,
-    AbortMultipartUploadRequest, AbortMultipartUploadResponse, BucketMeta,
-    CompleteMultipartUploadRequest, CompleteMultipartUploadResponse,
-    CreateBucketRequest, CreateBucketResponse, CreateMultipartUploadRequest,
-    CreateMultipartUploadResponse, CreateObjectRequest, CreateObjectResponse,
-    DeleteBucketPolicyRequest, DeleteBucketPolicyResponse,
-    DeleteBucketRequest, DeleteBucketResponse, DeleteObjectRequest, DeleteObjectResponse,
-    ErasureType, GetBucketPolicyRequest, GetBucketPolicyResponse,
-    GetBucketRequest, GetBucketResponse, GetListingNodesRequest, GetListingNodesResponse,
-    GetObjectRequest, GetObjectResponse, GetPlacementRequest, GetPlacementResponse,
-    ListBucketsRequest, ListBucketsResponse, ListMultipartUploadsRequest,
-    ListMultipartUploadsResponse, ListObjectsRequest, ListObjectsResponse, ListingNode,
-    ListPartsRequest, ListPartsResponse, MultipartUpload, NodePlacement, ObjectMeta,
-    PartMeta, RegisterOsdRequest, RegisterOsdResponse, RegisterPartRequest, RegisterPartResponse,
-    SetBucketPolicyRequest, SetBucketPolicyResponse, ShardType, StripeMeta, VersioningState,
+    AbortMultipartUploadRequest,
+    AbortMultipartUploadResponse,
     // IAM types
-    AccessKeyMeta, CreateAccessKeyRequest, CreateAccessKeyResponse, CreateUserRequest,
-    CreateUserResponse, DeleteAccessKeyRequest, DeleteAccessKeyResponse, DeleteUserRequest,
-    DeleteUserResponse, GetAccessKeyForAuthRequest, GetAccessKeyForAuthResponse,
-    GetUserRequest, GetUserResponse, KeyStatus, ListAccessKeysRequest, ListAccessKeysResponse,
-    ListUsersRequest, ListUsersResponse, UserMeta, UserStatus,
+    AccessKeyMeta,
+    BucketMeta,
+    CompleteMultipartUploadRequest,
+    CompleteMultipartUploadResponse,
+    CreateAccessKeyRequest,
+    CreateAccessKeyResponse,
+    CreateBucketRequest,
+    CreateBucketResponse,
+    CreateMultipartUploadRequest,
+    CreateMultipartUploadResponse,
+    CreateObjectRequest,
+    CreateObjectResponse,
+    CreateUserRequest,
+    CreateUserResponse,
+    DeleteAccessKeyRequest,
+    DeleteAccessKeyResponse,
+    DeleteBucketPolicyRequest,
+    DeleteBucketPolicyResponse,
+    DeleteBucketRequest,
+    DeleteBucketResponse,
+    DeleteObjectRequest,
+    DeleteObjectResponse,
+    DeleteUserRequest,
+    DeleteUserResponse,
+    ErasureType,
+    GetAccessKeyForAuthRequest,
+    GetAccessKeyForAuthResponse,
+    GetBucketPolicyRequest,
+    GetBucketPolicyResponse,
+    GetBucketRequest,
+    GetBucketResponse,
+    GetListingNodesRequest,
+    GetListingNodesResponse,
+    GetObjectRequest,
+    GetObjectResponse,
+    GetPlacementRequest,
+    GetPlacementResponse,
+    GetUserRequest,
+    GetUserResponse,
+    KeyStatus,
+    ListAccessKeysRequest,
+    ListAccessKeysResponse,
+    ListBucketsRequest,
+    ListBucketsResponse,
+    ListMultipartUploadsRequest,
+    ListMultipartUploadsResponse,
+    ListObjectsRequest,
+    ListObjectsResponse,
+    ListPartsRequest,
+    ListPartsResponse,
+    ListUsersRequest,
+    ListUsersResponse,
+    ListingNode,
+    MultipartUpload,
+    NodePlacement,
+    ObjectMeta,
+    PartMeta,
+    RegisterOsdRequest,
+    RegisterOsdResponse,
+    RegisterPartRequest,
+    RegisterPartResponse,
+    SetBucketPolicyRequest,
+    SetBucketPolicyResponse,
+    ShardType,
+    StripeMeta,
+    UserMeta,
+    UserStatus,
+    VersioningState,
+    metadata_service_server::MetadataService,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -82,7 +133,7 @@ pub struct PartState {
     pub etag: String,
     pub size: u64,
     pub last_modified: u64,
-    pub stripes: Vec<StripeMeta>,  // Multiple stripes for large parts
+    pub stripes: Vec<StripeMeta>, // Multiple stripes for large parts
 }
 
 /// Internal user storage
@@ -91,7 +142,7 @@ pub struct StoredUser {
     pub user_id: String,
     pub display_name: String,
     pub arn: String,
-    pub status: i32,  // UserStatus enum value
+    pub status: i32, // UserStatus enum value
     pub created_at: u64,
     pub email: String,
 }
@@ -102,7 +153,7 @@ pub struct StoredAccessKey {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub user_id: String,
-    pub status: i32,  // KeyStatus enum value
+    pub status: i32, // KeyStatus enum value
     pub created_at: u64,
 }
 
@@ -204,7 +255,9 @@ impl MetaService {
         if !users.is_empty() {
             // Users exist, check if admin already has keys
             drop(users);
-            let user = self.users.read()
+            let user = self
+                .users
+                .read()
                 .values()
                 .find(|u| u.display_name == admin_name)
                 .cloned();
@@ -213,7 +266,10 @@ impl MetaService {
                 if let Some(key_ids) = keys.get(&admin_user.user_id) {
                     if let Some(first_key_id) = key_ids.first() {
                         if let Some(key) = self.access_keys.read().get(first_key_id) {
-                            return Some((key.access_key_id.clone(), key.secret_access_key.clone()));
+                            return Some((
+                                key.access_key_id.clone(),
+                                key.secret_access_key.clone(),
+                            ));
                         }
                     }
                 }
@@ -250,9 +306,16 @@ impl MetaService {
         };
 
         self.access_keys.write().insert(access_key_id.clone(), key);
-        self.user_keys.write().entry(user_id).or_default().push(access_key_id.clone());
+        self.user_keys
+            .write()
+            .entry(user_id)
+            .or_default()
+            .push(access_key_id.clone());
 
-        info!("Created admin user '{}' with access key {}", admin_name, access_key_id);
+        info!(
+            "Created admin user '{}' with access key {}",
+            admin_name, access_key_id
+        );
 
         Some((access_key_id, secret_access_key))
     }
@@ -262,7 +325,9 @@ impl MetaService {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".chars().collect();
-        let suffix: String = (0..16).map(|_| chars[rng.gen_range(0..chars.len())]).collect();
+        let suffix: String = (0..16)
+            .map(|_| chars[rng.gen_range(0..chars.len())])
+            .collect();
         format!("AKIA{}", suffix)
     }
 
@@ -273,7 +338,9 @@ impl MetaService {
         let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
             .chars()
             .collect();
-        (0..40).map(|_| chars[rng.gen_range(0..chars.len())]).collect()
+        (0..40)
+            .map(|_| chars[rng.gen_range(0..chars.len())])
+            .collect()
     }
 
     /// Register an OSD node for placement (legacy method)
@@ -291,26 +358,38 @@ impl MetaService {
 
     /// Update CRUSH topology with a new OSD node
     fn update_topology_with_node(&self, osd_node: &OsdNode) {
-        let (region, dc, rack) = osd_node.failure_domain.clone()
-            .unwrap_or_else(|| ("default".to_string(), "dc1".to_string(), "rack1".to_string()));
+        let (region, dc, rack) = osd_node.failure_domain.clone().unwrap_or_else(|| {
+            (
+                "default".to_string(),
+                "dc1".to_string(),
+                "rack1".to_string(),
+            )
+        });
 
         let node_id = NodeId::from_bytes(osd_node.node_id);
 
-        let disks: Vec<DiskInfo> = osd_node.disk_ids.iter().map(|disk_id| {
-            DiskInfo {
-                id: objectio_common::DiskId::from_bytes(*disk_id),
-                path: String::new(),
-                total_capacity: 1_000_000_000_000, // 1TB default
-                used_capacity: 0,
-                status: objectio_common::DiskStatus::Healthy,
-                weight: 1.0,
-            }
-        }).collect();
+        let disks: Vec<DiskInfo> = osd_node
+            .disk_ids
+            .iter()
+            .map(|disk_id| {
+                DiskInfo {
+                    id: objectio_common::DiskId::from_bytes(*disk_id),
+                    path: String::new(),
+                    total_capacity: 1_000_000_000_000, // 1TB default
+                    used_capacity: 0,
+                    status: objectio_common::DiskStatus::Healthy,
+                    weight: 1.0,
+                }
+            })
+            .collect();
 
         let node_info = NodeInfo {
             id: node_id,
             name: hex::encode(&osd_node.node_id[..4]),
-            address: osd_node.address.parse().unwrap_or_else(|_| "0.0.0.0:9200".parse().unwrap()),
+            address: osd_node
+                .address
+                .parse()
+                .unwrap_or_else(|_| "0.0.0.0:9200".parse().unwrap()),
             failure_domain: FailureDomainInfo::new(&region, &dc, &rack),
             status: NodeStatus::Active,
             disks,
@@ -331,7 +410,10 @@ impl MetaService {
             crush.update_topology(topology);
         }
 
-        debug!("Updated CRUSH topology with node {}", hex::encode(&osd_node.node_id));
+        debug!(
+            "Updated CRUSH topology with node {}",
+            hex::encode(&osd_node.node_id)
+        );
     }
 
     /// Generate object key for internal storage
@@ -353,7 +435,11 @@ impl MetaService {
         let (total_shards, ec_type, replication_count) = match &self.default_ec {
             EcConfig::Mds { k, m } => ((*k + *m) as usize, ErasureType::ErasureMds, 0u32),
             EcConfig::Lrc { k, l, g } => ((*k + *l + *g) as usize, ErasureType::ErasureLrc, 0u32),
-            EcConfig::Replication { count } => (*count as usize, ErasureType::ErasureReplication, *count as u32),
+            EcConfig::Replication { count } => (
+                *count as usize,
+                ErasureType::ErasureReplication,
+                *count as u32,
+            ),
         };
 
         if nodes.is_empty() {
@@ -369,7 +455,9 @@ impl MetaService {
         // Use object key hash for deterministic placement
         let hash_seed = {
             let key_bytes = format!("{}/{}", req.bucket, req.key);
-            key_bytes.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64))
+            key_bytes
+                .bytes()
+                .fold(0u64, |acc, b| acc.wrapping_add(b as u64))
         };
 
         // Rotate the disk list based on hash for distribution
@@ -459,7 +547,10 @@ impl MetaService {
 
         debug!(
             "Legacy placement for {}/{}: {} shards across {} nodes",
-            req.bucket, req.key, placements.len(), used_nodes.len()
+            req.bucket,
+            req.key,
+            placements.len(),
+            used_nodes.len()
         );
 
         Ok(Response::new(GetPlacementResponse {
@@ -505,7 +596,9 @@ impl MetadataService for MetaService {
             versioning: VersioningState::VersioningDisabled.into(),
         };
 
-        self.buckets.write().insert(req.name.clone(), bucket.clone());
+        self.buckets
+            .write()
+            .insert(req.name.clone(), bucket.clone());
 
         info!("Created bucket: {}", req.name);
 
@@ -656,38 +749,45 @@ impl MetadataService for MetaService {
         };
 
         // Select placement template based on EC configuration
-        let (template, ec_type, ec_k, ec_local_parity, ec_global_parity, local_group_size, replication_count) =
-            match &self.default_ec {
-                EcConfig::Mds { k, m } => (
-                    PlacementTemplate::mds(*k, *m),
-                    ErasureType::ErasureMds,
-                    *k as u32,
-                    0u32,
-                    *m as u32,
-                    0u32,
-                    0u32, // Not replication mode
-                ),
-                EcConfig::Lrc { k, l, g } => (
-                    PlacementTemplate::lrc(*k, *l, *g),
-                    ErasureType::ErasureLrc,
-                    *k as u32,
-                    *l as u32,
-                    *g as u32,
-                    (*k / *l) as u32,
-                    0u32, // Not replication mode
-                ),
-                EcConfig::Replication { count } => (
-                    // For replication, we need 'count' replicas
-                    // Use MDS template with k=count (each is a full copy) and m=0
-                    PlacementTemplate::mds(*count, 0),
-                    ErasureType::ErasureReplication,
-                    1u32,  // ec_k=1: single data shard (full data)
-                    0u32,  // No local parity
-                    0u32,  // No global parity
-                    0u32,  // No local groups
-                    *count as u32, // Replication count
-                ),
-            };
+        let (
+            template,
+            ec_type,
+            ec_k,
+            ec_local_parity,
+            ec_global_parity,
+            local_group_size,
+            replication_count,
+        ) = match &self.default_ec {
+            EcConfig::Mds { k, m } => (
+                PlacementTemplate::mds(*k, *m),
+                ErasureType::ErasureMds,
+                *k as u32,
+                0u32,
+                *m as u32,
+                0u32,
+                0u32, // Not replication mode
+            ),
+            EcConfig::Lrc { k, l, g } => (
+                PlacementTemplate::lrc(*k, *l, *g),
+                ErasureType::ErasureLrc,
+                *k as u32,
+                *l as u32,
+                *g as u32,
+                (*k / *l) as u32,
+                0u32, // Not replication mode
+            ),
+            EcConfig::Replication { count } => (
+                // For replication, we need 'count' replicas
+                // Use MDS template with k=count (each is a full copy) and m=0
+                PlacementTemplate::mds(*count, 0),
+                ErasureType::ErasureReplication,
+                1u32,          // ec_k=1: single data shard (full data)
+                0u32,          // No local parity
+                0u32,          // No global parity
+                0u32,          // No local groups
+                *count as u32, // Replication count
+            ),
+        };
 
         // Use CRUSH 2.0 for placement
         let crush = self.crush.read();
@@ -700,13 +800,16 @@ impl MetadataService for MetaService {
             .iter()
             .map(|hrw| {
                 // Find the OSD node by NodeId
-                let node = nodes.iter().find(|n| {
-                    NodeId::from_bytes(n.node_id) == hrw.node_id
-                });
+                let node = nodes
+                    .iter()
+                    .find(|n| NodeId::from_bytes(n.node_id) == hrw.node_id);
 
                 let (node_address, disk_id) = match node {
                     Some(n) => {
-                        let disk = n.disk_ids.first().map(|d| d.to_vec())
+                        let disk = n
+                            .disk_ids
+                            .first()
+                            .map(|d| d.to_vec())
                             .unwrap_or_else(|| vec![0u8; 16]);
                         (n.address.clone(), disk)
                     }
@@ -779,10 +882,14 @@ impl MetadataService for MetaService {
             initiated: now,
             parts: HashMap::new(),
         };
-        self.multipart_uploads.write().insert(upload_id.clone(), state);
+        self.multipart_uploads
+            .write()
+            .insert(upload_id.clone(), state);
 
-        info!("Created multipart upload: bucket={}, key={}, upload_id={}",
-            req.bucket, req.key, upload_id);
+        info!(
+            "Created multipart upload: bucket={}, key={}, upload_id={}",
+            req.bucket, req.key, upload_id
+        );
 
         Ok(Response::new(CreateMultipartUploadResponse {
             upload_id,
@@ -799,7 +906,9 @@ impl MetadataService for MetaService {
 
         // Validate part number (S3 allows 1-10,000)
         if req.part_number == 0 || req.part_number > 10000 {
-            return Err(Status::invalid_argument("part number must be between 1 and 10000"));
+            return Err(Status::invalid_argument(
+                "part number must be between 1 and 10000",
+            ));
         }
 
         let now = Self::current_timestamp();
@@ -812,7 +921,9 @@ impl MetadataService for MetaService {
 
         // Verify bucket/key match
         if upload.bucket != req.bucket || upload.key != req.key {
-            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+            return Err(Status::invalid_argument(
+                "bucket/key mismatch for upload_id",
+            ));
         }
 
         // Register the part (overwrites if same part_number uploaded again)
@@ -821,12 +932,14 @@ impl MetadataService for MetaService {
             etag: req.etag.clone(),
             size: req.size,
             last_modified: now,
-            stripes: req.stripes,  // Multiple stripes for large parts
+            stripes: req.stripes, // Multiple stripes for large parts
         };
         upload.parts.insert(req.part_number, part_state);
 
-        debug!("Registered part {} for upload {}: size={}, etag={}",
-            req.part_number, req.upload_id, req.size, req.etag);
+        debug!(
+            "Registered part {} for upload {}: size={}, etag={}",
+            req.part_number, req.upload_id, req.size, req.etag
+        );
 
         Ok(Response::new(RegisterPartResponse {
             success: true,
@@ -847,21 +960,29 @@ impl MetadataService for MetaService {
 
         // Verify bucket/key match
         if upload.bucket != req.bucket || upload.key != req.key {
-            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+            return Err(Status::invalid_argument(
+                "bucket/key mismatch for upload_id",
+            ));
         }
 
         // Get parts sorted by part number, starting after marker
-        let max_parts = if req.max_parts == 0 { 1000 } else { req.max_parts.min(1000) };
+        let max_parts = if req.max_parts == 0 {
+            1000
+        } else {
+            req.max_parts.min(1000)
+        };
         let marker = req.part_number_marker;
 
-        let mut parts: Vec<PartMeta> = upload.parts.values()
+        let mut parts: Vec<PartMeta> = upload
+            .parts
+            .values()
             .filter(|p| p.part_number > marker)
             .map(|p| PartMeta {
                 part_number: p.part_number,
                 etag: p.etag.clone(),
                 size: p.size,
                 last_modified: p.last_modified,
-                stripes: p.stripes.clone(),  // Multiple stripes for large parts
+                stripes: p.stripes.clone(), // Multiple stripes for large parts
             })
             .collect();
 
@@ -899,7 +1020,9 @@ impl MetadataService for MetaService {
 
         // Verify bucket/key match
         if upload.bucket != req.bucket || upload.key != req.key {
-            return Err(Status::invalid_argument("bucket/key mismatch for upload_id"));
+            return Err(Status::invalid_argument(
+                "bucket/key mismatch for upload_id",
+            ));
         }
 
         // Validate that all requested parts exist and ETags match
@@ -965,8 +1088,14 @@ impl MetadataService for MetaService {
         // Remove the completed upload from state
         self.multipart_uploads.write().remove(&req.upload_id);
 
-        info!("Completed multipart upload: bucket={}, key={}, upload_id={}, size={}, parts={}",
-            req.bucket, req.key, req.upload_id, total_size, req.parts.len());
+        info!(
+            "Completed multipart upload: bucket={}, key={}, upload_id={}, size={}, parts={}",
+            req.bucket,
+            req.key,
+            req.upload_id,
+            total_size,
+            req.parts.len()
+        );
 
         Ok(Response::new(CompleteMultipartUploadResponse {
             object: Some(object),
@@ -983,16 +1112,23 @@ impl MetadataService for MetaService {
         let removed = self.multipart_uploads.write().remove(&req.upload_id);
 
         if removed.is_some() {
-            info!("Aborted multipart upload: bucket={}, key={}, upload_id={}",
-                req.bucket, req.key, req.upload_id);
+            info!(
+                "Aborted multipart upload: bucket={}, key={}, upload_id={}",
+                req.bucket, req.key, req.upload_id
+            );
         } else {
-            debug!("Abort for unknown upload_id={} (may already be completed)", req.upload_id);
+            debug!(
+                "Abort for unknown upload_id={} (may already be completed)",
+                req.upload_id
+            );
         }
 
         // Note: Part data on OSDs should be cleaned up by background garbage collection
         // using the __mpu/{upload_id}/* prefix
 
-        Ok(Response::new(AbortMultipartUploadResponse { success: true }))
+        Ok(Response::new(AbortMultipartUploadResponse {
+            success: true,
+        }))
     }
 
     async fn list_multipart_uploads(
@@ -1006,11 +1142,16 @@ impl MetadataService for MetaService {
             return Err(Status::not_found("bucket not found"));
         }
 
-        let max_uploads = if req.max_uploads == 0 { 1000 } else { req.max_uploads.min(1000) };
+        let max_uploads = if req.max_uploads == 0 {
+            1000
+        } else {
+            req.max_uploads.min(1000)
+        };
 
         // Filter and collect uploads for this bucket
         let uploads_lock = self.multipart_uploads.read();
-        let mut uploads: Vec<MultipartUpload> = uploads_lock.values()
+        let mut uploads: Vec<MultipartUpload> = uploads_lock
+            .values()
             .filter(|u| u.bucket == req.bucket)
             .filter(|u| req.prefix.is_empty() || u.key.starts_with(&req.prefix))
             .filter(|u| {
@@ -1034,13 +1175,17 @@ impl MetadataService for MetaService {
 
         // Sort by key, then upload_id
         uploads.sort_by(|a, b| {
-            a.key.cmp(&b.key).then_with(|| a.upload_id.cmp(&b.upload_id))
+            a.key
+                .cmp(&b.key)
+                .then_with(|| a.upload_id.cmp(&b.upload_id))
         });
 
         let is_truncated = uploads.len() > max_uploads as usize;
-        let uploads: Vec<MultipartUpload> = uploads.into_iter().take(max_uploads as usize).collect();
+        let uploads: Vec<MultipartUpload> =
+            uploads.into_iter().take(max_uploads as usize).collect();
 
-        let (next_key_marker, next_upload_id_marker) = uploads.last()
+        let (next_key_marker, next_upload_id_marker) = uploads
+            .last()
             .map(|u| (u.key.clone(), u.upload_id.clone()))
             .unwrap_or_default();
 
@@ -1157,10 +1302,18 @@ impl MetadataService for MetaService {
         if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
             existing.address = node.address.clone();
             existing.disk_ids = node.disk_ids;
-            info!("Updated OSD registration: {} at {}", hex::encode(node_id), req.address);
+            info!(
+                "Updated OSD registration: {} at {}",
+                hex::encode(node_id),
+                req.address
+            );
         } else {
-            info!("Registered new OSD: {} at {} with {} disks",
-                hex::encode(node_id), req.address, num_disks);
+            info!(
+                "Registered new OSD: {} at {} with {} disks",
+                hex::encode(node_id),
+                req.address,
+                num_disks
+            );
             nodes.push(node);
         }
 
@@ -1230,7 +1383,12 @@ impl MetadataService for MetaService {
         }
 
         // Check if user with same name exists
-        if self.users.read().values().any(|u| u.display_name == req.display_name) {
+        if self
+            .users
+            .read()
+            .values()
+            .any(|u| u.display_name == req.display_name)
+        {
             return Err(Status::already_exists("user with this name already exists"));
         }
 
@@ -1269,7 +1427,9 @@ impl MetadataService for MetaService {
     ) -> Result<Response<GetUserResponse>, Status> {
         let req = request.into_inner();
 
-        let user = self.users.read()
+        let user = self
+            .users
+            .read()
             .get(&req.user_id)
             .cloned()
             .ok_or_else(|| Status::not_found("user not found"))?;
@@ -1291,9 +1451,15 @@ impl MetadataService for MetaService {
         request: Request<ListUsersRequest>,
     ) -> Result<Response<ListUsersResponse>, Status> {
         let req = request.into_inner();
-        let max_results = if req.max_results == 0 { 100 } else { req.max_results.min(1000) };
+        let max_results = if req.max_results == 0 {
+            100
+        } else {
+            req.max_results.min(1000)
+        };
 
-        let users: Vec<UserMeta> = self.users.read()
+        let users: Vec<UserMeta> = self
+            .users
+            .read()
             .values()
             .filter(|u| req.marker.is_empty() || u.user_id > req.marker)
             .filter(|u| u.status != UserStatus::UserDeleted as i32)
@@ -1314,7 +1480,11 @@ impl MetadataService for MetaService {
 
         Ok(Response::new(ListUsersResponse {
             users,
-            next_marker: if is_truncated { next_marker } else { String::new() },
+            next_marker: if is_truncated {
+                next_marker
+            } else {
+                String::new()
+            },
             is_truncated,
         }))
     }
@@ -1327,12 +1497,15 @@ impl MetadataService for MetaService {
 
         // Mark user as deleted (don't remove for audit trail)
         let mut users = self.users.write();
-        let user = users.get_mut(&req.user_id)
+        let user = users
+            .get_mut(&req.user_id)
             .ok_or_else(|| Status::not_found("user not found"))?;
         user.status = UserStatus::UserDeleted as i32;
 
         // Deactivate all user's keys
-        let key_ids: Vec<String> = self.user_keys.read()
+        let key_ids: Vec<String> = self
+            .user_keys
+            .read()
             .get(&req.user_id)
             .cloned()
             .unwrap_or_default();
@@ -1356,7 +1529,9 @@ impl MetadataService for MetaService {
         let req = request.into_inner();
 
         // Verify user exists and is active
-        let user = self.users.read()
+        let user = self
+            .users
+            .read()
             .get(&req.user_id)
             .cloned()
             .ok_or_else(|| Status::not_found("user not found"))?;
@@ -1377,13 +1552,19 @@ impl MetadataService for MetaService {
             created_at: now,
         };
 
-        self.access_keys.write().insert(access_key_id.clone(), key.clone());
-        self.user_keys.write()
+        self.access_keys
+            .write()
+            .insert(access_key_id.clone(), key.clone());
+        self.user_keys
+            .write()
             .entry(req.user_id.clone())
             .or_default()
             .push(access_key_id.clone());
 
-        info!("Created access key {} for user {}", access_key_id, req.user_id);
+        info!(
+            "Created access key {} for user {}",
+            access_key_id, req.user_id
+        );
 
         Ok(Response::new(CreateAccessKeyResponse {
             access_key: Some(AccessKeyMeta {
@@ -1402,13 +1583,16 @@ impl MetadataService for MetaService {
     ) -> Result<Response<ListAccessKeysResponse>, Status> {
         let req = request.into_inner();
 
-        let key_ids = self.user_keys.read()
+        let key_ids = self
+            .user_keys
+            .read()
             .get(&req.user_id)
             .cloned()
             .unwrap_or_default();
 
         let keys = self.access_keys.read();
-        let access_keys: Vec<AccessKeyMeta> = key_ids.iter()
+        let access_keys: Vec<AccessKeyMeta> = key_ids
+            .iter()
             .filter_map(|id| keys.get(id))
             .map(|k| AccessKeyMeta {
                 access_key_id: k.access_key_id.clone(),
@@ -1447,7 +1631,9 @@ impl MetadataService for MetaService {
     ) -> Result<Response<GetAccessKeyForAuthResponse>, Status> {
         let req = request.into_inner();
 
-        let key = self.access_keys.read()
+        let key = self
+            .access_keys
+            .read()
             .get(&req.access_key_id)
             .cloned()
             .ok_or_else(|| Status::not_found("access key not found"))?;
@@ -1456,7 +1642,9 @@ impl MetadataService for MetaService {
             return Err(Status::permission_denied("access key is inactive"));
         }
 
-        let user = self.users.read()
+        let user = self
+            .users
+            .read()
             .get(&key.user_id)
             .cloned()
             .ok_or_else(|| Status::not_found("user not found"))?;

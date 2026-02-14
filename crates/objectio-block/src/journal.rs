@@ -40,7 +40,10 @@ impl TryFrom<u8> for EntryType {
             1 => Ok(EntryType::Write),
             2 => Ok(EntryType::Flush),
             3 => Ok(EntryType::Checkpoint),
-            _ => Err(BlockError::Journal(format!("invalid entry type: {}", value))),
+            _ => Err(BlockError::Journal(format!(
+                "invalid entry type: {}",
+                value
+            ))),
         }
     }
 }
@@ -66,7 +69,13 @@ pub struct JournalEntry {
 
 impl JournalEntry {
     /// Create a write entry
-    pub fn write(sequence: u64, volume_id: String, chunk_id: ChunkId, offset: u64, data: Bytes) -> Self {
+    pub fn write(
+        sequence: u64,
+        volume_id: String,
+        chunk_id: ChunkId,
+        offset: u64,
+        data: Bytes,
+    ) -> Self {
         let mut entry = Self {
             sequence,
             entry_type: EntryType::Write,
@@ -164,39 +173,55 @@ impl JournalEntry {
     pub fn deserialize<R: Read>(reader: &mut R) -> BlockResult<Self> {
         // Sequence number
         let mut seq_buf = [0u8; 8];
-        reader.read_exact(&mut seq_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut seq_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let sequence = u64::from_le_bytes(seq_buf);
 
         // Entry type
         let mut type_buf = [0u8; 1];
-        reader.read_exact(&mut type_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut type_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let entry_type = EntryType::try_from(type_buf[0])?;
 
         // Volume ID
         let mut vol_len_buf = [0u8; 2];
-        reader.read_exact(&mut vol_len_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut vol_len_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let vol_len = u16::from_le_bytes(vol_len_buf) as usize;
         let mut vol_buf = vec![0u8; vol_len];
-        reader.read_exact(&mut vol_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut vol_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let volume_id = String::from_utf8(vol_buf)
             .map_err(|e| BlockError::Journal(format!("invalid volume ID: {}", e)))?;
 
         // Chunk ID and offset
         let mut chunk_buf = [0u8; 8];
-        reader.read_exact(&mut chunk_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut chunk_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let chunk_id = u64::from_le_bytes(chunk_buf);
 
         let mut offset_buf = [0u8; 8];
-        reader.read_exact(&mut offset_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut offset_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let offset = u64::from_le_bytes(offset_buf);
 
         // Data
         let mut data_len_buf = [0u8; 4];
-        reader.read_exact(&mut data_len_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut data_len_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let data_len = u32::from_le_bytes(data_len_buf) as usize;
         let data = if data_len > 0 {
             let mut data_buf = vec![0u8; data_len];
-            reader.read_exact(&mut data_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+            reader
+                .read_exact(&mut data_buf)
+                .map_err(|e| BlockError::Journal(e.to_string()))?;
             Some(Bytes::from(data_buf))
         } else {
             None
@@ -204,7 +229,9 @@ impl JournalEntry {
 
         // Checksum
         let mut crc_buf = [0u8; 4];
-        reader.read_exact(&mut crc_buf).map_err(|e| BlockError::Journal(e.to_string()))?;
+        reader
+            .read_exact(&mut crc_buf)
+            .map_err(|e| BlockError::Journal(e.to_string()))?;
         let checksum = u32::from_le_bytes(crc_buf);
 
         Ok(Self {
@@ -254,7 +281,8 @@ impl WriteJournal {
             .open(&path)
             .map_err(|e| BlockError::Journal(format!("failed to open journal: {}", e)))?;
 
-        let file_len = file.metadata()
+        let file_len = file
+            .metadata()
             .map_err(|e| BlockError::Journal(format!("failed to stat journal: {}", e)))?
             .len();
 
@@ -266,7 +294,8 @@ impl WriteJournal {
             // New journal - write header
             let mut writer = BufWriter::new(file);
             Self::write_header(&mut writer, 0, 0)?;
-            let file = writer.into_inner()
+            let file = writer
+                .into_inner()
                 .map_err(|e| BlockError::Journal(format!("flush failed: {}", e)))?;
             (0, 0)
         };
@@ -279,12 +308,15 @@ impl WriteJournal {
             .open(&path)
             .map_err(|e| BlockError::Journal(format!("failed to reopen journal: {}", e)))?;
 
-        let current_size = file.metadata()
+        let current_size = file
+            .metadata()
             .map_err(|e| BlockError::Journal(format!("failed to stat journal: {}", e)))?
             .len();
 
-        info!("Opened journal at {:?}: seq={}, checkpoint={}, size={}",
-              path, sequence, last_checkpoint, current_size);
+        info!(
+            "Opened journal at {:?}: seq={}, checkpoint={}, size={}",
+            path, sequence, last_checkpoint, current_size
+        );
 
         Ok(Self {
             path,
@@ -298,15 +330,20 @@ impl WriteJournal {
 
     /// Write journal header
     fn write_header<W: Write>(writer: &mut W, sequence: u64, checkpoint: u64) -> BlockResult<()> {
-        writer.write_all(&JOURNAL_MAGIC.to_le_bytes())
+        writer
+            .write_all(&JOURNAL_MAGIC.to_le_bytes())
             .map_err(|e| BlockError::Journal(format!("failed to write magic: {}", e)))?;
-        writer.write_all(&JOURNAL_VERSION.to_le_bytes())
+        writer
+            .write_all(&JOURNAL_VERSION.to_le_bytes())
             .map_err(|e| BlockError::Journal(format!("failed to write version: {}", e)))?;
-        writer.write_all(&sequence.to_le_bytes())
+        writer
+            .write_all(&sequence.to_le_bytes())
             .map_err(|e| BlockError::Journal(format!("failed to write sequence: {}", e)))?;
-        writer.write_all(&checkpoint.to_le_bytes())
+        writer
+            .write_all(&checkpoint.to_le_bytes())
             .map_err(|e| BlockError::Journal(format!("failed to write checkpoint: {}", e)))?;
-        writer.flush()
+        writer
+            .flush()
             .map_err(|e| BlockError::Journal(format!("failed to flush header: {}", e)))?;
         Ok(())
     }
@@ -314,11 +351,13 @@ impl WriteJournal {
     /// Read journal header
     fn read_header(file: &File) -> BlockResult<(u64, u64)> {
         let mut reader = BufReader::new(file);
-        reader.seek(SeekFrom::Start(0))
+        reader
+            .seek(SeekFrom::Start(0))
             .map_err(|e| BlockError::Journal(format!("failed to seek: {}", e)))?;
 
         let mut magic_buf = [0u8; 8];
-        reader.read_exact(&mut magic_buf)
+        reader
+            .read_exact(&mut magic_buf)
             .map_err(|e| BlockError::Journal(format!("failed to read magic: {}", e)))?;
         let magic = u64::from_le_bytes(magic_buf);
         if magic != JOURNAL_MAGIC {
@@ -326,20 +365,26 @@ impl WriteJournal {
         }
 
         let mut version_buf = [0u8; 4];
-        reader.read_exact(&mut version_buf)
+        reader
+            .read_exact(&mut version_buf)
             .map_err(|e| BlockError::Journal(format!("failed to read version: {}", e)))?;
         let version = u32::from_le_bytes(version_buf);
         if version != JOURNAL_VERSION {
-            return Err(BlockError::Journal(format!("unsupported journal version: {}", version)));
+            return Err(BlockError::Journal(format!(
+                "unsupported journal version: {}",
+                version
+            )));
         }
 
         let mut seq_buf = [0u8; 8];
-        reader.read_exact(&mut seq_buf)
+        reader
+            .read_exact(&mut seq_buf)
             .map_err(|e| BlockError::Journal(format!("failed to read sequence: {}", e)))?;
         let sequence = u64::from_le_bytes(seq_buf);
 
         let mut checkpoint_buf = [0u8; 8];
-        reader.read_exact(&mut checkpoint_buf)
+        reader
+            .read_exact(&mut checkpoint_buf)
             .map_err(|e| BlockError::Journal(format!("failed to read checkpoint: {}", e)))?;
         let checkpoint = u64::from_le_bytes(checkpoint_buf);
 
@@ -352,12 +397,15 @@ impl WriteJournal {
         let data_len = data.len() as u64;
 
         let mut writer_guard = self.writer.lock();
-        let writer = writer_guard.as_mut()
+        let writer = writer_guard
+            .as_mut()
             .ok_or_else(|| BlockError::Journal("journal closed".to_string()))?;
 
-        writer.write_all(&data)
+        writer
+            .write_all(&data)
             .map_err(|e| BlockError::Journal(format!("write failed: {}", e)))?;
-        writer.flush()
+        writer
+            .flush()
             .map_err(|e| BlockError::Journal(format!("flush failed: {}", e)))?;
 
         self.current_size.fetch_add(data_len, Ordering::SeqCst);
@@ -367,7 +415,13 @@ impl WriteJournal {
     }
 
     /// Log a write operation
-    pub fn log_write(&self, volume_id: &str, chunk_id: ChunkId, offset: u64, data: Bytes) -> BlockResult<u64> {
+    pub fn log_write(
+        &self,
+        volume_id: &str,
+        chunk_id: ChunkId,
+        offset: u64,
+        data: Bytes,
+    ) -> BlockResult<u64> {
         let seq = self.sequence.load(Ordering::SeqCst);
         let entry = JournalEntry::write(seq, volume_id.to_string(), chunk_id, offset, data);
         self.append(&entry)
@@ -398,7 +452,8 @@ impl WriteJournal {
         let mut reader = BufReader::new(file);
 
         // Skip header
-        reader.seek(SeekFrom::Start(28)) // 8 + 4 + 8 + 8 bytes
+        reader
+            .seek(SeekFrom::Start(28)) // 8 + 4 + 8 + 8 bytes
             .map_err(|e| BlockError::Journal(format!("failed to seek past header: {}", e)))?;
 
         let mut all_entries = Vec::new();
@@ -409,7 +464,10 @@ impl WriteJournal {
             match JournalEntry::deserialize(&mut reader) {
                 Ok(entry) => {
                     if !entry.verify() {
-                        warn!("Journal entry {} failed checksum, stopping recovery", entry.sequence);
+                        warn!(
+                            "Journal entry {} failed checksum, stopping recovery",
+                            entry.sequence
+                        );
                         break;
                     }
                     if entry.entry_type == EntryType::Checkpoint {
@@ -483,7 +541,9 @@ impl WriteJournal {
     pub fn sync(&self) -> BlockResult<()> {
         let writer_guard = self.writer.lock();
         if let Some(ref writer) = *writer_guard {
-            writer.get_ref().sync_all()
+            writer
+                .get_ref()
+                .sync_all()
                 .map_err(|e| BlockError::Journal(format!("sync failed: {}", e)))?;
         }
         Ok(())
@@ -527,10 +587,16 @@ mod tests {
         // Write some entries
         {
             let journal = WriteJournal::open(&journal_path, 1024 * 1024).unwrap();
-            journal.log_write("vol1", 0, 0, Bytes::from(vec![1; 100])).unwrap();
-            journal.log_write("vol1", 1, 0, Bytes::from(vec![2; 100])).unwrap();
+            journal
+                .log_write("vol1", 0, 0, Bytes::from(vec![1; 100]))
+                .unwrap();
+            journal
+                .log_write("vol1", 1, 0, Bytes::from(vec![2; 100]))
+                .unwrap();
             journal.checkpoint().unwrap();
-            journal.log_write("vol1", 2, 0, Bytes::from(vec![3; 100])).unwrap();
+            journal
+                .log_write("vol1", 2, 0, Bytes::from(vec![3; 100]))
+                .unwrap();
         }
 
         // Recover

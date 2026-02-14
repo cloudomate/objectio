@@ -135,8 +135,8 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            segment_size: 64 * 1024 * 1024,  // 64 MB
-            max_size: 1024 * 1024 * 1024,    // 1 GB
+            segment_size: 64 * 1024 * 1024, // 64 MB
+            max_size: 1024 * 1024 * 1024,   // 1 GB
             sync_mode: WalSyncMode::OnCommit,
         }
     }
@@ -203,7 +203,7 @@ impl Default for S3Config {
             region: "us-east-1".to_string(),
             max_object_size: 5 * 1024 * 1024 * 1024 * 1024, // 5 TB
             max_part_size: 5 * 1024 * 1024 * 1024,          // 5 GB
-            min_part_size: 5 * 1024 * 1024,                  // 5 MB
+            min_part_size: 5 * 1024 * 1024,                 // 5 MB
             max_parts: 10_000,
             virtual_host_style: true,
         }
@@ -258,7 +258,7 @@ impl Default for RepairConfig {
     fn default() -> Self {
         Self {
             max_concurrent: 4,
-            bandwidth_limit: 100 * 1024 * 1024, // 100 MB/s
+            bandwidth_limit: 100 * 1024 * 1024,    // 100 MB/s
             scrub_interval_secs: 7 * 24 * 60 * 60, // 7 days
         }
     }

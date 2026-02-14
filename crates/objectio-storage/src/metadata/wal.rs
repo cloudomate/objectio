@@ -108,7 +108,13 @@ impl WalRecord {
             return Err(Error::Storage("WAL record CRC mismatch".into()));
         }
 
-        Ok((Self { lsn, data: record_data }, total_size))
+        Ok((
+            Self {
+                lsn,
+                data: record_data,
+            },
+            total_size,
+        ))
     }
 }
 
@@ -262,9 +268,7 @@ impl MetadataWal {
             return Ok(self.current_lsn());
         }
 
-        let batch_op = MetadataOp::Batch {
-            ops: ops.to_vec(),
-        };
+        let batch_op = MetadataOp::Batch { ops: ops.to_vec() };
         self.append(&batch_op)
     }
 
@@ -419,8 +423,8 @@ impl MetadataWal {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::MetadataKey;
+    use super::*;
     use tempfile::tempdir;
 
     #[test]
@@ -539,11 +543,12 @@ mod tests {
             let wal = MetadataWal::open(&path, WalConfig::default()).unwrap();
             assert_eq!(wal.current_lsn(), 1);
 
-            let lsn = wal.append(&MetadataOp::Put {
-                key: MetadataKey::block(2),
-                value: b"value2".to_vec(),
-            })
-            .unwrap();
+            let lsn = wal
+                .append(&MetadataOp::Put {
+                    key: MetadataKey::block(2),
+                    value: b"value2".to_vec(),
+                })
+                .unwrap();
             assert_eq!(lsn, 2);
         }
     }

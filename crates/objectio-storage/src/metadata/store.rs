@@ -10,8 +10,8 @@ use super::wal::{MetadataWal, WalConfig};
 use objectio_common::{Error, Result};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -171,9 +171,7 @@ impl MetadataStore {
 
     /// Open or create a metadata store
     pub fn open_or_create(config: MetadataStoreConfig) -> Result<Self> {
-        if config.data_dir.join("metadata.wal").exists()
-            || config.btree.snapshot_dir.exists()
-        {
+        if config.data_dir.join("metadata.wal").exists() || config.btree.snapshot_dir.exists() {
             Self::open(config)
         } else {
             Self::create(config)
@@ -540,10 +538,7 @@ mod tests {
         store.batch_put(entries).unwrap();
 
         assert_eq!(store.len(), 10);
-        assert_eq!(
-            store.get(&MetadataKey::block(5)),
-            Some(b"value_5".to_vec())
-        );
+        assert_eq!(store.get(&MetadataKey::block(5)), Some(b"value_5".to_vec()));
     }
 
     #[test]

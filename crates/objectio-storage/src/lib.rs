@@ -23,8 +23,8 @@ pub use block::{Block, BlockAllocator, BlockBitmap, Extent};
 pub use cache::{BlockCache, CacheCapacity, CacheKey, CacheStats, WritePolicy};
 pub use disk::{DiskManager, DiskStats};
 pub use layout::{
-    BlockFooter, BlockHeader, Superblock, ALIGNMENT, DEFAULT_BLOCK_SIZE, DEFAULT_WAL_SIZE,
-    MIN_DISK_SIZE, SUPERBLOCK_SIZE,
+    ALIGNMENT, BlockFooter, BlockHeader, DEFAULT_BLOCK_SIZE, DEFAULT_WAL_SIZE, MIN_DISK_SIZE,
+    SUPERBLOCK_SIZE, Superblock,
 };
 pub use metadata::{
     ArcCache, MetaCacheStats, MetadataEntry, MetadataKey, MetadataOp, MetadataStore, MetadataWal,

@@ -145,7 +145,10 @@ impl OsdPool {
     }
 
     /// Get a client for a specific node
-    pub async fn get_client(&self, node_id: &[u8]) -> Result<StorageServiceClient<Channel>, OsdPoolError> {
+    pub async fn get_client(
+        &self,
+        node_id: &[u8],
+    ) -> Result<StorageServiceClient<Channel>, OsdPoolError> {
         let id = NodeId::from_bytes(node_id)
             .ok_or_else(|| OsdPoolError::NodeNotFound("invalid node ID".to_string()))?;
 
@@ -252,7 +255,10 @@ pub async fn write_shard_to_osd(
     let response = tokio::time::timeout(std::time::Duration::from_secs(30), write_future)
         .await
         .map_err(|_| {
-            error!("Timeout writing shard {} to OSD {}", position, placement.node_address);
+            error!(
+                "Timeout writing shard {} to OSD {}",
+                position, placement.node_address
+            );
             OsdPoolError::ConnectionFailed("write timeout".to_string())
         })?
         .map_err(|e| {

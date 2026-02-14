@@ -6,15 +6,15 @@ mod service;
 
 use anyhow::Result;
 use axum::{
-    http::{header, StatusCode},
+    Router,
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use clap::Parser;
-use objectio_block::metrics::{MetricsCollector, OsdMetrics, PrometheusExporter, HealthStatus};
+use objectio_block::metrics::{HealthStatus, MetricsCollector, OsdMetrics, PrometheusExporter};
 use objectio_proto::metadata::{
-    metadata_service_client::MetadataServiceClient, FailureDomainInfo, RegisterOsdRequest,
+    FailureDomainInfo, RegisterOsdRequest, metadata_service_client::MetadataServiceClient,
 };
 use objectio_proto::storage::storage_service_server::StorageServiceServer;
 use objectio_storage::SmartMonitor;
@@ -216,10 +216,17 @@ async fn main() -> Result<()> {
     info!("Starting ObjectIO OSD");
     info!("Config file: {}", args.config);
     info!("Disks: {:?}", disks);
-    info!("Block size: {} bytes ({} MB)", block_size, block_size / 1024 / 1024);
+    info!(
+        "Block size: {} bytes ({} MB)",
+        block_size,
+        block_size / 1024 / 1024
+    );
 
     if disks.is_empty() {
-        error!("No disks specified. Use --disks or configure in {}", args.config);
+        error!(
+            "No disks specified. Use --disks or configure in {}",
+            args.config
+        );
         std::process::exit(1);
     }
 
@@ -244,9 +251,9 @@ async fn main() -> Result<()> {
     info!("OSD managing {} disks", disk_ids.len());
 
     // Parse listen address
-    let addr = listen.parse().map_err(|e| {
-        anyhow::anyhow!("Invalid listen address {}: {}", listen, e)
-    })?;
+    let addr = listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid listen address {}: {}", listen, e))?;
 
     // Determine the address to advertise to the metadata service
     // Priority: CLI --advertise-addr > config advertise_addr > derived from listen address
@@ -266,7 +273,10 @@ async fn main() -> Result<()> {
         }
     } else if listen.starts_with("0.0.0.0") {
         // Fallback: use localhost when listening on all interfaces
-        format!("http://127.0.0.1:{}", listen.split(':').last().unwrap_or("9002"))
+        format!(
+            "http://127.0.0.1:{}",
+            listen.split(':').last().unwrap_or("9002")
+        )
     } else {
         format!("http://{}", listen)
     };
@@ -314,7 +324,9 @@ async fn main() -> Result<()> {
     if SmartMonitor::is_available() {
         info!("SMART monitoring available - disk health will be tracked");
     } else {
-        warn!("SMART monitoring unavailable (smartctl not found) - disk health metrics will be limited");
+        warn!(
+            "SMART monitoring unavailable (smartctl not found) - disk health metrics will be limited"
+        );
     }
 
     // Create metrics state
@@ -341,14 +353,22 @@ async fn main() -> Result<()> {
     });
 
     info!("Starting gRPC server on {}", addr);
-    info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
+    info!(
+        "Metrics available at http://0.0.0.0:{}/metrics",
+        metrics_port
+    );
 
     // Start heartbeat task
     let heartbeat_meta_endpoint = meta_endpoint.clone();
     let heartbeat_node_id = node_id_bytes;
     let heartbeat_disk_ids = disk_ids.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        heartbeat_loop(&heartbeat_meta_endpoint, &heartbeat_node_id, &heartbeat_disk_ids).await
+        heartbeat_loop(
+            &heartbeat_meta_endpoint,
+            &heartbeat_node_id,
+            &heartbeat_disk_ids,
+        )
+        .await
     });
 
     // Start gRPC server with increased message size limit (100MB for large objects)
@@ -399,10 +419,7 @@ async fn register_with_meta(
     node_name: Option<&str>,
     weight: f64,
 ) -> Result<(), String> {
-    info!(
-        "Registering OSD with metadata service at {}",
-        meta_endpoint
-    );
+    info!("Registering OSD with metadata service at {}", meta_endpoint);
 
     // Connect to metadata service
     let mut client = MetadataServiceClient::connect(meta_endpoint.to_string())
@@ -468,26 +485,58 @@ async fn metrics_handler(
 
     // OSD uptime
     let uptime = state.start_time.elapsed().as_secs();
-    writeln!(output, "# HELP objectio_osd_uptime_seconds OSD uptime in seconds").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_osd_uptime_seconds OSD uptime in seconds"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_osd_uptime_seconds counter").unwrap();
-    writeln!(output, "objectio_osd_uptime_seconds{{osd_id=\"{}\"}} {}", state.osd_id, uptime).unwrap();
+    writeln!(
+        output,
+        "objectio_osd_uptime_seconds{{osd_id=\"{}\"}} {}",
+        state.osd_id, uptime
+    )
+    .unwrap();
 
     // Get disk stats from OSD service
     let status = state.osd_service.status();
 
     // Total capacity and used
-    writeln!(output, "# HELP objectio_osd_capacity_bytes Total OSD capacity").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_osd_capacity_bytes Total OSD capacity"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_osd_capacity_bytes gauge").unwrap();
-    writeln!(output, "objectio_osd_capacity_bytes{{osd_id=\"{}\"}} {}", state.osd_id, status.total_capacity).unwrap();
+    writeln!(
+        output,
+        "objectio_osd_capacity_bytes{{osd_id=\"{}\"}} {}",
+        state.osd_id, status.total_capacity
+    )
+    .unwrap();
 
     writeln!(output, "# HELP objectio_osd_used_bytes Used space on OSD").unwrap();
     writeln!(output, "# TYPE objectio_osd_used_bytes gauge").unwrap();
-    writeln!(output, "objectio_osd_used_bytes{{osd_id=\"{}\"}} {}", state.osd_id, status.total_used).unwrap();
+    writeln!(
+        output,
+        "objectio_osd_used_bytes{{osd_id=\"{}\"}} {}",
+        state.osd_id, status.total_used
+    )
+    .unwrap();
 
     // Shard count
-    writeln!(output, "# HELP objectio_osd_shards_total Total shards stored").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_osd_shards_total Total shards stored"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_osd_shards_total gauge").unwrap();
-    writeln!(output, "objectio_osd_shards_total{{osd_id=\"{}\"}} {}", state.osd_id, status.total_shards).unwrap();
+    writeln!(
+        output,
+        "objectio_osd_shards_total{{osd_id=\"{}\"}} {}",
+        state.osd_id, status.total_shards
+    )
+    .unwrap();
 
     // Per-disk metrics
     writeln!(output, "# HELP objectio_disk_capacity_bytes Disk capacity").unwrap();
@@ -496,7 +545,11 @@ async fn metrics_handler(
     writeln!(output, "# TYPE objectio_disk_used_bytes gauge").unwrap();
     writeln!(output, "# HELP objectio_disk_shards_total Shards on disk").unwrap();
     writeln!(output, "# TYPE objectio_disk_shards_total gauge").unwrap();
-    writeln!(output, "# HELP objectio_disk_healthy Disk health status (1=healthy, 0=unhealthy)").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_disk_healthy Disk health status (1=healthy, 0=unhealthy)"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_disk_healthy gauge").unwrap();
 
     for disk in &status.disks {
@@ -505,29 +558,38 @@ async fn metrics_handler(
             output,
             "objectio_disk_capacity_bytes{{osd_id=\"{}\",disk=\"{}\"}} {}",
             state.osd_id, disk.path, disk.capacity
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(
             output,
             "objectio_disk_used_bytes{{osd_id=\"{}\",disk=\"{}\"}} {}",
             state.osd_id, disk.path, disk.used
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(
             output,
             "objectio_disk_shards_total{{osd_id=\"{}\",disk=\"{}\"}} {}",
             state.osd_id, disk.path, disk.shard_count
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(
             output,
             "objectio_disk_healthy{{osd_id=\"{}\",disk=\"{}\"}} {}",
             state.osd_id, disk.path, healthy
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Export block metrics if available
     output.push_str(&state.exporter.export(&state.collector));
 
     // Export gRPC metrics
-    output.push_str(&state.osd_service.grpc_metrics().export_prometheus(&state.osd_id));
+    output.push_str(
+        &state
+            .osd_service
+            .grpc_metrics()
+            .export_prometheus(&state.osd_id),
+    );
 
     // Check SMART metrics (will only poll if interval has elapsed)
     state.smart_monitor.check_if_needed(&state.disk_devices);
@@ -535,7 +597,10 @@ async fn metrics_handler(
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         output,
     )
 }
@@ -555,10 +620,7 @@ async fn health_handler(
 }
 
 /// Start the metrics HTTP server
-async fn start_metrics_server(
-    port: u16,
-    state: Arc<OsdMetricsState>,
-) -> Result<()> {
+async fn start_metrics_server(port: u16, state: Arc<OsdMetricsState>) -> Result<()> {
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/health", get(health_handler))

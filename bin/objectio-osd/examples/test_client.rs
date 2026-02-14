@@ -1,9 +1,8 @@
 //! Simple test client for OSD gRPC service
 
 use objectio_proto::storage::{
+    Checksum, GetStatusRequest, HealthCheckRequest, ReadShardRequest, ShardId, WriteShardRequest,
     storage_service_client::StorageServiceClient,
-    GetStatusRequest, HealthCheckRequest, ReadShardRequest, ShardId, WriteShardRequest,
-    Checksum,
 };
 use uuid::Uuid;
 
@@ -30,7 +29,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status = response.into_inner();
     println!("Node ID: {}", hex::encode(&status.node_id));
     println!("Node Name: {}", status.node_name);
-    println!("Total Capacity: {} GB", status.total_capacity / (1024 * 1024 * 1024));
+    println!(
+        "Total Capacity: {} GB",
+        status.total_capacity / (1024 * 1024 * 1024)
+    );
     println!("Used Capacity: {} bytes", status.used_capacity);
     println!("Shard Count: {}", status.shard_count);
     println!("Uptime: {} seconds", status.uptime_seconds);
@@ -72,7 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Write successful!");
     println!("Object ID: {}", hex::encode(&object_id));
     if let Some(loc) = &write_result.location {
-        println!("Location: disk={}, offset={}", hex::encode(&loc.disk_id), loc.offset);
+        println!(
+            "Location: disk={}, offset={}",
+            hex::encode(&loc.disk_id),
+            loc.offset
+        );
     }
 
     // Test 4: Read the shard back

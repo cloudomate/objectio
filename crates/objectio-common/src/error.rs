@@ -285,11 +285,13 @@ mod tests {
     #[test]
     fn test_error_not_found() {
         assert!(Error::BucketNotFound("test".into()).is_not_found());
-        assert!(Error::ObjectNotFound {
-            bucket: "b".into(),
-            key: "k".into()
-        }
-        .is_not_found());
+        assert!(
+            Error::ObjectNotFound {
+                bucket: "b".into(),
+                key: "k".into()
+            }
+            .is_not_found()
+        );
         assert!(!Error::AccessDenied.is_not_found());
     }
 

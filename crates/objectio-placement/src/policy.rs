@@ -3,8 +3,7 @@
 use crate::crush::{CrushMap, LrcPlacementConfig, ShardType};
 use crate::topology::ClusterTopology;
 use objectio_common::{
-    DiskId, Error, FailureDomain, NodeId, ObjectId, ProtectionType, Result,
-    StorageClass,
+    DiskId, Error, FailureDomain, NodeId, ObjectId, ProtectionType, Result, StorageClass,
 };
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -85,9 +84,9 @@ impl PlacementPolicy {
         storage_class: Option<&str>,
     ) -> Result<PlacementResult> {
         let class_name = storage_class.unwrap_or(&self.default_storage_class);
-        let class = self
-            .get_storage_class(class_name)
-            .ok_or_else(|| Error::invalid_argument(format!("unknown storage class: {class_name}")))?;
+        let class = self.get_storage_class(class_name).ok_or_else(|| {
+            Error::invalid_argument(format!("unknown storage class: {class_name}"))
+        })?;
 
         match &class.protection {
             ProtectionType::ErasureCoding {
@@ -96,10 +95,10 @@ impl PlacementPolicy {
                 placement,
             } => {
                 let total_shards = *data_shards + *parity_shards;
-                let nodes = self
-                    .crush
-                    .read()
-                    .select_nodes(object_id, total_shards as usize, *placement);
+                let nodes =
+                    self.crush
+                        .read()
+                        .select_nodes(object_id, total_shards as usize, *placement);
 
                 if nodes.len() < total_shards as usize {
                     return Err(Error::InsufficientNodes {
@@ -176,11 +175,14 @@ impl PlacementPolicy {
                     shards,
                 })
             }
-            ProtectionType::Replication { replicas, placement } => {
-                let nodes = self
-                    .crush
-                    .read()
-                    .select_nodes(object_id, *replicas as usize, *placement);
+            ProtectionType::Replication {
+                replicas,
+                placement,
+            } => {
+                let nodes =
+                    self.crush
+                        .read()
+                        .select_nodes(object_id, *replicas as usize, *placement);
 
                 if nodes.len() < *replicas as usize {
                     return Err(Error::InsufficientNodes {
@@ -221,7 +223,10 @@ impl PlacementPolicy {
         local_group: Option<u8>,
     ) -> Result<ShardPlacement> {
         // Get more candidates than needed to allow exclusion
-        let candidates = self.crush.read().select_nodes(object_id, 10, failure_domain);
+        let candidates = self
+            .crush
+            .read()
+            .select_nodes(object_id, 10, failure_domain);
 
         for node_id in candidates {
             if !exclude_nodes.contains(&node_id) {
@@ -286,7 +291,11 @@ mod tests {
                     id: NodeId::new(),
                     name: format!("node-{rack_num}-{node_num}"),
                     address: format!("127.0.0.{rack_num}:900{node_num}").parse().unwrap(),
-                    failure_domain: FailureDomainInfo::new("us-east", "dc1", &format!("rack{rack_num}")),
+                    failure_domain: FailureDomainInfo::new(
+                        "us-east",
+                        "dc1",
+                        &format!("rack{rack_num}"),
+                    ),
                     status: NodeStatus::Active,
                     disks: vec![],
                     weight: 1.0,

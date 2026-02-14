@@ -24,14 +24,13 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::stream::{self, StreamExt};
 use objectio_proto::metadata::{
-    metadata_service_client::MetadataServiceClient, GetListingNodesRequest, ListingNode,
-    ObjectMeta,
+    GetListingNodesRequest, ListingNode, ObjectMeta, metadata_service_client::MetadataServiceClient,
 };
 use objectio_proto::storage::{
-    storage_service_client::StorageServiceClient, ListObjectsMetaRequest,
+    ListObjectsMetaRequest, storage_service_client::StorageServiceClient,
 };
 use ring::hmac;
 use serde::{Deserialize, Serialize};
@@ -110,7 +109,7 @@ pub struct ListContinuationToken {
 
 /// Custom serialization for signature bytes
 mod base64_bytes {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
@@ -125,9 +124,7 @@ mod base64_bytes {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        URL_SAFE_NO_PAD
-            .decode(s)
-            .map_err(serde::de::Error::custom)
+        URL_SAFE_NO_PAD.decode(s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -330,7 +327,11 @@ impl ScatterGatherEngine {
                 topology_version,
                 &self.signing_key,
             );
-            Some(token.encode().map_err(|_| ScatterGatherError::InvalidToken)?)
+            Some(
+                token
+                    .encode()
+                    .map_err(|_| ScatterGatherError::InvalidToken)?,
+            )
         } else {
             None
         };
@@ -391,8 +392,11 @@ impl ScatterGatherEngine {
                     };
 
                     // Query with timeout
-                    let result = tokio::time::timeout(SHARD_QUERY_TIMEOUT, client.list_objects_meta(request))
-                        .await;
+                    let result = tokio::time::timeout(
+                        SHARD_QUERY_TIMEOUT,
+                        client.list_objects_meta(request),
+                    )
+                    .await;
 
                     match result {
                         Ok(Ok(response)) => {
@@ -508,9 +512,9 @@ impl ScatterGatherEngine {
 
         // Determine if truncated (any shard has more data)
         let is_truncated = !heap.is_empty()
-            || shard_buffers.values().any(|(objects, is_truncated)| {
-                *is_truncated || !objects.is_empty()
-            });
+            || shard_buffers
+                .values()
+                .any(|(objects, is_truncated)| *is_truncated || !objects.is_empty());
 
         // Build new cursors
         let new_cursors: HashMap<u32, ShardCursor> = shard_buffers

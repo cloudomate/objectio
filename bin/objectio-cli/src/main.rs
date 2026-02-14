@@ -5,14 +5,13 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use objectio_proto::block::{
-    block_service_client::BlockServiceClient, CloneVolumeRequest, CreateSnapshotRequest,
-    CreateVolumeRequest, DeleteSnapshotRequest, DeleteVolumeRequest, GetSnapshotRequest,
-    GetVolumeRequest, ListSnapshotsRequest, ListVolumesRequest, ResizeVolumeRequest,
+    CloneVolumeRequest, CreateSnapshotRequest, CreateVolumeRequest, DeleteSnapshotRequest,
+    DeleteVolumeRequest, GetSnapshotRequest, GetVolumeRequest, ListSnapshotsRequest,
+    ListVolumesRequest, ResizeVolumeRequest, block_service_client::BlockServiceClient,
 };
 use objectio_proto::metadata::{
-    metadata_service_client::MetadataServiceClient,
     CreateAccessKeyRequest, CreateUserRequest, DeleteAccessKeyRequest, DeleteUserRequest,
-    ListAccessKeysRequest, ListUsersRequest,
+    ListAccessKeysRequest, ListUsersRequest, metadata_service_client::MetadataServiceClient,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -396,12 +395,19 @@ async fn main() -> Result<()> {
                                 "{:<40} {:<30} {:<30}",
                                 user.user_id,
                                 user.display_name,
-                                if user.email.is_empty() { "-" } else { &user.email }
+                                if user.email.is_empty() {
+                                    "-"
+                                } else {
+                                    &user.email
+                                }
                             );
                         }
                     }
                 }
-                UserCommands::Create { display_name, email } => {
+                UserCommands::Create {
+                    display_name,
+                    email,
+                } => {
                     let response = client
                         .create_user(CreateUserRequest {
                             display_name: display_name.clone(),
@@ -420,7 +426,10 @@ async fn main() -> Result<()> {
                     }
                     println!();
                     println!("Next, create an access key:");
-                    println!("  objectio-cli -e {} key create {}", args.endpoint, user.user_id);
+                    println!(
+                        "  objectio-cli -e {} key create {}",
+                        args.endpoint, user.user_id
+                    );
                 }
                 UserCommands::Delete { user_id } => {
                     client
@@ -462,9 +471,7 @@ async fn main() -> Result<()> {
                             };
                             println!(
                                 "{:<25} {:<15} {:<20}",
-                                key.access_key_id,
-                                status,
-                                key.created_at
+                                key.access_key_id, status, key.created_at
                             );
                         }
                     }
@@ -557,7 +564,10 @@ async fn main() -> Result<()> {
                     println!("Volume ID: {}", vol.volume_id);
                     println!("Name:      {}", vol.name);
                     println!("Size:      {}", format_size(vol.size_bytes));
-                    println!("Pool:      {}", if vol.pool.is_empty() { "-" } else { &vol.pool });
+                    println!(
+                        "Pool:      {}",
+                        if vol.pool.is_empty() { "-" } else { &vol.pool }
+                    );
                     println!("State:     {}", format_volume_state(vol.state));
                 }
                 VolumeCommands::Show { volume_id } => {
@@ -573,9 +583,15 @@ async fn main() -> Result<()> {
                     println!("Name:              {}", vol.name);
                     println!("Size:              {}", format_size(vol.size_bytes));
                     println!("Used:              {}", format_size(vol.used_bytes));
-                    println!("Pool:              {}", if vol.pool.is_empty() { "-" } else { &vol.pool });
+                    println!(
+                        "Pool:              {}",
+                        if vol.pool.is_empty() { "-" } else { &vol.pool }
+                    );
                     println!("State:             {}", format_volume_state(vol.state));
-                    println!("Chunk Size:        {}", format_size(u64::from(vol.chunk_size_bytes)));
+                    println!(
+                        "Chunk Size:        {}",
+                        format_size(u64::from(vol.chunk_size_bytes))
+                    );
                     if !vol.parent_snapshot_id.is_empty() {
                         println!("Parent Snapshot:   {}", vol.parent_snapshot_id);
                     }
@@ -591,10 +607,16 @@ async fn main() -> Result<()> {
                             println!("  Min IOPS:        {}", qos.min_iops);
                         }
                         if qos.max_bandwidth_bps > 0 {
-                            println!("  Max Bandwidth:   {}/s", format_size(qos.max_bandwidth_bps));
+                            println!(
+                                "  Max Bandwidth:   {}/s",
+                                format_size(qos.max_bandwidth_bps)
+                            );
                         }
                         if qos.burst_iops > 0 {
-                            println!("  Burst IOPS:      {} ({}s)", qos.burst_iops, qos.burst_seconds);
+                            println!(
+                                "  Burst IOPS:      {} ({}s)",
+                                qos.burst_iops, qos.burst_seconds
+                            );
                         }
                     }
                 }

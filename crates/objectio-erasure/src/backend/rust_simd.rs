@@ -337,10 +337,7 @@ impl ErasureBackend for RustSimdLrcBackend {
         // Fall back to global RS recovery for remaining shards
         // Use all data + local parity as effective data for RS
         let effective_k = k + l;
-        let available = shards[..effective_k]
-            .iter()
-            .filter(|s| s.is_some())
-            .count();
+        let available = shards[..effective_k].iter().filter(|s| s.is_some()).count();
 
         if available < k {
             return Err(ErasureError::InsufficientShards {
@@ -497,7 +494,8 @@ impl LrcBackend for RustSimdLrcBackend {
             .encode()
             .map_err(|e| ErasureError::EncodingFailed(e.to_string()))?;
 
-        let global_parity_shards: Vec<Vec<u8>> = result.recovery_iter().map(|p| p.to_vec()).collect();
+        let global_parity_shards: Vec<Vec<u8>> =
+            result.recovery_iter().map(|p| p.to_vec()).collect();
 
         Ok(LrcEncodedData {
             data_shards: data_shards.iter().map(|s| s.to_vec()).collect(),
@@ -647,7 +645,8 @@ mod tests {
         let shards = backend.encode(&data_refs, 1024).unwrap();
 
         // Simulate missing shard 0
-        let mut shard_refs: Vec<Option<&[u8]>> = shards.iter().map(|s| Some(s.as_slice())).collect();
+        let mut shard_refs: Vec<Option<&[u8]>> =
+            shards.iter().map(|s| Some(s.as_slice())).collect();
         shard_refs[0] = None;
 
         let decoded = backend.decode(&shard_refs, 1024, &[0]).unwrap();

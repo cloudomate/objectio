@@ -277,10 +277,7 @@ impl Crush2 {
                 .unwrap_or_default();
 
             // Get nodes in this domain
-            let nodes = domain_nodes
-                .get(&domain_key)
-                .cloned()
-                .unwrap_or_default();
+            let nodes = domain_nodes.get(&domain_key).cloned().unwrap_or_default();
 
             // HRW selection: exclude already used nodes in this domain
             let used = used_nodes.entry(shard.domain_slot).or_default();
@@ -397,7 +394,9 @@ impl Crush2 {
             FailureDomain::Node => node.id.to_string(),
             FailureDomain::Rack => format!(
                 "{}:{}:{}",
-                node.failure_domain.region, node.failure_domain.datacenter, node.failure_domain.rack
+                node.failure_domain.region,
+                node.failure_domain.datacenter,
+                node.failure_domain.rack
             ),
             FailureDomain::Datacenter => {
                 format!(
@@ -468,7 +467,11 @@ mod tests {
                     id: NodeId::new(),
                     name: format!("node-r{}-n{}", rack, node),
                     address: format!("10.0.{}.{}:9002", rack, node).parse().unwrap(),
-                    failure_domain: FailureDomainInfo::new("us-east", "dc1", &format!("rack{}", rack)),
+                    failure_domain: FailureDomainInfo::new(
+                        "us-east",
+                        "dc1",
+                        &format!("rack{}", rack),
+                    ),
                     status: NodeStatus::Active,
                     disks: vec![],
                     weight: 1.0,

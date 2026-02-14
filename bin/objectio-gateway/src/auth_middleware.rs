@@ -10,12 +10,12 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hmac::{Hmac, Mac};
 use objectio_auth::AuthResult;
 use objectio_proto::metadata::{
-    metadata_service_client::MetadataServiceClient, GetAccessKeyForAuthRequest,
+    GetAccessKeyForAuthRequest, metadata_service_client::MetadataServiceClient,
 };
 use parking_lot::RwLock;
 use regex::Regex;
@@ -63,7 +63,10 @@ impl AuthState {
     }
 
     /// Look up credentials from cache or metadata service
-    pub async fn lookup_credential(&self, access_key_id: &str) -> Result<CachedCredential, AuthError> {
+    pub async fn lookup_credential(
+        &self,
+        access_key_id: &str,
+    ) -> Result<CachedCredential, AuthError> {
         // Check cache first
         {
             let cache = self.credential_cache.read();
@@ -87,12 +90,12 @@ impl AuthState {
             })?;
 
         let inner = response.into_inner();
-        let access_key = inner.access_key.ok_or_else(|| {
-            AuthError::AccessDenied("access key not found".to_string())
-        })?;
-        let user = inner.user.ok_or_else(|| {
-            AuthError::AccessDenied("user not found".to_string())
-        })?;
+        let access_key = inner
+            .access_key
+            .ok_or_else(|| AuthError::AccessDenied("access key not found".to_string()))?;
+        let user = inner
+            .user
+            .ok_or_else(|| AuthError::AccessDenied("user not found".to_string()))?;
 
         let cred = CachedCredential {
             access_key_id: access_key.access_key_id.clone(),
@@ -103,7 +106,9 @@ impl AuthState {
         };
 
         // Update cache
-        self.credential_cache.write().insert(access_key.access_key_id, cred.clone());
+        self.credential_cache
+            .write()
+            .insert(access_key.access_key_id, cred.clone());
 
         Ok(cred)
     }
@@ -126,7 +131,9 @@ pub async fn auth_layer(
     let auth_header = request
         .headers()
         .get("authorization")
-        .ok_or(AuthError::AccessDenied("missing authorization header".to_string()))?
+        .ok_or(AuthError::AccessDenied(
+            "missing authorization header".to_string(),
+        ))?
         .to_str()
         .map_err(|_| AuthError::AccessDenied("invalid authorization header".to_string()))?;
 
@@ -137,12 +144,18 @@ pub async fn auth_layer(
 
     // Verify the signature based on auth version
     let auth_result = match &parsed {
-        ParsedAuth::V4 { signed_headers, signature, .. } => {
-            verify_request_v4(&request, signed_headers, signature, &cred, &auth_state.region)?
-        }
-        ParsedAuth::V2 { signature, .. } => {
-            verify_request_v2(&request, signature, &cred)?
-        }
+        ParsedAuth::V4 {
+            signed_headers,
+            signature,
+            ..
+        } => verify_request_v4(
+            &request,
+            signed_headers,
+            signature,
+            &cred,
+            &auth_state.region,
+        )?,
+        ParsedAuth::V2 { signature, .. } => verify_request_v2(&request, signature, &cred)?,
     };
 
     debug!(
@@ -206,7 +219,9 @@ fn parse_authorization_header(header: &str) -> Result<ParsedAuth, AuthError> {
         let credentials = &header[4..]; // Skip "AWS "
         let parts: Vec<&str> = credentials.splitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(AuthError::AccessDenied("invalid SigV2 authorization header".to_string()));
+            return Err(AuthError::AccessDenied(
+                "invalid SigV2 authorization header".to_string(),
+            ));
         }
 
         debug!("Using SigV2 authentication (legacy)");
@@ -215,7 +230,9 @@ fn parse_authorization_header(header: &str) -> Result<ParsedAuth, AuthError> {
             signature: parts[1].to_string(),
         })
     } else {
-        Err(AuthError::AccessDenied("unsupported signature version".to_string()))
+        Err(AuthError::AccessDenied(
+            "unsupported signature version".to_string(),
+        ))
     }
 }
 
@@ -268,11 +285,31 @@ fn verify_request_v4<B>(
 
 /// Sub-resources that should be included in the canonical resource for SigV2
 const SIGV2_SUB_RESOURCES: &[&str] = &[
-    "acl", "cors", "delete", "lifecycle", "location", "logging", "notification",
-    "partNumber", "policy", "requestPayment", "response-cache-control",
-    "response-content-disposition", "response-content-encoding", "response-content-language",
-    "response-content-type", "response-expires", "restore", "tagging", "torrent",
-    "uploadId", "uploads", "versionId", "versioning", "versions", "website",
+    "acl",
+    "cors",
+    "delete",
+    "lifecycle",
+    "location",
+    "logging",
+    "notification",
+    "partNumber",
+    "policy",
+    "requestPayment",
+    "response-cache-control",
+    "response-content-disposition",
+    "response-content-encoding",
+    "response-content-language",
+    "response-content-type",
+    "response-expires",
+    "restore",
+    "tagging",
+    "torrent",
+    "uploadId",
+    "uploads",
+    "versionId",
+    "versioning",
+    "versions",
+    "website",
 ];
 
 /// Verify SigV2 request signature
@@ -427,8 +464,8 @@ fn build_canonicalized_resource_v2<B>(request: &Request<B>) -> String {
 
 /// Calculate SigV2 signature using HMAC-SHA1
 fn calculate_signature_v2(secret_key: &str, string_to_sign: &str) -> String {
-    let mut mac = HmacSha1::new_from_slice(secret_key.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha1::new_from_slice(secret_key.as_bytes()).expect("HMAC can take key of any size");
     mac.update(string_to_sign.as_bytes());
     let result = mac.finalize().into_bytes();
     BASE64.encode(result)
@@ -495,7 +532,9 @@ fn build_canonical_request<B>(
         let value = request
             .headers()
             .get(header_name.as_str())
-            .ok_or_else(|| AuthError::AccessDenied(format!("missing signed header: {}", header_name)))?
+            .ok_or_else(|| {
+                AuthError::AccessDenied(format!("missing signed header: {}", header_name))
+            })?
             .to_str()
             .map_err(|_| AuthError::AccessDenied("invalid header value".to_string()))?
             .trim()
@@ -660,12 +699,14 @@ impl IntoResponse for AuthError {
             AuthError::SignatureDoesNotMatch => (
                 StatusCode::FORBIDDEN,
                 "SignatureDoesNotMatch",
-                "The request signature we calculated does not match the signature you provided.".to_string(),
+                "The request signature we calculated does not match the signature you provided."
+                    .to_string(),
             ),
             AuthError::RequestTimeTooSkewed => (
                 StatusCode::FORBIDDEN,
                 "RequestTimeTooSkewed",
-                "The difference between the request time and the server's time is too large.".to_string(),
+                "The difference between the request time and the server's time is too large."
+                    .to_string(),
             ),
             AuthError::InternalError => (
                 StatusCode::INTERNAL_SERVER_ERROR,

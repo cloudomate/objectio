@@ -2,14 +2,8 @@
 //!
 //! Intercepts all requests and records metrics based on HTTP method and path patterns.
 
-use axum::{
-    body::Body,
-    extract::Request,
-    http::Method,
-    middleware::Next,
-    response::Response,
-};
-use objectio_s3::{s3_metrics, S3Operation};
+use axum::{body::Body, extract::Request, http::Method, middleware::Next, response::Response};
+use objectio_s3::{S3Operation, s3_metrics};
 use std::time::Instant;
 
 /// Extract S3 operation type from HTTP method and path
@@ -61,9 +55,7 @@ fn refine_operation(op: S3Operation, query: Option<&str>) -> S3Operation {
         S3Operation::PutObject if query.contains("uploadId") && query.contains("partNumber") => {
             S3Operation::UploadPart
         }
-        S3Operation::GetObject if query.contains("uploadId") => {
-            S3Operation::ListParts
-        }
+        S3Operation::GetObject if query.contains("uploadId") => S3Operation::ListParts,
         S3Operation::DeleteObject if query.contains("uploadId") => {
             S3Operation::AbortMultipartUpload
         }
@@ -93,8 +85,7 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     }
 
     // Determine S3 operation type
-    let operation = extract_operation(&method, path)
-        .map(|op| refine_operation(op, query));
+    let operation = extract_operation(&method, path).map(|op| refine_operation(op, query));
 
     // Get request body size from Content-Length header
     let request_bytes = request

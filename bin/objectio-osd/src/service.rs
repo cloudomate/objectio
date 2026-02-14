@@ -2,27 +2,44 @@
 
 use objectio_proto::metadata::ObjectMeta;
 use objectio_proto::storage::{
-    storage_service_server::StorageService,
-    BlockLocation, Checksum, DeleteShardRequest, DeleteShardResponse, DiskStatus,
-    GetShardMetaRequest, GetShardMetaResponse, GetStatusRequest, GetStatusResponse,
-    HealthCheckRequest, HealthCheckResponse, ListShardsRequest, ListShardsResponse,
-    ReadShardRequest, ReadShardResponse, WriteShardRequest, WriteShardResponse,
-    health_check_response::Status as HealthStatus,
+    BlockLocation,
+    Checksum,
+    DeleteObjectMetaRequest,
+    DeleteObjectMetaResponse,
+    DeleteShardRequest,
+    DeleteShardResponse,
+    DiskStatus,
+    GetObjectMetaRequest,
+    GetObjectMetaResponse,
+    GetShardMetaRequest,
+    GetShardMetaResponse,
+    GetStatusRequest,
+    GetStatusResponse,
+    HealthCheckRequest,
+    HealthCheckResponse,
+    ListObjectsMetaRequest,
+    ListObjectsMetaResponse,
+    ListShardsRequest,
+    ListShardsResponse,
     // Object metadata RPCs
-    PutObjectMetaRequest, PutObjectMetaResponse,
-    GetObjectMetaRequest, GetObjectMetaResponse,
-    DeleteObjectMetaRequest, DeleteObjectMetaResponse,
-    ListObjectsMetaRequest, ListObjectsMetaResponse,
+    PutObjectMetaRequest,
+    PutObjectMetaResponse,
+    ReadShardRequest,
+    ReadShardResponse,
+    WriteShardRequest,
+    WriteShardResponse,
+    health_check_response::Status as HealthStatus,
+    storage_service_server::StorageService,
 };
-use objectio_storage::metadata::{MetadataStore, MetadataStoreConfig, MetadataKey};
 use objectio_storage::DiskManager;
+use objectio_storage::metadata::{MetadataKey, MetadataStore, MetadataStoreConfig};
 use parking_lot::RwLock;
 use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info};
@@ -75,7 +92,11 @@ impl GrpcMetrics {
         let mut output = String::with_capacity(4 * 1024);
 
         // Requests total by method and status
-        writeln!(output, "# HELP objectio_osd_grpc_requests_total Total gRPC requests by method and status").unwrap();
+        writeln!(
+            output,
+            "# HELP objectio_osd_grpc_requests_total Total gRPC requests by method and status"
+        )
+        .unwrap();
         writeln!(output, "# TYPE objectio_osd_grpc_requests_total counter").unwrap();
 
         let methods = [
@@ -108,20 +129,39 @@ impl GrpcMetrics {
         }
 
         // Latency sum (for calculating average)
-        writeln!(output, "# HELP objectio_osd_grpc_latency_seconds_sum Sum of gRPC request latencies").unwrap();
-        writeln!(output, "# TYPE objectio_osd_grpc_latency_seconds_sum counter").unwrap();
+        writeln!(
+            output,
+            "# HELP objectio_osd_grpc_latency_seconds_sum Sum of gRPC request latencies"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "# TYPE objectio_osd_grpc_latency_seconds_sum counter"
+        )
+        .unwrap();
         for (method, metrics) in methods.iter() {
             let sum_us = metrics.latency_sum_us.load(Ordering::Relaxed);
             writeln!(
                 output,
                 "objectio_osd_grpc_latency_seconds_sum{{osd_id=\"{}\",method=\"{}\"}} {}",
-                osd_id, method, sum_us as f64 / 1_000_000.0
-            ).unwrap();
+                osd_id,
+                method,
+                sum_us as f64 / 1_000_000.0
+            )
+            .unwrap();
         }
 
         // Bytes sent/received
-        writeln!(output, "# HELP objectio_osd_grpc_bytes_received_total Total bytes received via gRPC").unwrap();
-        writeln!(output, "# TYPE objectio_osd_grpc_bytes_received_total counter").unwrap();
+        writeln!(
+            output,
+            "# HELP objectio_osd_grpc_bytes_received_total Total bytes received via gRPC"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "# TYPE objectio_osd_grpc_bytes_received_total counter"
+        )
+        .unwrap();
         for (method, metrics) in methods.iter() {
             let bytes = metrics.bytes_received.load(Ordering::Relaxed);
             if bytes > 0 {
@@ -129,11 +169,16 @@ impl GrpcMetrics {
                     output,
                     "objectio_osd_grpc_bytes_received_total{{osd_id=\"{}\",method=\"{}\"}} {}",
                     osd_id, method, bytes
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
 
-        writeln!(output, "# HELP objectio_osd_grpc_bytes_sent_total Total bytes sent via gRPC").unwrap();
+        writeln!(
+            output,
+            "# HELP objectio_osd_grpc_bytes_sent_total Total bytes sent via gRPC"
+        )
+        .unwrap();
         writeln!(output, "# TYPE objectio_osd_grpc_bytes_sent_total counter").unwrap();
         for (method, metrics) in methods.iter() {
             let bytes = metrics.bytes_sent.load(Ordering::Relaxed);
@@ -142,7 +187,8 @@ impl GrpcMetrics {
                     output,
                     "objectio_osd_grpc_bytes_sent_total{{osd_id=\"{}\",method=\"{}\"}} {}",
                     osd_id, method, bytes
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
 
@@ -204,7 +250,11 @@ impl OsdService {
     /// The block_size parameter configures the storage block size for new disks.
     /// Existing disks will use their existing block size from the superblock.
     /// A larger block size allows larger erasure-coded shards without chunking.
-    pub fn new(disk_paths: Vec<String>, block_size: u32, data_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(
+        disk_paths: Vec<String>,
+        block_size: u32,
+        data_dir: PathBuf,
+    ) -> Result<Self, String> {
         let node_id = *Uuid::new_v4().as_bytes();
         let mut disks = Vec::new();
         let mut disk_ids = Vec::new();
@@ -215,7 +265,11 @@ impl OsdService {
             // Try to open existing disk or initialize new one
             let disk = match DiskManager::open(path) {
                 Ok(d) => {
-                    info!("Opened existing disk: {} (block_size={})", path, d.block_size());
+                    info!(
+                        "Opened existing disk: {} (block_size={})",
+                        path,
+                        d.block_size()
+                    );
                     d
                 }
                 Err(_) => {
@@ -230,7 +284,10 @@ impl OsdService {
                         10 * 1024 * 1024 * 1024
                     };
 
-                    info!("Initializing new disk: {} with size {} bytes, block_size {} bytes", path, size, block_size);
+                    info!(
+                        "Initializing new disk: {} with size {} bytes, block_size {} bytes",
+                        path, size, block_size
+                    );
                     DiskManager::init(path, size, Some(block_size))
                         .map_err(|e| format!("Failed to init disk {}: {}", path, e))?
                 }
@@ -249,7 +306,11 @@ impl OsdService {
         let meta_store = MetadataStore::open_or_create(meta_config)
             .map_err(|e| format!("Failed to open metadata store: {}", e))?;
 
-        info!("OSD initialized with {} disks, metadata at {:?}", disks.len(), data_dir);
+        info!(
+            "OSD initialized with {} disks, metadata at {:?}",
+            disks.len(),
+            data_dir
+        );
 
         Ok(Self {
             node_id,
@@ -301,7 +362,9 @@ impl OsdService {
             let capacity = disk.capacity();
             let free = disk.free_space();
             let used = capacity.saturating_sub(free);
-            let shard_count = self.shard_index.read()
+            let shard_count = self
+                .shard_index
+                .read()
                 .values()
                 .filter(|loc| loc.disk_idx == i)
                 .count() as u64;
@@ -317,7 +380,9 @@ impl OsdService {
                 shard_count,
                 status: "healthy".to_string(), // TODO: Check actual health
                 read_errors: stats.read_errors.load(std::sync::atomic::Ordering::Relaxed),
-                write_errors: stats.write_errors.load(std::sync::atomic::Ordering::Relaxed),
+                write_errors: stats
+                    .write_errors
+                    .load(std::sync::atomic::Ordering::Relaxed),
             });
         }
 
@@ -340,12 +405,7 @@ impl OsdService {
 
     /// Generate shard key for index
     fn shard_key(object_id: &[u8], stripe_id: u64, position: u32) -> String {
-        format!(
-            "{}:{}:{}",
-            hex::encode(object_id),
-            stripe_id,
-            position
-        )
+        format!("{}:{}:{}", hex::encode(object_id), stripe_id, position)
     }
 
     /// Allocate a block for writing
@@ -353,7 +413,8 @@ impl OsdService {
         // Simple allocation: use shard count as next block
         // In production, this would use the BlockAllocator
         let index = self.shard_index.read();
-        let count = index.values()
+        let count = index
+            .values()
             .filter(|loc| loc.disk_idx == disk_idx)
             .count();
         Ok(count as u64)
@@ -378,7 +439,9 @@ impl StorageService for OsdService {
         let req = request.into_inner();
         let bytes_in = req.data.len() as u64;
         let shard_id = req.shard_id.ok_or_else(|| {
-            self.grpc_metrics.write_shard.record(false, start.elapsed().as_micros() as u64, 0, 0);
+            self.grpc_metrics
+                .write_shard
+                .record(false, start.elapsed().as_micros() as u64, 0, 0);
             Status::invalid_argument("missing shard_id")
         })?;
 
@@ -405,7 +468,8 @@ impl StorageService for OsdService {
         disk.write_block(block_num, object_id, shard_id.stripe_id, &req.data)
             .map_err(|e| Status::internal(format!("write failed: {}", e)))?;
 
-        disk.sync().map_err(|e| Status::internal(format!("sync failed: {}", e)))?;
+        disk.sync()
+            .map_err(|e| Status::internal(format!("sync failed: {}", e)))?;
 
         // Calculate checksum
         let crc32c = crc32c::crc32c(&req.data);
@@ -427,7 +491,10 @@ impl StorageService for OsdService {
 
         info!(
             "Wrote shard: disk={}, block={}, size={}, crc32c={:08x}",
-            disk_idx, block_num, req.data.len(), crc32c
+            disk_idx,
+            block_num,
+            req.data.len(),
+            crc32c
         );
 
         let resp = WriteShardResponse {
@@ -440,7 +507,12 @@ impl StorageService for OsdService {
             timestamp,
         };
         let bytes_out = resp.encoded_len() as u64;
-        self.grpc_metrics.write_shard.record(true, start.elapsed().as_micros() as u64, bytes_in, bytes_out);
+        self.grpc_metrics.write_shard.record(
+            true,
+            start.elapsed().as_micros() as u64,
+            bytes_in,
+            bytes_out,
+        );
 
         Ok(Response::new(resp))
     }
@@ -453,25 +525,38 @@ impl StorageService for OsdService {
         let req = request.into_inner();
         let bytes_in = req.encoded_len() as u64;
         let shard_id = req.shard_id.ok_or_else(|| {
-            self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
+            self.grpc_metrics.read_shard.record(
+                false,
+                start.elapsed().as_micros() as u64,
+                bytes_in,
+                0,
+            );
             Status::invalid_argument("missing shard_id")
         })?;
 
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
 
-        let location = self.shard_index.read().get(&key).cloned()
-            .ok_or_else(|| {
-                self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
-                Status::not_found("shard not found")
-            })?;
+        let location = self.shard_index.read().get(&key).cloned().ok_or_else(|| {
+            self.grpc_metrics.read_shard.record(
+                false,
+                start.elapsed().as_micros() as u64,
+                bytes_in,
+                0,
+            );
+            Status::not_found("shard not found")
+        })?;
 
         let disk = &self.disks[location.disk_idx];
 
-        let (_header, data) = disk.read_block(location.block_num)
-            .map_err(|e| {
-                self.grpc_metrics.read_shard.record(false, start.elapsed().as_micros() as u64, bytes_in, 0);
-                Status::internal(format!("read failed: {}", e))
-            })?;
+        let (_header, data) = disk.read_block(location.block_num).map_err(|e| {
+            self.grpc_metrics.read_shard.record(
+                false,
+                start.elapsed().as_micros() as u64,
+                bytes_in,
+                0,
+            );
+            Status::internal(format!("read failed: {}", e))
+        })?;
 
         debug!(
             "ReadShard: object={}, stripe={}, pos={}, size={}",
@@ -493,7 +578,12 @@ impl StorageService for OsdService {
             timestamp,
         };
         let bytes_out = resp.data.len() as u64;
-        self.grpc_metrics.read_shard.record(true, start.elapsed().as_micros() as u64, bytes_in, bytes_out);
+        self.grpc_metrics.read_shard.record(
+            true,
+            start.elapsed().as_micros() as u64,
+            bytes_in,
+            bytes_out,
+        );
 
         Ok(Response::new(resp))
     }
@@ -503,7 +593,9 @@ impl StorageService for OsdService {
         request: Request<DeleteShardRequest>,
     ) -> Result<Response<DeleteShardResponse>, Status> {
         let req = request.into_inner();
-        let shard_id = req.shard_id.ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
+        let shard_id = req
+            .shard_id
+            .ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
 
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
 
@@ -520,11 +612,17 @@ impl StorageService for OsdService {
         request: Request<GetShardMetaRequest>,
     ) -> Result<Response<GetShardMetaResponse>, Status> {
         let req = request.into_inner();
-        let shard_id = req.shard_id.ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
+        let shard_id = req
+            .shard_id
+            .ok_or_else(|| Status::invalid_argument("missing shard_id"))?;
 
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
 
-        let location = self.shard_index.read().get(&key).cloned()
+        let location = self
+            .shard_index
+            .read()
+            .get(&key)
+            .cloned()
             .ok_or_else(|| Status::not_found("shard not found"))?;
 
         let disk = &self.disks[location.disk_idx];
@@ -552,7 +650,11 @@ impl StorageService for OsdService {
         request: Request<ListShardsRequest>,
     ) -> Result<Response<ListShardsResponse>, Status> {
         let req = request.into_inner();
-        let limit = if req.limit == 0 { 100 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit as usize
+        };
 
         let index = self.shard_index.read();
         let mut shards: Vec<GetShardMetaResponse> = Vec::new();
@@ -638,7 +740,9 @@ impl StorageService for OsdService {
             total_capacity += cap;
             used_capacity += used;
 
-            let shard_count = self.shard_index.read()
+            let shard_count = self
+                .shard_index
+                .read()
                 .values()
                 .filter(|loc| loc.disk_idx == idx)
                 .count() as u64;
@@ -677,7 +781,9 @@ impl StorageService for OsdService {
     ) -> Result<Response<PutObjectMetaResponse>, Status> {
         let req = request.into_inner();
 
-        let object = req.object.ok_or_else(|| Status::invalid_argument("missing object"))?;
+        let object = req
+            .object
+            .ok_or_else(|| Status::invalid_argument("missing object"))?;
 
         // Serialize ObjectMeta to bytes using protobuf
         let value = object.encode_to_vec();
@@ -686,12 +792,16 @@ impl StorageService for OsdService {
         let key = MetadataKey::object_meta(&req.bucket, &req.key);
 
         // Store in persistent metadata store
-        self.meta_store.put(key, value)
+        self.meta_store
+            .put(key, value)
             .map_err(|e| Status::internal(format!("failed to store object metadata: {}", e)))?;
 
         let timestamp = Self::current_timestamp();
 
-        info!("Stored object metadata: {}/{} ({} bytes)", req.bucket, req.key, object.size);
+        info!(
+            "Stored object metadata: {}/{} ({} bytes)",
+            req.bucket, req.key, object.size
+        );
 
         Ok(Response::new(PutObjectMetaResponse {
             success: true,
@@ -712,8 +822,9 @@ impl StorageService for OsdService {
         match self.meta_store.get(&key) {
             Some(value) => {
                 // Deserialize ObjectMeta from protobuf
-                let object = ObjectMeta::decode(&value[..])
-                    .map_err(|e| Status::internal(format!("failed to decode object metadata: {}", e)))?;
+                let object = ObjectMeta::decode(&value[..]).map_err(|e| {
+                    Status::internal(format!("failed to decode object metadata: {}", e))
+                })?;
 
                 debug!("Found object metadata: {}/{}", req.bucket, req.key);
 
@@ -743,14 +854,13 @@ impl StorageService for OsdService {
         let key = MetadataKey::object_meta(&req.bucket, &req.key);
 
         // Delete from metadata store
-        self.meta_store.delete(&key)
+        self.meta_store
+            .delete(&key)
             .map_err(|e| Status::internal(format!("failed to delete object metadata: {}", e)))?;
 
         info!("Deleted object metadata: {}/{}", req.bucket, req.key);
 
-        Ok(Response::new(DeleteObjectMetaResponse {
-            success: true,
-        }))
+        Ok(Response::new(DeleteObjectMetaResponse { success: true }))
     }
 
     async fn list_objects_meta(
@@ -758,7 +868,11 @@ impl StorageService for OsdService {
         request: Request<ListObjectsMetaRequest>,
     ) -> Result<Response<ListObjectsMetaResponse>, Status> {
         let req = request.into_inner();
-        let max_keys = if req.max_keys == 0 { 1000 } else { req.max_keys as usize };
+        let max_keys = if req.max_keys == 0 {
+            1000
+        } else {
+            req.max_keys as usize
+        };
 
         // Create prefix for scanning
         let prefix = MetadataKey::object_meta_prefix(&req.bucket);
@@ -803,7 +917,11 @@ impl StorageService for OsdService {
         }
 
         let is_truncated = count >= max_keys;
-        let next_token = if is_truncated { last_key } else { String::new() };
+        let next_token = if is_truncated {
+            last_key
+        } else {
+            String::new()
+        };
 
         Ok(Response::new(ListObjectsMetaResponse {
             objects,

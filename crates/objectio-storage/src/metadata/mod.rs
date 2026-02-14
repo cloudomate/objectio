@@ -45,11 +45,11 @@
 //! 2. Replay WAL entries after snapshot LSN
 //! 3. Ready to serve
 
-mod wal;
 mod btree;
 mod cache;
 mod store;
 mod types;
+mod wal;
 
 pub use cache::{ArcCache, CacheStats as MetaCacheStats};
 pub use store::{MetadataStore, MetadataStoreConfig};

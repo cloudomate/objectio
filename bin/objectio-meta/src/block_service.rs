@@ -3,28 +3,65 @@
 //! Provides volume and snapshot management for block storage.
 
 use objectio_proto::block::{
-    block_service_server::BlockService,
-    // Volume operations
-    CreateVolumeRequest, CreateVolumeResponse, DeleteVolumeRequest, DeleteVolumeResponse,
-    GetVolumeRequest, GetVolumeResponse, ListVolumesRequest, ListVolumesResponse,
-    ResizeVolumeRequest, ResizeVolumeResponse, Volume, VolumeState, VolumeQos,
-    UpdateVolumeQosRequest, UpdateVolumeQosResponse,
-    GetVolumeStatsRequest, GetVolumeStatsResponse,
-    // Snapshot operations
-    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotRequest, DeleteSnapshotResponse,
-    GetSnapshotRequest, GetSnapshotResponse, ListSnapshotsRequest, ListSnapshotsResponse,
-    CloneVolumeRequest, CloneVolumeResponse, Snapshot, SnapshotState,
     // Attachment operations
-    AttachVolumeRequest, AttachVolumeResponse, DetachVolumeRequest, DetachVolumeResponse,
-    ListAttachmentsRequest, ListAttachmentsResponse, Attachment, TargetType,
-    // I/O operations
-    ReadRequest, ReadResponse, WriteRequest, WriteResponse,
-    FlushRequest, FlushResponse, TrimRequest, TrimResponse,
+    AttachVolumeRequest,
+    AttachVolumeResponse,
+    Attachment,
+    CloneVolumeRequest,
+    CloneVolumeResponse,
+    // Snapshot operations
+    CreateSnapshotRequest,
+    CreateSnapshotResponse,
+    // Volume operations
+    CreateVolumeRequest,
+    CreateVolumeResponse,
+    DeleteSnapshotRequest,
+    DeleteSnapshotResponse,
+    DeleteVolumeRequest,
+    DeleteVolumeResponse,
+    DetachVolumeRequest,
+    DetachVolumeResponse,
+    FlushRequest,
+    FlushResponse,
+    GetClusterMetricsRequest,
+    GetClusterMetricsResponse,
+    GetIoTraceRequest,
+    GetIoTraceResponse,
     // Metrics operations
-    GetOsdMetricsRequest, GetOsdMetricsResponse,
-    ListOsdMetricsRequest, ListOsdMetricsResponse,
-    GetClusterMetricsRequest, GetClusterMetricsResponse,
-    GetIoTraceRequest, GetIoTraceResponse,
+    GetOsdMetricsRequest,
+    GetOsdMetricsResponse,
+    GetSnapshotRequest,
+    GetSnapshotResponse,
+    GetVolumeRequest,
+    GetVolumeResponse,
+    GetVolumeStatsRequest,
+    GetVolumeStatsResponse,
+    ListAttachmentsRequest,
+    ListAttachmentsResponse,
+    ListOsdMetricsRequest,
+    ListOsdMetricsResponse,
+    ListSnapshotsRequest,
+    ListSnapshotsResponse,
+    ListVolumesRequest,
+    ListVolumesResponse,
+    // I/O operations
+    ReadRequest,
+    ReadResponse,
+    ResizeVolumeRequest,
+    ResizeVolumeResponse,
+    Snapshot,
+    SnapshotState,
+    TargetType,
+    TrimRequest,
+    TrimResponse,
+    UpdateVolumeQosRequest,
+    UpdateVolumeQosResponse,
+    Volume,
+    VolumeQos,
+    VolumeState,
+    WriteRequest,
+    WriteResponse,
+    block_service_server::BlockService,
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -207,7 +244,9 @@ impl BlockMetaService {
                 t if t == TargetType::Nbd as i32 => "nbd",
                 _ => "unknown",
             };
-            *attachments_by_type.entry(type_name.to_string()).or_default() += 1;
+            *attachments_by_type
+                .entry(type_name.to_string())
+                .or_default() += 1;
         }
 
         BlockMetaStats {
@@ -321,7 +360,9 @@ impl BlockService for BlockMetaService {
 
         // Check for duplicate name
         if self.volume_names.read().contains_key(&req.name) {
-            return Err(Status::already_exists("volume with this name already exists"));
+            return Err(Status::already_exists(
+                "volume with this name already exists",
+            ));
         }
 
         let volume_id = Uuid::new_v4().to_string();
@@ -337,7 +378,11 @@ impl BlockService for BlockMetaService {
             name: req.name.clone(),
             size_bytes: req.size_bytes,
             used_bytes: 0,
-            pool: if req.pool.is_empty() { "default".to_string() } else { req.pool },
+            pool: if req.pool.is_empty() {
+                "default".to_string()
+            } else {
+                req.pool
+            },
             state: VolumeState::Available as i32,
             created_at: now,
             updated_at: now,
@@ -347,10 +392,18 @@ impl BlockService for BlockMetaService {
             qos: req.qos,
         };
 
-        self.volumes.write().insert(volume_id.clone(), volume.clone());
-        self.volume_names.write().insert(req.name.clone(), volume_id.clone());
-        self.volume_chunks.write().insert(volume_id.clone(), HashMap::new());
-        self.volume_snapshots.write().insert(volume_id.clone(), HashSet::new());
+        self.volumes
+            .write()
+            .insert(volume_id.clone(), volume.clone());
+        self.volume_names
+            .write()
+            .insert(req.name.clone(), volume_id.clone());
+        self.volume_chunks
+            .write()
+            .insert(volume_id.clone(), HashMap::new());
+        self.volume_snapshots
+            .write()
+            .insert(volume_id.clone(), HashSet::new());
 
         info!("Created volume: {} ({})", req.name, volume_id);
 
@@ -365,7 +418,9 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<DeleteVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        let volume = self.volumes.read()
+        let volume = self
+            .volumes
+            .read()
             .get(&req.volume_id)
             .cloned()
             .ok_or_else(|| Status::not_found("volume not found"))?;
@@ -376,7 +431,9 @@ impl BlockService for BlockMetaService {
         }
 
         // Check for snapshots
-        let has_snapshots = self.volume_snapshots.read()
+        let has_snapshots = self
+            .volume_snapshots
+            .read()
             .get(&req.volume_id)
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -403,7 +460,9 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<GetVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        let volume = self.volumes.read()
+        let volume = self
+            .volumes
+            .read()
             .get(&req.volume_id)
             .cloned()
             .ok_or_else(|| Status::not_found("volume not found"))?;
@@ -418,9 +477,15 @@ impl BlockService for BlockMetaService {
         request: Request<ListVolumesRequest>,
     ) -> Result<Response<ListVolumesResponse>, Status> {
         let req = request.into_inner();
-        let max_results = if req.max_results == 0 { 100 } else { req.max_results.min(1000) };
+        let max_results = if req.max_results == 0 {
+            100
+        } else {
+            req.max_results.min(1000)
+        };
 
-        let volumes: Vec<Volume> = self.volumes.read()
+        let volumes: Vec<Volume> = self
+            .volumes
+            .read()
             .values()
             .filter(|v| req.pool.is_empty() || v.pool == req.pool)
             .filter(|v| req.marker.is_empty() || v.volume_id > req.marker)
@@ -430,11 +495,18 @@ impl BlockService for BlockMetaService {
 
         let is_truncated = volumes.len() > max_results as usize;
         let volumes: Vec<Volume> = volumes.into_iter().take(max_results as usize).collect();
-        let next_marker = volumes.last().map(|v| v.volume_id.clone()).unwrap_or_default();
+        let next_marker = volumes
+            .last()
+            .map(|v| v.volume_id.clone())
+            .unwrap_or_default();
 
         Ok(Response::new(ListVolumesResponse {
             volumes,
-            next_marker: if is_truncated { next_marker } else { String::new() },
+            next_marker: if is_truncated {
+                next_marker
+            } else {
+                String::new()
+            },
             is_truncated,
         }))
     }
@@ -446,7 +518,8 @@ impl BlockService for BlockMetaService {
         let req = request.into_inner();
 
         let mut volumes = self.volumes.write();
-        let volume = volumes.get_mut(&req.volume_id)
+        let volume = volumes
+            .get_mut(&req.volume_id)
             .ok_or_else(|| Status::not_found("volume not found"))?;
 
         if volume.state == VolumeState::Attached as i32 {
@@ -460,7 +533,10 @@ impl BlockService for BlockMetaService {
         volume.size_bytes = req.new_size_bytes;
         volume.updated_at = Self::current_timestamp();
 
-        info!("Resized volume {} to {} bytes", req.volume_id, req.new_size_bytes);
+        info!(
+            "Resized volume {} to {} bytes",
+            req.volume_id, req.new_size_bytes
+        );
 
         Ok(Response::new(ResizeVolumeResponse {
             volume: Some(Self::volume_to_proto(volume)),
@@ -473,13 +549,17 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let volume = self.volumes.read()
+        let volume = self
+            .volumes
+            .read()
             .get(&req.volume_id)
             .cloned()
             .ok_or_else(|| Status::not_found("volume not found"))?;
 
         // Copy current chunk refs
-        let chunk_refs = self.volume_chunks.read()
+        let chunk_refs = self
+            .volume_chunks
+            .read()
             .get(&req.volume_id)
             .cloned()
             .unwrap_or_default();
@@ -499,7 +579,9 @@ impl BlockService for BlockMetaService {
             chunk_refs,
         };
 
-        self.snapshots.write().insert(snapshot_id.clone(), snapshot.clone());
+        self.snapshots
+            .write()
+            .insert(snapshot_id.clone(), snapshot.clone());
         if let Some(snaps) = self.volume_snapshots.write().get_mut(&req.volume_id) {
             snaps.insert(snapshot_id.clone());
         }
@@ -517,7 +599,10 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<DeleteSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let snapshot = self.snapshots.write().remove(&req.snapshot_id)
+        let snapshot = self
+            .snapshots
+            .write()
+            .remove(&req.snapshot_id)
             .ok_or_else(|| Status::not_found("snapshot not found"))?;
 
         // Remove from volume's snapshot list
@@ -536,7 +621,9 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<GetSnapshotResponse>, Status> {
         let req = request.into_inner();
 
-        let snapshot = self.snapshots.read()
+        let snapshot = self
+            .snapshots
+            .read()
             .get(&req.snapshot_id)
             .cloned()
             .ok_or_else(|| Status::not_found("snapshot not found"))?;
@@ -551,9 +638,15 @@ impl BlockService for BlockMetaService {
         request: Request<ListSnapshotsRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
         let req = request.into_inner();
-        let max_results = if req.max_results == 0 { 100 } else { req.max_results.min(1000) };
+        let max_results = if req.max_results == 0 {
+            100
+        } else {
+            req.max_results.min(1000)
+        };
 
-        let snapshots: Vec<Snapshot> = self.snapshots.read()
+        let snapshots: Vec<Snapshot> = self
+            .snapshots
+            .read()
             .values()
             .filter(|s| req.volume_id.is_empty() || s.volume_id == req.volume_id)
             .filter(|s| req.marker.is_empty() || s.snapshot_id > req.marker)
@@ -563,11 +656,18 @@ impl BlockService for BlockMetaService {
 
         let is_truncated = snapshots.len() > max_results as usize;
         let snapshots: Vec<Snapshot> = snapshots.into_iter().take(max_results as usize).collect();
-        let next_marker = snapshots.last().map(|s| s.snapshot_id.clone()).unwrap_or_default();
+        let next_marker = snapshots
+            .last()
+            .map(|s| s.snapshot_id.clone())
+            .unwrap_or_default();
 
         Ok(Response::new(ListSnapshotsResponse {
             snapshots,
-            next_marker: if is_truncated { next_marker } else { String::new() },
+            next_marker: if is_truncated {
+                next_marker
+            } else {
+                String::new()
+            },
             is_truncated,
         }))
     }
@@ -578,27 +678,35 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<CloneVolumeResponse>, Status> {
         let req = request.into_inner();
 
-        let snapshot = self.snapshots.read()
+        let snapshot = self
+            .snapshots
+            .read()
             .get(&req.snapshot_id)
             .cloned()
             .ok_or_else(|| Status::not_found("snapshot not found"))?;
 
         // Check for duplicate name
         if self.volume_names.read().contains_key(&req.name) {
-            return Err(Status::already_exists("volume with this name already exists"));
+            return Err(Status::already_exists(
+                "volume with this name already exists",
+            ));
         }
 
         let volume_id = Uuid::new_v4().to_string();
         let now = Self::current_timestamp();
 
         // Get parent volume's chunk size
-        let chunk_size = self.volumes.read()
+        let chunk_size = self
+            .volumes
+            .read()
             .get(&snapshot.volume_id)
             .map(|v| v.chunk_size_bytes)
             .unwrap_or(DEFAULT_CHUNK_SIZE);
 
         // Get parent volume's QoS settings
-        let parent_qos = self.volumes.read()
+        let parent_qos = self
+            .volumes
+            .read()
             .get(&snapshot.volume_id)
             .and_then(|v| v.qos.clone());
 
@@ -618,12 +726,23 @@ impl BlockService for BlockMetaService {
         };
 
         // Copy snapshot's chunk refs to new volume
-        self.volumes.write().insert(volume_id.clone(), volume.clone());
-        self.volume_names.write().insert(req.name.clone(), volume_id.clone());
-        self.volume_chunks.write().insert(volume_id.clone(), snapshot.chunk_refs);
-        self.volume_snapshots.write().insert(volume_id.clone(), HashSet::new());
+        self.volumes
+            .write()
+            .insert(volume_id.clone(), volume.clone());
+        self.volume_names
+            .write()
+            .insert(req.name.clone(), volume_id.clone());
+        self.volume_chunks
+            .write()
+            .insert(volume_id.clone(), snapshot.chunk_refs);
+        self.volume_snapshots
+            .write()
+            .insert(volume_id.clone(), HashSet::new());
 
-        info!("Cloned volume {} from snapshot {}", req.name, req.snapshot_id);
+        info!(
+            "Cloned volume {} from snapshot {}",
+            req.name, req.snapshot_id
+        );
 
         Ok(Response::new(CloneVolumeResponse {
             volume: Some(Self::volume_to_proto(&volume)),
@@ -639,7 +758,8 @@ impl BlockService for BlockMetaService {
         // Update volume state
         {
             let mut volumes = self.volumes.write();
-            let volume = volumes.get_mut(&req.volume_id)
+            let volume = volumes
+                .get_mut(&req.volume_id)
                 .ok_or_else(|| Status::not_found("volume not found"))?;
 
             if volume.state == VolumeState::Attached as i32 {
@@ -656,7 +776,11 @@ impl BlockService for BlockMetaService {
                 format!("iqn.2024-01.io.objectio:{}", req.volume_id)
             }
             t if t == TargetType::Nvmeof as i32 => {
-                format!("nqn.2024-01.io.objectio:{}:uuid:{}", req.volume_id, Uuid::new_v4())
+                format!(
+                    "nqn.2024-01.io.objectio:{}:uuid:{}",
+                    req.volume_id,
+                    Uuid::new_v4()
+                )
             }
             t if t == TargetType::Nbd as i32 => {
                 format!("/dev/nbd/{}", req.volume_id)
@@ -675,7 +799,9 @@ impl BlockService for BlockMetaService {
             read_only: req.read_only,
         };
 
-        self.attachments.write().insert(req.volume_id.clone(), attachment.clone());
+        self.attachments
+            .write()
+            .insert(req.volume_id.clone(), attachment.clone());
 
         info!("Attached volume {} as {}", req.volume_id, target_address);
 
@@ -693,7 +819,8 @@ impl BlockService for BlockMetaService {
         // Update volume state
         {
             let mut volumes = self.volumes.write();
-            let volume = volumes.get_mut(&req.volume_id)
+            let volume = volumes
+                .get_mut(&req.volume_id)
                 .ok_or_else(|| Status::not_found("volume not found"))?;
 
             if volume.state != VolumeState::Attached as i32 && !req.force {
@@ -717,7 +844,9 @@ impl BlockService for BlockMetaService {
     ) -> Result<Response<ListAttachmentsResponse>, Status> {
         let req = request.into_inner();
 
-        let attachments: Vec<Attachment> = self.attachments.read()
+        let attachments: Vec<Attachment> = self
+            .attachments
+            .read()
             .values()
             .filter(|a| req.volume_id.is_empty() || a.volume_id == req.volume_id)
             .map(Self::attachment_to_proto)
@@ -729,16 +858,16 @@ impl BlockService for BlockMetaService {
     // I/O operations - these would typically be handled by a block gateway, not metadata service
     // But we provide stubs for completeness
 
-    async fn read(
-        &self,
-        request: Request<ReadRequest>,
-    ) -> Result<Response<ReadResponse>, Status> {
+    async fn read(&self, request: Request<ReadRequest>) -> Result<Response<ReadResponse>, Status> {
         let req = request.into_inner();
-        warn!("Read called on metadata service - should use block gateway: volume={}", req.volume_id);
+        warn!(
+            "Read called on metadata service - should use block gateway: volume={}",
+            req.volume_id
+        );
 
         // This should be handled by block gateway, not metadata service
         Err(Status::unimplemented(
-            "I/O operations should be performed via block gateway, not metadata service"
+            "I/O operations should be performed via block gateway, not metadata service",
         ))
     }
 
@@ -747,10 +876,13 @@ impl BlockService for BlockMetaService {
         request: Request<WriteRequest>,
     ) -> Result<Response<WriteResponse>, Status> {
         let req = request.into_inner();
-        warn!("Write called on metadata service - should use block gateway: volume={}", req.volume_id);
+        warn!(
+            "Write called on metadata service - should use block gateway: volume={}",
+            req.volume_id
+        );
 
         Err(Status::unimplemented(
-            "I/O operations should be performed via block gateway, not metadata service"
+            "I/O operations should be performed via block gateway, not metadata service",
         ))
     }
 
@@ -765,14 +897,13 @@ impl BlockService for BlockMetaService {
         Ok(Response::new(FlushResponse { success: true }))
     }
 
-    async fn trim(
-        &self,
-        request: Request<TrimRequest>,
-    ) -> Result<Response<TrimResponse>, Status> {
+    async fn trim(&self, request: Request<TrimRequest>) -> Result<Response<TrimResponse>, Status> {
         let req = request.into_inner();
 
         // Remove chunk refs in the trimmed range
-        let chunk_size = self.volumes.read()
+        let chunk_size = self
+            .volumes
+            .read()
             .get(&req.volume_id)
             .map(|v| v.chunk_size_bytes as u64)
             .unwrap_or(DEFAULT_CHUNK_SIZE as u64);
@@ -786,7 +917,10 @@ impl BlockService for BlockMetaService {
             }
         }
 
-        debug!("Trimmed volume {} range {}+{}", req.volume_id, req.offset_bytes, req.length_bytes);
+        debug!(
+            "Trimmed volume {} range {}+{}",
+            req.volume_id, req.offset_bytes, req.length_bytes
+        );
 
         Ok(Response::new(TrimResponse { success: true }))
     }
@@ -800,7 +934,8 @@ impl BlockService for BlockMetaService {
         let req = request.into_inner();
 
         let mut volumes = self.volumes.write();
-        let volume = volumes.get_mut(&req.volume_id)
+        let volume = volumes
+            .get_mut(&req.volume_id)
             .ok_or_else(|| Status::not_found("volume not found"))?;
 
         volume.qos = req.qos;
@@ -828,9 +963,7 @@ impl BlockService for BlockMetaService {
         // Return empty stats - the block gateway should aggregate from OSDs
         warn!("GetVolumeStats called on metadata service - stats should be aggregated from OSDs");
 
-        Ok(Response::new(GetVolumeStatsResponse {
-            stats: None,
-        }))
+        Ok(Response::new(GetVolumeStatsResponse { stats: None }))
     }
 
     // ============ Metrics Operations ============
@@ -842,11 +975,14 @@ impl BlockService for BlockMetaService {
         request: Request<GetOsdMetricsRequest>,
     ) -> Result<Response<GetOsdMetricsResponse>, Status> {
         let req = request.into_inner();
-        warn!("GetOsdMetrics called on metadata service - should query OSD {} directly", req.osd_id);
+        warn!(
+            "GetOsdMetrics called on metadata service - should query OSD {} directly",
+            req.osd_id
+        );
 
         // Metadata service doesn't track OSD metrics
         Err(Status::unimplemented(
-            "OSD metrics should be queried from the OSD directly, not the metadata service"
+            "OSD metrics should be queried from the OSD directly, not the metadata service",
         ))
     }
 
@@ -858,7 +994,7 @@ impl BlockService for BlockMetaService {
 
         // Metadata service doesn't track OSD metrics
         Err(Status::unimplemented(
-            "OSD metrics should be queried from OSDs directly, not the metadata service"
+            "OSD metrics should be queried from OSDs directly, not the metadata service",
         ))
     }
 
@@ -918,14 +1054,23 @@ impl BlockService for BlockMetaService {
         request: Request<GetIoTraceRequest>,
     ) -> Result<Response<GetIoTraceResponse>, Status> {
         let req = request.into_inner();
-        warn!("GetIoTrace called on metadata service - trace_id={:?} volume_id={:?}",
-            if req.trace_id.is_empty() { None } else { Some(&req.trace_id) },
-            if req.volume_id.is_empty() { None } else { Some(&req.volume_id) }
+        warn!(
+            "GetIoTrace called on metadata service - trace_id={:?} volume_id={:?}",
+            if req.trace_id.is_empty() {
+                None
+            } else {
+                Some(&req.trace_id)
+            },
+            if req.volume_id.is_empty() {
+                None
+            } else {
+                Some(&req.volume_id)
+            }
         );
 
         // I/O traces are tracked by the block gateway/OSDs, not metadata service
         Err(Status::unimplemented(
-            "I/O traces should be queried from the block gateway or OSDs"
+            "I/O traces should be queried from the block gateway or OSDs",
         ))
     }
 }

@@ -164,7 +164,6 @@ pub fn compute_crc32c(data: &[u8]) -> u32 {
 /// Compute MD5 hash (for S3 ETag compatibility)
 #[must_use]
 pub fn compute_md5(data: &[u8]) -> [u8; 16] {
-    
     // Note: MD5 is deprecated for security, but required for S3 ETag
     // We use a simple implementation via sha2's digest trait pattern
     // In production, consider using the `md-5` crate

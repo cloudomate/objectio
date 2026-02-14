@@ -39,11 +39,7 @@ pub enum BlockError {
 
     /// Offset out of bounds
     #[error("Offset {offset} + length {length} exceeds volume size {size}")]
-    OutOfBounds {
-        offset: u64,
-        length: u64,
-        size: u64,
-    },
+    OutOfBounds { offset: u64, length: u64, size: u64 },
 
     /// Cache error
     #[error("Cache error: {0}")]

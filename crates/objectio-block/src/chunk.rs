@@ -214,14 +214,8 @@ mod tests {
     #[test]
     fn test_chunk_key() {
         let mapper = ChunkMapper::default();
-        assert_eq!(
-            mapper.chunk_key("abc123", 0),
-            "vol_abc123/chunk_00000000"
-        );
-        assert_eq!(
-            mapper.chunk_key("abc123", 255),
-            "vol_abc123/chunk_000000ff"
-        );
+        assert_eq!(mapper.chunk_key("abc123", 0), "vol_abc123/chunk_00000000");
+        assert_eq!(mapper.chunk_key("abc123", 255), "vol_abc123/chunk_000000ff");
     }
 
     #[test]

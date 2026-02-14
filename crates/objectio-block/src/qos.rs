@@ -31,9 +31,9 @@
 //! }
 //! ```
 
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 
 /// I/O priority level for scheduling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -67,10 +67,10 @@ pub struct VolumeQosConfig {
 impl Default for VolumeQosConfig {
     fn default() -> Self {
         Self {
-            max_iops: 0,            // Unlimited
-            min_iops: 0,            // No guarantee
-            max_bandwidth_bps: 0,   // Unlimited
-            burst_iops: 0,          // No burst
+            max_iops: 0,          // Unlimited
+            min_iops: 0,          // No guarantee
+            max_bandwidth_bps: 0, // Unlimited
+            burst_iops: 0,        // No burst
             burst_seconds: 0,
             priority: Priority::Normal,
             target_latency_us: 1000, // 1ms default target
@@ -220,7 +220,10 @@ impl VolumeRateLimiter {
 
         let bandwidth_bucket = if config.max_bandwidth_bps > 0 {
             // Burst = 1 second worth of bandwidth
-            Some(TokenBucket::new(config.max_bandwidth_bps, config.max_bandwidth_bps))
+            Some(TokenBucket::new(
+                config.max_bandwidth_bps,
+                config.max_bandwidth_bps,
+            ))
         } else {
             None
         };
@@ -362,21 +365,21 @@ pub struct LatencyHistogram {
 
 /// Bucket boundaries in microseconds
 const BUCKET_BOUNDARIES_US: [u64; 16] = [
-    10,      // 0: 0-10us
-    20,      // 1: 10-20us
-    50,      // 2: 20-50us
-    100,     // 3: 50-100us
-    200,     // 4: 100-200us
-    500,     // 5: 200-500us
-    1_000,   // 6: 500us-1ms
-    2_000,   // 7: 1-2ms
-    5_000,   // 8: 2-5ms
-    10_000,  // 9: 5-10ms
-    20_000,  // 10: 10-20ms
-    50_000,  // 11: 20-50ms
-    100_000, // 12: 50-100ms
-    200_000, // 13: 100-200ms
-    500_000, // 14: 200-500ms
+    10,       // 0: 0-10us
+    20,       // 1: 10-20us
+    50,       // 2: 20-50us
+    100,      // 3: 50-100us
+    200,      // 4: 100-200us
+    500,      // 5: 200-500us
+    1_000,    // 6: 500us-1ms
+    2_000,    // 7: 1-2ms
+    5_000,    // 8: 2-5ms
+    10_000,   // 9: 5-10ms
+    20_000,   // 10: 10-20ms
+    50_000,   // 11: 20-50ms
+    100_000,  // 12: 50-100ms
+    200_000,  // 13: 100-200ms
+    500_000,  // 14: 200-500ms
     u64::MAX, // 15: 500ms+
 ];
 
@@ -410,12 +413,16 @@ impl LatencyHistogram {
             if latency_us >= current_min {
                 break;
             }
-            if self.min.compare_exchange_weak(
-                current_min,
-                latency_us,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).is_ok() {
+            if self
+                .min
+                .compare_exchange_weak(
+                    current_min,
+                    latency_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 break;
             }
         }
@@ -426,12 +433,16 @@ impl LatencyHistogram {
             if latency_us <= current_max {
                 break;
             }
-            if self.max.compare_exchange_weak(
-                current_max,
-                latency_us,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).is_ok() {
+            if self
+                .max
+                .compare_exchange_weak(
+                    current_max,
+                    latency_us,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 break;
             }
         }
@@ -630,7 +641,8 @@ impl IoStats {
     pub fn record_read(&self, bytes: u64, latency_us: u64) {
         self.read_ops.fetch_add(1, Ordering::Relaxed);
         self.read_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.read_latency_sum.fetch_add(latency_us, Ordering::Relaxed);
+        self.read_latency_sum
+            .fetch_add(latency_us, Ordering::Relaxed);
         self.window_ops.fetch_add(1, Ordering::Relaxed);
         self.read_latency_histogram.record(latency_us);
     }
@@ -639,7 +651,8 @@ impl IoStats {
     pub fn record_write(&self, bytes: u64, latency_us: u64) {
         self.write_ops.fetch_add(1, Ordering::Relaxed);
         self.write_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.write_latency_sum.fetch_add(latency_us, Ordering::Relaxed);
+        self.write_latency_sum
+            .fetch_add(latency_us, Ordering::Relaxed);
         self.window_ops.fetch_add(1, Ordering::Relaxed);
         self.write_latency_histogram.record(latency_us);
     }
@@ -839,9 +852,9 @@ mod tests {
         let histogram = LatencyHistogram::new();
 
         // Record some latencies
-        histogram.record(5);    // 0-10us bucket
-        histogram.record(15);   // 10-20us bucket
-        histogram.record(150);  // 100-200us bucket
+        histogram.record(5); // 0-10us bucket
+        histogram.record(15); // 10-20us bucket
+        histogram.record(150); // 100-200us bucket
         histogram.record(1500); // 1-2ms bucket
 
         assert_eq!(histogram.count(), 4);
@@ -889,8 +902,8 @@ mod tests {
     fn test_latency_histogram_bucket_counts() {
         let histogram = LatencyHistogram::new();
 
-        histogram.record(5);   // bucket 0
-        histogram.record(5);   // bucket 0
+        histogram.record(5); // bucket 0
+        histogram.record(5); // bucket 0
         histogram.record(150); // bucket 4
 
         let buckets = histogram.bucket_counts();

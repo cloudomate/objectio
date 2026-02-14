@@ -177,10 +177,16 @@ impl CrushMap {
         for group_idx in 0..num_groups {
             // Select domain for this group (round-robin with hash rotation)
             let domain_idx = group_idx % domain_keys.len();
-            let domain_key = domain_keys.get(domain_idx).cloned().unwrap_or(&empty_string);
+            let domain_key = domain_keys
+                .get(domain_idx)
+                .cloned()
+                .unwrap_or(&empty_string);
 
             // Get nodes in this domain
-            let group_nodes = domain_nodes.get(domain_key.as_str()).cloned().unwrap_or_default();
+            let group_nodes = domain_nodes
+                .get(domain_key.as_str())
+                .cloned()
+                .unwrap_or_default();
 
             // Sort nodes within domain by hash for deterministic selection
             let mut sorted_nodes: Vec<(&NodeInfo, u64)> = group_nodes
@@ -303,7 +309,9 @@ impl CrushMap {
         // Weight affects the hash to give higher-weight nodes more data
         let weight_factor = (node.weight * 1000.0) as u64;
 
-        base_hash.wrapping_mul(node_hash).wrapping_add(weight_factor)
+        base_hash
+            .wrapping_mul(node_hash)
+            .wrapping_add(weight_factor)
     }
 
     /// Get the domain key for a node at the specified failure domain level
@@ -346,7 +354,11 @@ mod tests {
                     id: NodeId::new(),
                     name: format!("node-{rack_num}-{node_num}"),
                     address: format!("127.0.0.{rack_num}:900{node_num}").parse().unwrap(),
-                    failure_domain: FailureDomainInfo::new("us-east", "dc1", &format!("rack{rack_num}")),
+                    failure_domain: FailureDomainInfo::new(
+                        "us-east",
+                        "dc1",
+                        &format!("rack{rack_num}"),
+                    ),
                     status: NodeStatus::Active,
                     disks: vec![],
                     weight: 1.0,

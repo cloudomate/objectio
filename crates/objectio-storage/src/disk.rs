@@ -5,12 +5,12 @@
 //! - Block read/write with checksums
 //! - Background scrubbing
 
-use crate::layout::{BlockFooter, BlockHeader, Superblock, DEFAULT_BLOCK_SIZE, SUPERBLOCK_SIZE};
+use crate::layout::{BlockFooter, BlockHeader, DEFAULT_BLOCK_SIZE, SUPERBLOCK_SIZE, Superblock};
 use crate::raw_io::{AlignedBuffer, RawFile};
 use objectio_common::{DiskId, Error, Result};
+use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
 
 /// Disk manager for a single raw disk
 pub struct DiskManager {
@@ -124,7 +124,13 @@ impl DiskManager {
     /// Write a block to the disk
     ///
     /// Returns the block number where data was written
-    pub fn write_block(&self, block_num: u64, object_id: [u8; 16], object_offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write_block(
+        &self,
+        block_num: u64,
+        object_id: [u8; 16],
+        object_offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
         let sb = self.superblock.read();
         let block_size = sb.block_size as usize;
         let max_data_size = block_size - BlockHeader::SIZE - BlockFooter::SIZE;
@@ -175,7 +181,9 @@ impl DiskManager {
         self.file.write_at(offset, block_buf)?;
 
         self.stats.writes.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_written.fetch_add(block_size as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_written
+            .fetch_add(block_size as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -202,7 +210,9 @@ impl DiskManager {
         self.file.read_at(offset, buf.as_mut_slice())?;
 
         self.stats.reads.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_read.fetch_add(block_size as u64, Ordering::Relaxed);
+        self.stats
+            .bytes_read
+            .fetch_add(block_size as u64, Ordering::Relaxed);
 
         let block_buf = buf.as_slice();
 

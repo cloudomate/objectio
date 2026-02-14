@@ -8,10 +8,10 @@ mod service;
 
 use anyhow::Result;
 use axum::{
-    http::{header, StatusCode},
+    Router,
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use block_service::BlockMetaService;
 use clap::Parser;
@@ -99,10 +99,18 @@ async fn main() -> Result<()> {
     // Replication mode takes precedence over EC settings
     let ec_config = if let Some(replication_count) = args.replication {
         info!("Storage mode: Replication (count={})", replication_count);
-        service::EcConfig::Replication { count: replication_count }
+        service::EcConfig::Replication {
+            count: replication_count,
+        }
     } else {
-        info!("Storage mode: Erasure coding (k={}, m={})", args.ec_k, args.ec_m);
-        service::EcConfig::Mds { k: args.ec_k, m: args.ec_m }
+        info!(
+            "Storage mode: Erasure coding (k={}, m={})",
+            args.ec_k, args.ec_m
+        );
+        service::EcConfig::Mds {
+            k: args.ec_k,
+            m: args.ec_m,
+        }
     };
     let meta_service = MetaService::with_ec_config(ec_config);
 
@@ -131,9 +139,10 @@ async fn main() -> Result<()> {
     }
 
     // Parse listen address
-    let addr = args.listen.parse().map_err(|e| {
-        anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e)
-    })?;
+    let addr = args
+        .listen
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e))?;
 
     // Initialize block metadata service
     let block_service = BlockMetaService::new();
@@ -160,7 +169,10 @@ async fn main() -> Result<()> {
     });
 
     info!("Starting gRPC server on {}", addr);
-    info!("Metrics available at http://0.0.0.0:{}/metrics", metrics_port);
+    info!(
+        "Metrics available at http://0.0.0.0:{}/metrics",
+        metrics_port
+    );
 
     // Start gRPC server with both metadata and block services
     Server::builder()
@@ -192,7 +204,11 @@ async fn metrics_handler(
 
     // Meta service uptime
     let uptime = state.start_time.elapsed().as_secs();
-    writeln!(output, "# HELP objectio_meta_uptime_seconds Metadata service uptime").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_meta_uptime_seconds Metadata service uptime"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_meta_uptime_seconds counter").unwrap();
     writeln!(output, "objectio_meta_uptime_seconds {}", uptime).unwrap();
 
@@ -200,16 +216,28 @@ async fn metrics_handler(
     let stats = state.meta_service.stats();
 
     // Bucket and object counts
-    writeln!(output, "# HELP objectio_meta_buckets_total Total number of buckets").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_meta_buckets_total Total number of buckets"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_meta_buckets_total gauge").unwrap();
     writeln!(output, "objectio_meta_buckets_total {}", stats.bucket_count).unwrap();
 
-    writeln!(output, "# HELP objectio_meta_objects_total Total number of objects").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_meta_objects_total Total number of objects"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_meta_objects_total gauge").unwrap();
     writeln!(output, "objectio_meta_objects_total {}", stats.object_count).unwrap();
 
     // OSD counts
-    writeln!(output, "# HELP objectio_meta_osds_total Total registered OSDs").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_meta_osds_total Total registered OSDs"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_meta_osds_total gauge").unwrap();
     writeln!(output, "objectio_meta_osds_total {}", stats.osd_count).unwrap();
 
@@ -223,79 +251,192 @@ async fn metrics_handler(
 
     // --- Volume inventory metrics ---
 
-    writeln!(output, "# HELP objectio_block_volumes_total Total block volumes").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volumes_total Total block volumes"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volumes_total gauge").unwrap();
-    writeln!(output, "objectio_block_volumes_total {}", block_stats.volume_count).unwrap();
+    writeln!(
+        output,
+        "objectio_block_volumes_total {}",
+        block_stats.volume_count
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_volumes_by_state Volume count by state").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volumes_by_state Volume count by state"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volumes_by_state gauge").unwrap();
-    for state_name in &["available", "attached", "creating", "error", "deleting", "unknown"] {
-        let count = block_stats.volumes_by_state.get(*state_name).copied().unwrap_or(0);
-        writeln!(output, "objectio_block_volumes_by_state{{state=\"{}\"}} {}", state_name, count).unwrap();
+    for state_name in &[
+        "available",
+        "attached",
+        "creating",
+        "error",
+        "deleting",
+        "unknown",
+    ] {
+        let count = block_stats
+            .volumes_by_state
+            .get(*state_name)
+            .copied()
+            .unwrap_or(0);
+        writeln!(
+            output,
+            "objectio_block_volumes_by_state{{state=\"{}\"}} {}",
+            state_name, count
+        )
+        .unwrap();
     }
 
-    writeln!(output, "# HELP objectio_block_volumes_provisioned_bytes Total provisioned bytes across all volumes").unwrap();
-    writeln!(output, "# TYPE objectio_block_volumes_provisioned_bytes gauge").unwrap();
-    writeln!(output, "objectio_block_volumes_provisioned_bytes {}", block_stats.volumes_provisioned_bytes).unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volumes_provisioned_bytes Total provisioned bytes across all volumes"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "# TYPE objectio_block_volumes_provisioned_bytes gauge"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "objectio_block_volumes_provisioned_bytes {}",
+        block_stats.volumes_provisioned_bytes
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_volumes_used_bytes Total used bytes across all volumes").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volumes_used_bytes Total used bytes across all volumes"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volumes_used_bytes gauge").unwrap();
-    writeln!(output, "objectio_block_volumes_used_bytes {}", block_stats.volumes_used_bytes).unwrap();
+    writeln!(
+        output,
+        "objectio_block_volumes_used_bytes {}",
+        block_stats.volumes_used_bytes
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_volume_size_bytes Provisioned size per volume").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_size_bytes Provisioned size per volume"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volume_size_bytes gauge").unwrap();
-    writeln!(output, "# HELP objectio_block_volume_used_bytes Used bytes per volume").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_used_bytes Used bytes per volume"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volume_used_bytes gauge").unwrap();
-    writeln!(output, "# HELP objectio_block_volume_qos_max_iops Configured max IOPS per volume").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_qos_max_iops Configured max IOPS per volume"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volume_qos_max_iops gauge").unwrap();
-    writeln!(output, "# HELP objectio_block_volume_qos_min_iops Configured min IOPS per volume").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_qos_min_iops Configured min IOPS per volume"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volume_qos_min_iops gauge").unwrap();
-    writeln!(output, "# HELP objectio_block_volume_qos_max_bandwidth_bps Configured max bandwidth per volume").unwrap();
-    writeln!(output, "# TYPE objectio_block_volume_qos_max_bandwidth_bps gauge").unwrap();
-    writeln!(output, "# HELP objectio_block_volume_qos_burst_iops Configured burst IOPS per volume").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_qos_max_bandwidth_bps Configured max bandwidth per volume"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "# TYPE objectio_block_volume_qos_max_bandwidth_bps gauge"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_volume_qos_burst_iops Configured burst IOPS per volume"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_volume_qos_burst_iops gauge").unwrap();
 
     for vol in &block_stats.volumes {
-        writeln!(output,
+        writeln!(
+            output,
             "objectio_block_volume_size_bytes{{volume_id=\"{}\",name=\"{}\",pool=\"{}\"}} {}",
             vol.volume_id, vol.name, vol.pool, vol.size_bytes
-        ).unwrap();
-        writeln!(output,
+        )
+        .unwrap();
+        writeln!(
+            output,
             "objectio_block_volume_used_bytes{{volume_id=\"{}\",name=\"{}\",pool=\"{}\"}} {}",
             vol.volume_id, vol.name, vol.pool, vol.used_bytes
-        ).unwrap();
+        )
+        .unwrap();
 
         if let Some(qos) = &vol.qos {
-            writeln!(output,
+            writeln!(
+                output,
                 "objectio_block_volume_qos_max_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
                 vol.volume_id, vol.name, qos.max_iops
-            ).unwrap();
-            writeln!(output,
+            )
+            .unwrap();
+            writeln!(
+                output,
                 "objectio_block_volume_qos_min_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
                 vol.volume_id, vol.name, qos.min_iops
-            ).unwrap();
-            writeln!(output,
+            )
+            .unwrap();
+            writeln!(
+                output,
                 "objectio_block_volume_qos_max_bandwidth_bps{{volume_id=\"{}\",name=\"{}\"}} {}",
                 vol.volume_id, vol.name, qos.max_bandwidth_bps
-            ).unwrap();
-            writeln!(output,
+            )
+            .unwrap();
+            writeln!(
+                output,
                 "objectio_block_volume_qos_burst_iops{{volume_id=\"{}\",name=\"{}\"}} {}",
                 vol.volume_id, vol.name, qos.burst_iops
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
     // --- Snapshot metrics ---
 
-    writeln!(output, "# HELP objectio_block_snapshots_total Total snapshots").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_snapshots_total Total snapshots"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_snapshots_total gauge").unwrap();
-    writeln!(output, "objectio_block_snapshots_total {}", block_stats.snapshot_count).unwrap();
+    writeln!(
+        output,
+        "objectio_block_snapshots_total {}",
+        block_stats.snapshot_count
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_snapshots_space_bytes Total snapshot space").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_snapshots_space_bytes Total snapshot space"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_snapshots_space_bytes gauge").unwrap();
-    writeln!(output, "objectio_block_snapshots_space_bytes {}", block_stats.snapshots_space_bytes).unwrap();
+    writeln!(
+        output,
+        "objectio_block_snapshots_space_bytes {}",
+        block_stats.snapshots_space_bytes
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_snapshot_size_bytes Snapshot logical size").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_snapshot_size_bytes Snapshot logical size"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_snapshot_size_bytes gauge").unwrap();
     for snap in &block_stats.snapshots {
         writeln!(output,
@@ -306,20 +447,45 @@ async fn metrics_handler(
 
     // --- Attachment metrics ---
 
-    writeln!(output, "# HELP objectio_block_attachments_total Total active attachments").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_attachments_total Total active attachments"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_attachments_total gauge").unwrap();
-    writeln!(output, "objectio_block_attachments_total {}", block_stats.attachment_count).unwrap();
+    writeln!(
+        output,
+        "objectio_block_attachments_total {}",
+        block_stats.attachment_count
+    )
+    .unwrap();
 
-    writeln!(output, "# HELP objectio_block_attachments_by_type Attachment count by target type").unwrap();
+    writeln!(
+        output,
+        "# HELP objectio_block_attachments_by_type Attachment count by target type"
+    )
+    .unwrap();
     writeln!(output, "# TYPE objectio_block_attachments_by_type gauge").unwrap();
     for type_name in &["iscsi", "nvmeof", "nbd", "unknown"] {
-        let count = block_stats.attachments_by_type.get(*type_name).copied().unwrap_or(0);
-        writeln!(output, "objectio_block_attachments_by_type{{type=\"{}\"}} {}", type_name, count).unwrap();
+        let count = block_stats
+            .attachments_by_type
+            .get(*type_name)
+            .copied()
+            .unwrap_or(0);
+        writeln!(
+            output,
+            "objectio_block_attachments_by_type{{type=\"{}\"}} {}",
+            type_name, count
+        )
+        .unwrap();
     }
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         output,
     )
 }

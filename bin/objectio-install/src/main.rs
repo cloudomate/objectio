@@ -165,9 +165,25 @@ async fn main() -> Result<()> {
             skip_prepare,
             block_size_mb,
         } => {
-            init_node(role, disks, meta_endpoint, raft_peers, ec_profile, no_auth, config_dir, systemd, skip_prepare, block_size_mb).await?;
+            init_node(
+                role,
+                disks,
+                meta_endpoint,
+                raft_peers,
+                ec_profile,
+                no_auth,
+                config_dir,
+                systemd,
+                skip_prepare,
+                block_size_mb,
+            )
+            .await?;
         }
-        Commands::Join { meta_endpoint, disks, block_size_mb } => {
+        Commands::Join {
+            meta_endpoint,
+            disks,
+            block_size_mb,
+        } => {
             join_cluster(meta_endpoint, disks, block_size_mb).await?;
         }
         Commands::Disk { command } => {
@@ -198,10 +214,19 @@ async fn init_node(
     info!("Roles: {:?}", roles);
 
     // Parse EC profile
-    let ec_profile = config::EcProfile::from_str(&ec_profile_str)
-        .ok_or_else(|| anyhow::anyhow!("Invalid EC profile format '{}'. Use 'k+m' format like '4+2'", ec_profile_str))?;
+    let ec_profile = config::EcProfile::from_str(&ec_profile_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid EC profile format '{}'. Use 'k+m' format like '4+2'",
+            ec_profile_str
+        )
+    })?;
 
-    info!("Erasure coding profile: {}+{} (min {} disks)", ec_profile.k, ec_profile.m, ec_profile.min_disks());
+    info!(
+        "Erasure coding profile: {}+{} (min {} disks)",
+        ec_profile.k,
+        ec_profile.m,
+        ec_profile.min_disks()
+    );
 
     // Create config directory
     std::fs::create_dir_all(&config_dir)?;
@@ -262,9 +287,16 @@ async fn init_node(
         // Validate disk count against EC profile
         let min_disks = ec_profile.min_disks() as usize;
         if disk_paths.len() < min_disks {
-            info!("WARNING: {} disks provided, but EC profile {}+{} requires at least {} disks",
-                disk_paths.len(), ec_profile.k, ec_profile.m, min_disks);
-            info!("         Consider using a smaller EC profile like '2+1' (3 disks) or providing more disks.");
+            info!(
+                "WARNING: {} disks provided, but EC profile {}+{} requires at least {} disks",
+                disk_paths.len(),
+                ec_profile.k,
+                ec_profile.m,
+                min_disks
+            );
+            info!(
+                "         Consider using a smaller EC profile like '2+1' (3 disks) or providing more disks."
+            );
         }
 
         info!("Using {} disks: {:?}", disk_paths.len(), disk_paths);
@@ -274,7 +306,10 @@ async fn init_node(
         if skip_prepare {
             info!("Skipping disk preparation (--skip-prepare specified)");
         } else {
-            info!("Using block size: {} MB ({} bytes)", block_size_mb, block_size_bytes);
+            info!(
+                "Using block size: {} MB ({} bytes)",
+                block_size_mb, block_size_bytes
+            );
             for disk_path in &disk_paths {
                 info!("Preparing disk: {}", disk_path);
                 match disk::prepare_disk(disk_path, false, Some(block_size_bytes)) {
@@ -290,7 +325,11 @@ async fn init_node(
             }
         }
 
-        let osd_config = config::generate_osd_config_with_block_size(&disk_paths, &meta_endpoint, block_size_bytes);
+        let osd_config = config::generate_osd_config_with_block_size(
+            &disk_paths,
+            &meta_endpoint,
+            block_size_bytes,
+        );
         let osd_path = format!("{}/osd.toml", config_dir);
         std::fs::write(&osd_path, &osd_config)?;
         info!("Wrote OSD config to {}", osd_path);
@@ -306,11 +345,19 @@ async fn init_node(
     info!("");
     info!("Configuration:");
     info!("  Directory: {}", config_dir);
-    info!("  Erasure Coding: {}+{} ({} data + {} parity shards)",
-        ec_profile.k, ec_profile.m, ec_profile.k, ec_profile.m);
-    info!("  Storage Efficiency: {:.0}%", (ec_profile.k as f64 / (ec_profile.k + ec_profile.m) as f64) * 100.0);
+    info!(
+        "  Erasure Coding: {}+{} ({} data + {} parity shards)",
+        ec_profile.k, ec_profile.m, ec_profile.k, ec_profile.m
+    );
+    info!(
+        "  Storage Efficiency: {:.0}%",
+        (ec_profile.k as f64 / (ec_profile.k + ec_profile.m) as f64) * 100.0
+    );
     info!("  Fault Tolerance: {} disk failures", ec_profile.m);
-    info!("  Authentication: {}", if no_auth { "DISABLED" } else { "ENABLED" });
+    info!(
+        "  Authentication: {}",
+        if no_auth { "DISABLED" } else { "ENABLED" }
+    );
     info!("");
     info!("To start services:");
     if install_systemd_units {
@@ -328,7 +375,11 @@ async fn init_node(
 }
 
 /// Join an existing cluster
-async fn join_cluster(meta_endpoint: String, disks: Option<Vec<String>>, block_size_mb: u32) -> Result<()> {
+async fn join_cluster(
+    meta_endpoint: String,
+    disks: Option<Vec<String>>,
+    block_size_mb: u32,
+) -> Result<()> {
     info!("Joining existing ObjectIO cluster at {}", meta_endpoint);
 
     // TODO: Connect to metadata service and register this node
@@ -347,7 +398,10 @@ async fn join_cluster(meta_endpoint: String, disks: Option<Vec<String>>, block_s
     }
 
     let block_size_bytes = block_size_mb * 1024 * 1024;
-    info!("Using block size: {} MB ({} bytes)", block_size_mb, block_size_bytes);
+    info!(
+        "Using block size: {} MB ({} bytes)",
+        block_size_mb, block_size_bytes
+    );
 
     for disk_path in &disk_paths {
         info!("Preparing disk: {}", disk_path);
@@ -366,7 +420,8 @@ async fn join_cluster(meta_endpoint: String, disks: Option<Vec<String>>, block_s
     let config_dir = "/etc/objectio";
     std::fs::create_dir_all(config_dir)?;
 
-    let osd_config = config::generate_osd_config_with_block_size(&disk_paths, &meta_endpoint, block_size_bytes);
+    let osd_config =
+        config::generate_osd_config_with_block_size(&disk_paths, &meta_endpoint, block_size_bytes);
     let osd_path = format!("{}/osd.toml", config_dir);
     std::fs::write(&osd_path, &osd_config)?;
 
@@ -401,9 +456,16 @@ async fn handle_disk_command(command: DiskCommands) -> Result<()> {
                 }
             }
         }
-        DiskCommands::Prepare { path, force, block_size_mb } => {
+        DiskCommands::Prepare {
+            path,
+            force,
+            block_size_mb,
+        } => {
             let block_size_bytes = block_size_mb * 1024 * 1024;
-            info!("Preparing disk: {} (block_size: {} MB)", path, block_size_mb);
+            info!(
+                "Preparing disk: {} (block_size: {} MB)",
+                path, block_size_mb
+            );
             let disk_id = disk::prepare_disk(&path, force, Some(block_size_bytes))?;
             info!("Disk prepared successfully!");
             info!("Disk ID: {}", disk_id);

@@ -5,37 +5,55 @@
 const MAX_SHARD_SIZE: usize = 4 * 1024 * 1024 - 4096; // ~4MB per shard
 
 use crate::osd_pool::{
-    delete_object_meta_from_osd, get_object_meta_from_osd, put_object_meta_to_osd,
-    read_shard_from_osd, write_shard_to_osd, OsdPool,
+    OsdPool, delete_object_meta_from_osd, get_object_meta_from_osd, put_object_meta_to_osd,
+    read_shard_from_osd, write_shard_to_osd,
 };
 use crate::scatter_gather::ScatterGatherEngine;
 use axum::{
+    Extension,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
-    Extension,
 };
 use bytes::Bytes;
 use objectio_auth::{
-    policy::{BucketPolicy, PolicyDecision, PolicyEvaluator, RequestContext},
     AuthResult,
+    policy::{BucketPolicy, PolicyDecision, PolicyEvaluator, RequestContext},
 };
 use objectio_common::ErasureConfig;
 use objectio_erasure::{
-    backend::{LrcBackend, LrcConfig, RustSimdLrcBackend},
     ErasureCodec,
+    backend::{LrcBackend, LrcConfig, RustSimdLrcBackend},
 };
 use objectio_proto::metadata::{
-    metadata_service_client::MetadataServiceClient, AbortMultipartUploadRequest,
-    CompleteMultipartUploadRequest as ProtoCompleteMultipartUploadRequest, CreateBucketRequest,
-    CreateMultipartUploadRequest, DeleteBucketPolicyRequest, DeleteBucketRequest, ErasureType,
-    GetBucketPolicyRequest, GetBucketRequest, GetPlacementRequest, ListBucketsRequest,
-    ListMultipartUploadsRequest, ListPartsRequest, ObjectMeta, PartInfo, RegisterPartRequest,
-    SetBucketPolicyRequest, ShardLocation, StripeMeta,
+    AbortMultipartUploadRequest,
+    CompleteMultipartUploadRequest as ProtoCompleteMultipartUploadRequest,
+    CreateAccessKeyRequest,
+    CreateBucketRequest,
+    CreateMultipartUploadRequest,
     // IAM types
-    CreateUserRequest, ListUsersRequest, DeleteUserRequest,
-    CreateAccessKeyRequest, ListAccessKeysRequest, DeleteAccessKeyRequest,
+    CreateUserRequest,
+    DeleteAccessKeyRequest,
+    DeleteBucketPolicyRequest,
+    DeleteBucketRequest,
+    DeleteUserRequest,
+    ErasureType,
+    GetBucketPolicyRequest,
+    GetBucketRequest,
+    GetPlacementRequest,
+    ListAccessKeysRequest,
+    ListBucketsRequest,
+    ListMultipartUploadsRequest,
+    ListPartsRequest,
+    ListUsersRequest,
+    ObjectMeta,
+    PartInfo,
+    RegisterPartRequest,
+    SetBucketPolicyRequest,
+    ShardLocation,
+    StripeMeta,
+    metadata_service_client::MetadataServiceClient,
 };
 use quick_xml::se::to_string as to_xml;
 use serde::{Deserialize, Serialize};
@@ -114,7 +132,10 @@ fn parse_range_header(range_header: &str, total_size: u64) -> Option<ByteRange> 
     if start_str.is_empty() {
         let suffix_len: u64 = end_str.parse().ok()?;
         if suffix_len == 0 || suffix_len > total_size {
-            return Some(ByteRange { start: 0, end: total_size - 1 });
+            return Some(ByteRange {
+                start: 0,
+                end: total_size - 1,
+            });
         }
         return Some(ByteRange {
             start: total_size - suffix_len,
@@ -129,7 +150,10 @@ fn parse_range_header(range_header: &str, total_size: u64) -> Option<ByteRange> 
         if start >= total_size {
             return None;
         }
-        return Some(ByteRange { start, end: total_size - 1 });
+        return Some(ByteRange {
+            start,
+            end: total_size - 1,
+        });
     }
 
     let end: u64 = end_str.parse().ok()?;
@@ -147,7 +171,11 @@ fn parse_range_header(range_header: &str, total_size: u64) -> Option<ByteRange> 
 
 /// Given a byte range and stripe metadata, return `(stripe_index, stripe_byte_offset)`
 /// pairs for only the stripes that overlap the range.
-fn overlapping_stripes(stripes: &[StripeMeta], object_size: u64, range: &ByteRange) -> Vec<(usize, u64)> {
+fn overlapping_stripes(
+    stripes: &[StripeMeta],
+    object_size: u64,
+    range: &ByteRange,
+) -> Vec<(usize, u64)> {
     let mut offset = 0u64;
     let mut result = Vec::new();
     for (idx, stripe) in stripes.iter().enumerate() {
@@ -198,7 +226,10 @@ async fn check_bucket_policy(
 
                         match decision {
                             PolicyDecision::Deny => {
-                                debug!("Policy denied access: {} {} {}", user_arn, action, resource);
+                                debug!(
+                                    "Policy denied access: {} {} {}",
+                                    user_arn, action, resource
+                                );
                                 Some(S3Error::xml_response(
                                     "AccessDenied",
                                     "Access Denied by bucket policy",
@@ -442,8 +473,10 @@ impl S3Error {
             request_id: Uuid::new_v4().to_string(),
         };
 
-        let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
-            to_xml(&error).unwrap_or_default());
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
+            to_xml(&error).unwrap_or_default()
+        );
 
         Response::builder()
             .status(status)
@@ -663,7 +696,12 @@ fn timestamp_to_http_date(ts: u64) -> String {
 pub async fn list_buckets(State(state): State<Arc<AppState>>) -> Response {
     let mut client = state.meta_client.clone();
 
-    match client.list_buckets(ListBucketsRequest { owner: String::new() }).await {
+    match client
+        .list_buckets(ListBucketsRequest {
+            owner: String::new(),
+        })
+        .await
+    {
         Ok(response) => {
             let buckets = response.into_inner();
             let result = ListBucketsResult {
@@ -672,15 +710,21 @@ pub async fn list_buckets(State(state): State<Arc<AppState>>) -> Response {
                     display_name: "ObjectIO User".to_string(),
                 },
                 buckets: Buckets {
-                    bucket: buckets.buckets.into_iter().map(|b| Bucket {
-                        name: b.name,
-                        creation_date: timestamp_to_iso(b.created_at),
-                    }).collect(),
+                    bucket: buckets
+                        .buckets
+                        .into_iter()
+                        .map(|b| Bucket {
+                            name: b.name,
+                            creation_date: timestamp_to_iso(b.created_at),
+                        })
+                        .collect(),
                 },
             };
 
-            let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
-                to_xml(&result).unwrap_or_default());
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
+                to_xml(&result).unwrap_or_default()
+            );
 
             Response::builder()
                 .status(StatusCode::OK)
@@ -690,7 +734,11 @@ pub async fn list_buckets(State(state): State<Arc<AppState>>) -> Response {
         }
         Err(e) => {
             error!("Failed to list buckets: {}", e);
-            S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+            S3Error::xml_response(
+                "InternalError",
+                &e.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
         }
     }
 }
@@ -709,12 +757,15 @@ pub async fn create_bucket(
 
     let mut client = state.meta_client.clone();
 
-    match client.create_bucket(CreateBucketRequest {
-        name: bucket.clone(),
-        owner: "default".to_string(),
-        storage_class: "STANDARD".to_string(),
-        region: "us-east-1".to_string(),
-    }).await {
+    match client
+        .create_bucket(CreateBucketRequest {
+            name: bucket.clone(),
+            owner: "default".to_string(),
+            storage_class: "STANDARD".to_string(),
+            region: "us-east-1".to_string(),
+        })
+        .await
+    {
         Ok(_) => {
             info!("Created bucket: {}", bucket);
             Response::builder()
@@ -725,10 +776,18 @@ pub async fn create_bucket(
         }
         Err(e) => {
             if e.code() == tonic::Code::AlreadyExists {
-                S3Error::xml_response("BucketAlreadyExists", "Bucket already exists", StatusCode::CONFLICT)
+                S3Error::xml_response(
+                    "BucketAlreadyExists",
+                    "Bucket already exists",
+                    StatusCode::CONFLICT,
+                )
             } else {
                 error!("Failed to create bucket: {}", e);
-                S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
             }
         }
     }
@@ -768,7 +827,12 @@ pub async fn delete_bucket(
 
     let mut client = state.meta_client.clone();
 
-    match client.delete_bucket(DeleteBucketRequest { name: bucket.clone() }).await {
+    match client
+        .delete_bucket(DeleteBucketRequest {
+            name: bucket.clone(),
+        })
+        .await
+    {
         Ok(_) => {
             info!("Deleted bucket: {}", bucket);
             Response::builder()
@@ -780,10 +844,18 @@ pub async fn delete_bucket(
             if e.code() == tonic::Code::NotFound {
                 S3Error::xml_response("NoSuchBucket", "Bucket not found", StatusCode::NOT_FOUND)
             } else if e.code() == tonic::Code::FailedPrecondition {
-                S3Error::xml_response("BucketNotEmpty", "Bucket is not empty", StatusCode::CONFLICT)
+                S3Error::xml_response(
+                    "BucketNotEmpty",
+                    "Bucket is not empty",
+                    StatusCode::CONFLICT,
+                )
             } else {
                 error!("Failed to delete bucket: {}", e);
-                S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
             }
         }
     }
@@ -891,7 +963,13 @@ pub async fn list_objects(
     let mut meta_client = state.meta_client.clone();
     match state
         .scatter_gather
-        .list_objects(&mut meta_client, &bucket, &prefix, max_keys, continuation_token)
+        .list_objects(
+            &mut meta_client,
+            &bucket,
+            &prefix,
+            max_keys,
+            continuation_token,
+        )
         .await
     {
         Ok(list_result) => {
@@ -911,7 +989,8 @@ pub async fn list_objects(
                     // Check if the key contains the delimiter after the prefix
                     if let Some(delim_pos) = key_after_prefix.find(delim.as_str()) {
                         // Extract the common prefix (prefix + everything up to and including delimiter)
-                        let common_prefix = format!("{}{}{}", prefix, &key_after_prefix[..delim_pos], delim);
+                        let common_prefix =
+                            format!("{}{}{}", prefix, &key_after_prefix[..delim_pos], delim);
                         prefixes_set.insert(common_prefix);
                     } else {
                         // No delimiter found - include this object in contents
@@ -1000,13 +1079,11 @@ pub async fn list_objects(
                 }
                 ScatterGatherError::InvalidToken
                 | ScatterGatherError::TokenSignatureMismatch
-                | ScatterGatherError::TopologyChanged { .. } => {
-                    S3Error::xml_response(
-                        "InvalidArgument",
-                        "Invalid continuation token",
-                        StatusCode::BAD_REQUEST,
-                    )
-                }
+                | ScatterGatherError::TopologyChanged { .. } => S3Error::xml_response(
+                    "InvalidArgument",
+                    "Invalid continuation token",
+                    StatusCode::BAD_REQUEST,
+                ),
                 _ => {
                     error!("Scatter-gather list failed: {}", e);
                     S3Error::xml_response(
@@ -1052,7 +1129,10 @@ pub async fn put_object(
         let source_bucket = parts[0];
         let source_key = parts[1];
 
-        debug!("CopyObject: {}/{} -> {}/{}", source_bucket, source_key, bucket, key);
+        debug!(
+            "CopyObject: {}/{} -> {}/{}",
+            source_bucket, source_key, bucket, key
+        );
 
         // Read the source object using internal get
         let mut meta_client = state.meta_client.clone();
@@ -1088,38 +1168,35 @@ pub async fn put_object(
 
         // Get source object metadata
         let primary_osd = &placement.nodes[0];
-        let source_obj = match get_object_meta_from_osd(
-            &state.osd_pool,
-            primary_osd,
-            source_bucket,
-            source_key,
-        )
-        .await
-        {
-            Ok(Some(obj)) => obj,
-            Ok(None) => {
-                return S3Error::xml_response(
-                    "NoSuchKey",
-                    "The specified key does not exist",
-                    StatusCode::NOT_FOUND,
-                );
-            }
-            Err(e) => {
-                error!("Failed to get source object metadata: {}", e);
-                return S3Error::xml_response(
-                    "InternalError",
-                    &e.to_string(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                );
-            }
-        };
+        let source_obj =
+            match get_object_meta_from_osd(&state.osd_pool, primary_osd, source_bucket, source_key)
+                .await
+            {
+                Ok(Some(obj)) => obj,
+                Ok(None) => {
+                    return S3Error::xml_response(
+                        "NoSuchKey",
+                        "The specified key does not exist",
+                        StatusCode::NOT_FOUND,
+                    );
+                }
+                Err(e) => {
+                    error!("Failed to get source object metadata: {}", e);
+                    return S3Error::xml_response(
+                        "InternalError",
+                        &e.to_string(),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
+            };
 
         // Read source object data from stripes
         let mut source_data = Vec::with_capacity(source_obj.size as usize);
         for stripe in &source_obj.stripes {
             let ec_k = stripe.ec_k as usize;
             let ec_m = stripe.ec_m as usize;
-            let stripe_ec_type = ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
+            let stripe_ec_type =
+                ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
             let stripe_data_size = if stripe.data_size > 0 {
                 stripe.data_size as usize
             } else {
@@ -1182,11 +1259,8 @@ pub async fn put_object(
                 let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
                 let mut read_count = 0;
 
-                let shard_map: std::collections::HashMap<u32, &ShardLocation> = stripe
-                    .shards
-                    .iter()
-                    .map(|s| (s.position, s))
-                    .collect();
+                let shard_map: std::collections::HashMap<u32, &ShardLocation> =
+                    stripe.shards.iter().map(|s| (s.position, s)).collect();
 
                 let ec_obj_id = if !stripe.object_id.is_empty() {
                     &stripe.object_id
@@ -1330,7 +1404,11 @@ pub async fn put_object(
 
         debug!(
             "Replication mode: writing {} replicas x {} stripes for {}/{} (total size={})",
-            total_replicas, num_stripes, bucket, key, body.len()
+            total_replicas,
+            num_stripes,
+            bucket,
+            key,
+            body.len()
         );
 
         let mut all_stripes = Vec::with_capacity(num_stripes);
@@ -1372,8 +1450,8 @@ pub async fn put_object(
                         s_idx, // stripe_id
                         pos,
                         shard_data,
-                        1,  // ec_k=1 for replication (full data)
-                        0,  // ec_m=0 for replication (no parity)
+                        1, // ec_k=1 for replication (full data)
+                        0, // ec_m=0 for replication (no parity)
                     )
                     .await;
                     (pos, result, placement_node)
@@ -1397,10 +1475,16 @@ pub async fn put_object(
                             shard_type: placement_node.shard_type,
                             local_group: placement_node.local_group,
                         });
-                        debug!("Wrote stripe {} replica {} to {}", stripe_idx, pos, placement_node.node_address);
+                        debug!(
+                            "Wrote stripe {} replica {} to {}",
+                            stripe_idx, pos, placement_node.node_address
+                        );
                     }
                     Err(e) => {
-                        warn!("Failed to write stripe {} replica {} to {}: {}", stripe_idx, pos, placement_node.node_address, e);
+                        warn!(
+                            "Failed to write stripe {} replica {} to {}: {}",
+                            stripe_idx, pos, placement_node.node_address, e
+                        );
                         shard_locs.push(ShardLocation {
                             position: pos,
                             node_id: placement_node.node_id.clone(),
@@ -1421,7 +1505,10 @@ pub async fn put_object(
                 );
                 return S3Error::xml_response(
                     "InternalError",
-                    &format!("Replication failed for stripe {}: {} successful writes, need 1", stripe_idx, success_count),
+                    &format!(
+                        "Replication failed for stripe {}: {} successful writes, need 1",
+                        stripe_idx, success_count
+                    ),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 );
             }
@@ -1439,7 +1526,7 @@ pub async fn put_object(
                 ec_global_parity: 0,
                 local_group_size: 0,
                 data_size: stripe_data_size,
-                object_id: object_id.to_vec(),  // Store object_id used for shards
+                object_id: object_id.to_vec(), // Store object_id used for shards
             });
         }
 
@@ -1472,14 +1559,8 @@ pub async fn put_object(
         };
 
         let primary_osd = &placement.nodes[0];
-        if let Err(e) = put_object_meta_to_osd(
-            &state.osd_pool,
-            primary_osd,
-            &bucket,
-            &key,
-            object_meta,
-        )
-        .await
+        if let Err(e) =
+            put_object_meta_to_osd(&state.osd_pool, primary_osd, &bucket, &key, object_meta).await
         {
             error!("Failed to store object metadata on OSD: {}", e);
             return S3Error::xml_response(
@@ -1531,7 +1612,12 @@ pub async fn put_object(
 
     debug!(
         "EC mode: encoding {}/{} ({} bytes) into {} stripes with {}+{} shards each",
-        bucket, key, body.len(), num_stripes, ec_k, ec_m
+        bucket,
+        key,
+        body.len(),
+        num_stripes,
+        ec_k,
+        ec_m
     );
 
     let mut all_stripes = Vec::with_capacity(num_stripes);
@@ -1571,10 +1657,8 @@ pub async fn put_object(
                 padded_data.resize(padded_size, 0);
 
                 // Split into data shards
-                let data_shards: Vec<&[u8]> = padded_data
-                    .chunks(shard_size)
-                    .take(ec_k as usize)
-                    .collect();
+                let data_shards: Vec<&[u8]> =
+                    padded_data.chunks(shard_size).take(ec_k as usize).collect();
 
                 match backend.encode_lrc(&data_shards, shard_size) {
                     Ok(encoded) => encoded.all_shards(),
@@ -1684,10 +1768,16 @@ pub async fn put_object(
                         shard_type: placement_node.shard_type,
                         local_group: placement_node.local_group,
                     });
-                    debug!("Wrote stripe {} shard {} to {}", stripe_idx, pos, placement_node.node_address);
+                    debug!(
+                        "Wrote stripe {} shard {} to {}",
+                        stripe_idx, pos, placement_node.node_address
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to write stripe {} shard {} to {}: {}", stripe_idx, pos, placement_node.node_address, e);
+                    warn!(
+                        "Failed to write stripe {} shard {} to {}: {}",
+                        stripe_idx, pos, placement_node.node_address, e
+                    );
                     // Still add the location with placeholder data for tracking
                     shard_locs.push(ShardLocation {
                         position: pos,
@@ -1735,7 +1825,7 @@ pub async fn put_object(
             ec_global_parity: placement.ec_global_parity,
             local_group_size: placement.local_group_size,
             data_size: stripe_data_size, // Store this stripe's data size for decoding
-            object_id: object_id.to_vec(),  // Store object_id used for shards
+            object_id: object_id.to_vec(), // Store object_id used for shards
         });
     }
 
@@ -1772,14 +1862,8 @@ pub async fn put_object(
     let primary_osd = &placement.nodes[0];
 
     // Store metadata on primary OSD
-    if let Err(e) = put_object_meta_to_osd(
-        &state.osd_pool,
-        primary_osd,
-        &bucket,
-        &key,
-        object_meta,
-    )
-    .await
+    if let Err(e) =
+        put_object_meta_to_osd(&state.osd_pool, primary_osd, &bucket, &key, object_meta).await
     {
         error!("Failed to store object metadata on OSD: {}", e);
         return S3Error::xml_response(
@@ -1838,9 +1922,7 @@ pub async fn get_object(
     debug!("GET object: {}/{}", bucket, key);
 
     // Parse Range header if present
-    let range_header = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok());
+    let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
 
     // Check bucket policy if user is authenticated
     if let Some(Extension(auth_result)) = &auth {
@@ -1891,21 +1973,10 @@ pub async fn get_object(
 
     // Get object metadata from primary OSD (position 0)
     let primary_osd = &placement.nodes[0];
-    let object = match get_object_meta_from_osd(
-        &state.osd_pool,
-        primary_osd,
-        &bucket,
-        &key,
-    )
-    .await
-    {
+    let object = match get_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &key).await {
         Ok(Some(obj)) => obj,
         Ok(None) => {
-            return S3Error::xml_response(
-                "NoSuchKey",
-                "Object not found",
-                StatusCode::NOT_FOUND,
-            )
+            return S3Error::xml_response("NoSuchKey", "Object not found", StatusCode::NOT_FOUND);
         }
         Err(e) => {
             error!("Failed to get object metadata from OSD: {}", e);
@@ -1969,7 +2040,8 @@ pub async fn get_object(
         let stripe = &object.stripes[stripe_idx];
         let ec_k = stripe.ec_k as usize;
         let ec_m = stripe.ec_m as usize;
-        let stripe_ec_type = ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
+        let stripe_ec_type =
+            ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
 
         // Use stripe's data_size if available, otherwise fall back to object size (for backwards compat)
         let stripe_data_size = if stripe.data_size > 0 {
@@ -1978,7 +2050,10 @@ pub async fn get_object(
             object.size as usize
         } else {
             // For multi-stripe without data_size, we can't properly decode
-            error!("Multi-stripe object missing data_size on stripe {}", stripe_idx);
+            error!(
+                "Multi-stripe object missing data_size on stripe {}",
+                stripe_idx
+            );
             return S3Error::xml_response(
                 "InternalError",
                 "Object metadata is incomplete (missing stripe data_size)",
@@ -2027,7 +2102,8 @@ pub async fn get_object(
                     Ok(data) => {
                         debug!(
                             "Read replicated data from replica {} ({} bytes)",
-                            shard_loc.position, data.len()
+                            shard_loc.position,
+                            data.len()
                         );
                         // Truncate to actual data size (in case of padding)
                         let actual_data = if data.len() > stripe_data_size {
@@ -2037,9 +2113,11 @@ pub async fn get_object(
                         };
                         if let Some(ref range) = resolved_range {
                             let stripe_end = stripe_byte_offset + stripe_data_size as u64;
-                            let slice_start = range.start.saturating_sub(stripe_byte_offset) as usize;
+                            let slice_start =
+                                range.start.saturating_sub(stripe_byte_offset) as usize;
                             let slice_end = std::cmp::min(range.end + 1, stripe_end)
-                                .saturating_sub(stripe_byte_offset) as usize;
+                                .saturating_sub(stripe_byte_offset)
+                                as usize;
                             all_data.extend_from_slice(&actual_data[slice_start..slice_end]);
                         } else {
                             all_data.extend(actual_data);
@@ -2084,11 +2162,8 @@ pub async fn get_object(
         let mut read_count = 0;
 
         // Create a map of position -> shard location for quick lookup
-        let shard_map: HashMap<u32, &ShardLocation> = stripe
-            .shards
-            .iter()
-            .map(|s| (s.position, s))
-            .collect();
+        let shard_map: HashMap<u32, &ShardLocation> =
+            stripe.shards.iter().map(|s| (s.position, s)).collect();
 
         // Use stripe's object_id if available (for multipart uploads)
         // Fall back to object.object_id for backwards compat
@@ -2148,9 +2223,12 @@ pub async fn get_object(
                     let node_placement = objectio_proto::metadata::NodePlacement {
                         position: shard_loc.position,
                         node_id: shard_loc.node_id.clone(),
-                        node_address: get_node_address_from_meta(&mut meta_client, &shard_loc.node_id)
-                            .await
-                            .unwrap_or_else(|| "http://localhost:9002".to_string()),
+                        node_address: get_node_address_from_meta(
+                            &mut meta_client,
+                            &shard_loc.node_id,
+                        )
+                        .await
+                        .unwrap_or_else(|| "http://localhost:9002".to_string()),
                         disk_id: shard_loc.disk_id.clone(),
                         shard_type: shard_loc.shard_type,
                         local_group: shard_loc.local_group,
@@ -2250,7 +2328,10 @@ pub async fn get_object(
             .header(header::CONTENT_RANGE, content_range)
             .header("ETag", &object.etag)
             .header("Accept-Ranges", "bytes")
-            .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
+            .header(
+                header::LAST_MODIFIED,
+                timestamp_to_http_date(object.modified_at),
+            );
 
         let builder = add_metadata_headers(builder, &object.user_metadata);
 
@@ -2262,7 +2343,10 @@ pub async fn get_object(
             .header(header::CONTENT_LENGTH, all_data.len().to_string())
             .header("ETag", &object.etag)
             .header("Accept-Ranges", "bytes")
-            .header(header::LAST_MODIFIED, timestamp_to_http_date(object.modified_at));
+            .header(
+                header::LAST_MODIFIED,
+                timestamp_to_http_date(object.modified_at),
+            );
 
         let builder = add_metadata_headers(builder, &object.user_metadata);
 
@@ -2324,7 +2408,7 @@ pub async fn head_object(
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .body(Body::empty())
-                .unwrap()
+                .unwrap();
         }
     };
 
@@ -2512,7 +2596,10 @@ pub async fn delete_objects(
             Ok(resp) => resp.into_inner(),
             Err(e) => {
                 // Object doesn't exist - S3 still reports it as deleted
-                debug!("Object {}/{} not found during delete: {}", bucket, obj.key, e);
+                debug!(
+                    "Object {}/{} not found during delete: {}",
+                    bucket, obj.key, e
+                );
                 deleted.push(DeletedObject {
                     key: obj.key,
                     version_id: obj.version_id,
@@ -2532,8 +2619,13 @@ pub async fn delete_objects(
 
         // Delete object metadata from primary OSD
         let primary_osd = &placement.nodes[0];
-        if let Err(e) = delete_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &obj.key).await {
-            warn!("Failed to delete object {}/{} from OSD: {}", bucket, obj.key, e);
+        if let Err(e) =
+            delete_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &obj.key).await
+        {
+            warn!(
+                "Failed to delete object {}/{} from OSD: {}",
+                bucket, obj.key, e
+            );
             // Continue anyway - might not exist, which is OK
         }
 
@@ -2579,10 +2671,7 @@ pub async fn health_check() -> Response {
 // ============================================================================
 
 /// Get bucket policy (GET /{bucket}?policy) - internal implementation
-async fn get_bucket_policy_internal(
-    state: Arc<AppState>,
-    bucket: String,
-) -> Response {
+async fn get_bucket_policy_internal(state: Arc<AppState>, bucket: String) -> Response {
     let mut client = state.meta_client.clone();
 
     match client
@@ -2609,21 +2698,25 @@ async fn get_bucket_policy_internal(
         }
         Err(e) => {
             if e.code() == tonic::Code::NotFound {
-                S3Error::xml_response("NoSuchBucket", "The specified bucket does not exist", StatusCode::NOT_FOUND)
+                S3Error::xml_response(
+                    "NoSuchBucket",
+                    "The specified bucket does not exist",
+                    StatusCode::NOT_FOUND,
+                )
             } else {
                 error!("Failed to get bucket policy: {}", e);
-                S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
             }
         }
     }
 }
 
 /// Set bucket policy (PUT /{bucket}?policy) - internal implementation
-async fn put_bucket_policy_internal(
-    state: Arc<AppState>,
-    bucket: String,
-    body: Bytes,
-) -> Response {
+async fn put_bucket_policy_internal(state: Arc<AppState>, bucket: String, body: Bytes) -> Response {
     let mut client = state.meta_client.clone();
 
     // Parse the policy JSON to validate it
@@ -2663,22 +2756,27 @@ async fn put_bucket_policy_internal(
         }
         Err(e) => {
             if e.code() == tonic::Code::NotFound {
-                S3Error::xml_response("NoSuchBucket", "The specified bucket does not exist", StatusCode::NOT_FOUND)
+                S3Error::xml_response(
+                    "NoSuchBucket",
+                    "The specified bucket does not exist",
+                    StatusCode::NOT_FOUND,
+                )
             } else if e.code() == tonic::Code::InvalidArgument {
                 S3Error::xml_response("MalformedPolicy", &e.message(), StatusCode::BAD_REQUEST)
             } else {
                 error!("Failed to set bucket policy: {}", e);
-                S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
             }
         }
     }
 }
 
 /// Delete bucket policy (DELETE /{bucket}?policy) - internal implementation
-async fn delete_bucket_policy_internal(
-    state: Arc<AppState>,
-    bucket: String,
-) -> Response {
+async fn delete_bucket_policy_internal(state: Arc<AppState>, bucket: String) -> Response {
     let mut client = state.meta_client.clone();
 
     match client
@@ -2696,10 +2794,18 @@ async fn delete_bucket_policy_internal(
         }
         Err(e) => {
             if e.code() == tonic::Code::NotFound {
-                S3Error::xml_response("NoSuchBucket", "The specified bucket does not exist", StatusCode::NOT_FOUND)
+                S3Error::xml_response(
+                    "NoSuchBucket",
+                    "The specified bucket does not exist",
+                    StatusCode::NOT_FOUND,
+                )
             } else {
                 error!("Failed to delete bucket policy: {}", e);
-                S3Error::xml_response("InternalError", &e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
             }
         }
     }
@@ -2818,7 +2924,11 @@ async fn upload_part_internal(
 ) -> Response {
     debug!(
         "Upload part: bucket={}, key={}, uploadId={}, partNumber={}, size={}",
-        bucket, key, upload_id, part_number, body.len()
+        bucket,
+        key,
+        upload_id,
+        part_number,
+        body.len()
     );
 
     // Validate part number
@@ -2877,7 +2987,10 @@ async fn upload_part_internal(
 
         debug!(
             "Replication mode for part {}: writing {} replicas x {} stripes (size={})",
-            part_number, total_replicas, num_stripes, body.len()
+            part_number,
+            total_replicas,
+            num_stripes,
+            body.len()
         );
 
         let mut all_stripes = Vec::with_capacity(num_stripes);
@@ -2919,8 +3032,8 @@ async fn upload_part_internal(
                         s_idx, // stripe_id
                         pos,
                         shard_data,
-                        1,  // ec_k=1 for replication
-                        0,  // ec_m=0 for replication
+                        1, // ec_k=1 for replication
+                        0, // ec_m=0 for replication
                     )
                     .await;
                     (pos, result, placement_node)
@@ -2946,16 +3059,25 @@ async fn upload_part_internal(
                         });
                     }
                     Err(e) => {
-                        warn!("Failed to write stripe {} replica {} for part: {}", stripe_idx, pos, e);
+                        warn!(
+                            "Failed to write stripe {} replica {} for part: {}",
+                            stripe_idx, pos, e
+                        );
                     }
                 }
             }
 
             if success < 1 {
-                error!("Replication failed for part stripe {}: no successful writes", stripe_idx);
+                error!(
+                    "Replication failed for part stripe {}: no successful writes",
+                    stripe_idx
+                );
                 return S3Error::xml_response(
                     "InternalError",
-                    &format!("Replication failed for stripe {}: no successful writes", stripe_idx),
+                    &format!(
+                        "Replication failed for stripe {}: no successful writes",
+                        stripe_idx
+                    ),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 );
             }
@@ -2973,7 +3095,7 @@ async fn upload_part_internal(
                 ec_global_parity: 0,
                 local_group_size: 0,
                 data_size: stripe_data_size,
-                object_id: part_object_id.to_vec(),  // Store object_id used for shards
+                object_id: part_object_id.to_vec(), // Store object_id used for shards
             });
         }
 
@@ -2990,7 +3112,12 @@ async fn upload_part_internal(
 
         debug!(
             "EC mode for part {}: {} stripes, {} shards/stripe (ec_k={}, ec_m={}), part_size={}",
-            part_number, num_stripes, total_shards_per_stripe, ec_k, ec_m, body.len()
+            part_number,
+            num_stripes,
+            total_shards_per_stripe,
+            ec_k,
+            ec_m,
+            body.len()
         );
 
         let codec = match ErasureCodec::new(ErasureConfig::new(ec_k as u8, ec_m as u8)) {
@@ -3082,7 +3209,10 @@ async fn upload_part_internal(
                         });
                     }
                     Err(e) => {
-                        warn!("Failed to write shard {} for part stripe {}: {}", pos, stripe_idx, e);
+                        warn!(
+                            "Failed to write shard {} for part stripe {}: {}",
+                            pos, stripe_idx, e
+                        );
                     }
                 }
             }
@@ -3117,7 +3247,7 @@ async fn upload_part_internal(
                 ec_global_parity: placement.ec_global_parity,
                 local_group_size: placement.local_group_size,
                 data_size: stripe_data_size,
-                object_id: part_object_id.to_vec(),  // Store object_id used for shards
+                object_id: part_object_id.to_vec(), // Store object_id used for shards
             });
         }
 
@@ -3126,7 +3256,10 @@ async fn upload_part_internal(
 
     debug!(
         "Part {} uploaded: {} stripes, {} shards written, mode={:?}",
-        part_number, all_stripes.len(), total_success, used_ec_type
+        part_number,
+        all_stripes.len(),
+        total_success,
+        used_ec_type
     );
 
     // Register the part with metadata service (using all stripes)
@@ -3138,7 +3271,7 @@ async fn upload_part_internal(
             part_number,
             etag: etag.clone(),
             size: part_size,
-            stripes: all_stripes,  // Multiple stripes for large parts
+            stripes: all_stripes, // Multiple stripes for large parts
         })
         .await
     {
@@ -3193,18 +3326,17 @@ async fn complete_multipart_upload_internal(
         }
     };
 
-    let complete_req: CompleteMultipartUploadXml =
-        match quick_xml::de::from_str(&xml_str) {
-            Ok(req) => req,
-            Err(e) => {
-                error!("Failed to parse CompleteMultipartUpload XML: {}", e);
-                return S3Error::xml_response(
-                    "MalformedXML",
-                    &format!("Failed to parse XML: {}", e),
-                    StatusCode::BAD_REQUEST,
-                );
-            }
-        };
+    let complete_req: CompleteMultipartUploadXml = match quick_xml::de::from_str(&xml_str) {
+        Ok(req) => req,
+        Err(e) => {
+            error!("Failed to parse CompleteMultipartUpload XML: {}", e);
+            return S3Error::xml_response(
+                "MalformedXML",
+                &format!("Failed to parse XML: {}", e),
+                StatusCode::BAD_REQUEST,
+            );
+        }
+    };
 
     let mut meta_client = state.meta_client.clone();
 
@@ -3342,13 +3474,7 @@ pub async fn get_object_with_params(
             continuation_token: None,
             policy: None,
         };
-        return list_objects(
-            State(state),
-            Path(bucket),
-            Query(list_params),
-            auth,
-        )
-        .await;
+        return list_objects(State(state), Path(bucket), Query(list_params), auth).await;
     }
 
     // If uploadId is present, this is a list parts request
@@ -3636,7 +3762,9 @@ fn admin_forbidden_response() -> Response {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(r#"{"error":"Admin access required. Only the 'admin' user can access this endpoint."}"#))
+        .body(Body::from(
+            r#"{"error":"Admin access required. Only the 'admin' user can access this endpoint."}"#,
+        ))
         .unwrap()
 }
 
@@ -3689,16 +3817,24 @@ pub async fn admin_list_users(
         Ok(response) => {
             let resp = response.into_inner();
             let result = AdminListUsersResponse {
-                users: resp.users.into_iter().map(|u| AdminUserResponse {
-                    user_id: u.user_id,
-                    display_name: u.display_name,
-                    arn: u.arn,
-                    status: format!("{:?}", u.status),
-                    created_at: u.created_at,
-                    email: u.email,
-                }).collect(),
+                users: resp
+                    .users
+                    .into_iter()
+                    .map(|u| AdminUserResponse {
+                        user_id: u.user_id,
+                        display_name: u.display_name,
+                        arn: u.arn,
+                        status: format!("{:?}", u.status),
+                        created_at: u.created_at,
+                        email: u.email,
+                    })
+                    .collect(),
                 is_truncated: resp.is_truncated,
-                next_marker: if resp.next_marker.is_empty() { None } else { Some(resp.next_marker) },
+                next_marker: if resp.next_marker.is_empty() {
+                    None
+                } else {
+                    Some(resp.next_marker)
+                },
             };
 
             Response::builder()
@@ -3846,13 +3982,17 @@ pub async fn admin_list_access_keys(
         Ok(response) => {
             let resp = response.into_inner();
             let result = AdminListAccessKeysResponse {
-                access_keys: resp.access_keys.into_iter().map(|k| AdminAccessKeyResponse {
-                    access_key_id: k.access_key_id,
-                    secret_access_key: None, // Don't return secret on list
-                    user_id: k.user_id,
-                    status: format!("{:?}", k.status),
-                    created_at: k.created_at,
-                }).collect(),
+                access_keys: resp
+                    .access_keys
+                    .into_iter()
+                    .map(|k| AdminAccessKeyResponse {
+                        access_key_id: k.access_key_id,
+                        secret_access_key: None, // Don't return secret on list
+                        user_id: k.user_id,
+                        status: format!("{:?}", k.status),
+                        created_at: k.created_at,
+                    })
+                    .collect(),
             };
 
             Response::builder()
@@ -3910,7 +4050,10 @@ pub async fn admin_create_access_key(
                 created_at: key.created_at,
             };
 
-            info!("Created access key {} for user {}", result.access_key_id, user_id);
+            info!(
+                "Created access key {} for user {}",
+                result.access_key_id, user_id
+            );
             Response::builder()
                 .status(StatusCode::CREATED)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -3980,4 +4123,3 @@ pub async fn admin_delete_access_key(
         }
     }
 }
-

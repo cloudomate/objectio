@@ -99,12 +99,16 @@ impl WriteCache {
     /// Create a new write cache
     pub fn new(chunk_mapper: Arc<ChunkMapper>, config: CacheConfig) -> Self {
         let journal = config.journal_path.as_ref().map(|path| {
-            Arc::new(WriteJournal::open(path, DEFAULT_MAX_JOURNAL_SIZE)
-                .expect("failed to open journal"))
+            Arc::new(
+                WriteJournal::open(path, DEFAULT_MAX_JOURNAL_SIZE).expect("failed to open journal"),
+            )
         });
 
         if journal.is_some() {
-            info!("Write cache initialized with journal at {:?}", config.journal_path);
+            info!(
+                "Write cache initialized with journal at {:?}",
+                config.journal_path
+            );
         } else {
             warn!("Write cache initialized WITHOUT journal - data may be lost on crash");
         }
@@ -174,7 +178,9 @@ impl WriteCache {
         }
 
         // Calculate affected chunks
-        let chunk_ranges = self.chunk_mapper.byte_range_to_chunks(offset, data.len() as u64);
+        let chunk_ranges = self
+            .chunk_mapper
+            .byte_range_to_chunks(offset, data.len() as u64);
         let chunk_size = self.chunk_mapper.chunk_size() as usize;
 
         let mut caches = self.caches.write();
@@ -373,12 +379,7 @@ impl WriteCache {
 
         for entry in entries {
             if let Some(data) = entry.data {
-                writes.push((
-                    entry.volume_id,
-                    entry.chunk_id,
-                    entry.offset,
-                    data,
-                ));
+                writes.push((entry.volume_id, entry.chunk_id, entry.offset, data));
             }
         }
 

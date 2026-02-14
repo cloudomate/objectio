@@ -464,7 +464,8 @@ mod tests {
 
     #[test]
     fn test_dirty_entries() {
-        let cache = BlockCache::with_policy(CacheCapacity::Entries(100), 4096, WritePolicy::WriteBack);
+        let cache =
+            BlockCache::with_policy(CacheCapacity::Entries(100), 4096, WritePolicy::WriteBack);
         let disk_id = test_disk_id();
 
         // Insert dirty entries

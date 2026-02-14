@@ -1,8 +1,8 @@
 //! Volume management for block storage
 
+use crate::DEFAULT_CHUNK_SIZE;
 use crate::chunk::{ChunkId, ChunkMapper};
 use crate::error::{BlockError, BlockResult};
-use crate::DEFAULT_CHUNK_SIZE;
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
@@ -219,10 +219,16 @@ impl VolumeManager {
         let volume_id = volume.volume_id.clone();
 
         // Store volume
-        self.volumes.write().insert(volume_id.clone(), volume.clone());
+        self.volumes
+            .write()
+            .insert(volume_id.clone(), volume.clone());
         self.volume_names.write().insert(name, volume_id.clone());
-        self.volume_chunks.write().insert(volume_id.clone(), HashMap::new());
-        self.volume_snapshots.write().insert(volume_id, HashSet::new());
+        self.volume_chunks
+            .write()
+            .insert(volume_id.clone(), HashMap::new());
+        self.volume_snapshots
+            .write()
+            .insert(volume_id, HashSet::new());
 
         Ok(volume)
     }
@@ -375,7 +381,9 @@ impl VolumeManager {
         let snapshot_id = snapshot.snapshot_id.clone();
 
         // Store snapshot
-        self.snapshots.write().insert(snapshot_id.clone(), snapshot.clone());
+        self.snapshots
+            .write()
+            .insert(snapshot_id.clone(), snapshot.clone());
         if let Some(snaps) = self.volume_snapshots.write().get_mut(volume_id) {
             snaps.insert(snapshot_id);
         }
@@ -456,10 +464,16 @@ impl VolumeManager {
         let volume_id = volume.volume_id.clone();
 
         // Store volume with snapshot's chunk refs
-        self.volumes.write().insert(volume_id.clone(), volume.clone());
+        self.volumes
+            .write()
+            .insert(volume_id.clone(), volume.clone());
         self.volume_names.write().insert(name, volume_id.clone());
-        self.volume_chunks.write().insert(volume_id.clone(), snapshot.chunk_refs.clone());
-        self.volume_snapshots.write().insert(volume_id, HashSet::new());
+        self.volume_chunks
+            .write()
+            .insert(volume_id.clone(), snapshot.chunk_refs.clone());
+        self.volume_snapshots
+            .write()
+            .insert(volume_id, HashSet::new());
 
         Ok(volume)
     }
@@ -479,7 +493,11 @@ mod tests {
     fn test_create_volume() {
         let manager = VolumeManager::new();
         let volume = manager
-            .create_volume("test-vol".to_string(), 100 * 1024 * 1024 * 1024, "default".to_string())
+            .create_volume(
+                "test-vol".to_string(),
+                100 * 1024 * 1024 * 1024,
+                "default".to_string(),
+            )
             .unwrap();
 
         assert_eq!(volume.name, "test-vol");
@@ -494,7 +512,8 @@ mod tests {
             .create_volume("test-vol".to_string(), 1024 * 1024, "default".to_string())
             .unwrap();
 
-        let result = manager.create_volume("test-vol".to_string(), 1024 * 1024, "default".to_string());
+        let result =
+            manager.create_volume("test-vol".to_string(), 1024 * 1024, "default".to_string());
         assert!(matches!(result, Err(BlockError::VolumeExists(_))));
     }
 
@@ -505,7 +524,9 @@ mod tests {
             .create_volume("test-vol".to_string(), 1024 * 1024, "default".to_string())
             .unwrap();
 
-        let resized = manager.resize_volume(&volume.volume_id, 2 * 1024 * 1024).unwrap();
+        let resized = manager
+            .resize_volume(&volume.volume_id, 2 * 1024 * 1024)
+            .unwrap();
         assert_eq!(resized.size_bytes, 2 * 1024 * 1024);
     }
 
@@ -513,7 +534,11 @@ mod tests {
     fn test_cannot_shrink_volume() {
         let manager = VolumeManager::new();
         let volume = manager
-            .create_volume("test-vol".to_string(), 2 * 1024 * 1024, "default".to_string())
+            .create_volume(
+                "test-vol".to_string(),
+                2 * 1024 * 1024,
+                "default".to_string(),
+            )
             .unwrap();
 
         let result = manager.resize_volume(&volume.volume_id, 1024 * 1024);

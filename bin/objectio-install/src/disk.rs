@@ -1,6 +1,6 @@
 //! Disk detection and preparation
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -170,7 +170,10 @@ pub fn prepare_disk(path: &str, force: bool, block_size: Option<u32>) -> Result<
     // Check if already an ObjectIO disk
     let status = check_disk(path)?;
     if status.contains("ObjectIO disk") && !force {
-        bail!("Disk {} is already initialized as ObjectIO disk. Use --force to reinitialize.", path);
+        bail!(
+            "Disk {} is already initialized as ObjectIO disk. Use --force to reinitialize.",
+            path
+        );
     }
 
     // Check if disk is mounted
@@ -211,7 +214,10 @@ pub fn prepare_disk(path: &str, force: bool, block_size: Option<u32>) -> Result<
     } else {
         "default (64 KB)".to_string()
     };
-    info!("Disk initialized successfully: {} (ID: {}, block_size: {})", path, disk_id, block_size_str);
+    info!(
+        "Disk initialized successfully: {} (ID: {}, block_size: {})",
+        path, disk_id, block_size_str
+    );
 
     Ok(disk_id)
 }

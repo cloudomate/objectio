@@ -42,9 +42,9 @@ impl RawFile {
             options.custom_flags(libc::O_DIRECT);
         }
 
-        let file = options.open(&path).map_err(|e| {
-            Error::Storage(format!("failed to open {}: {}", path_str, e))
-        })?;
+        let file = options
+            .open(&path)
+            .map_err(|e| Error::Storage(format!("failed to open {}: {}", path_str, e)))?;
 
         // On macOS, use F_NOCACHE after opening
         #[cfg(target_os = "macos")]
@@ -66,9 +66,11 @@ impl RawFile {
         let size = if is_block_device {
             Self::get_block_device_size(&file, &path_str)?
         } else {
-            file.metadata().map_err(|e| {
-                Error::Storage(format!("failed to get metadata for {}: {}", path_str, e))
-            })?.len()
+            file.metadata()
+                .map_err(|e| {
+                    Error::Storage(format!("failed to get metadata for {}: {}", path_str, e))
+                })?
+                .len()
         };
 
         Ok(Self {
@@ -103,9 +105,9 @@ impl RawFile {
             options.custom_flags(libc::O_DIRECT);
         }
 
-        let file = options.open(&path).map_err(|e| {
-            Error::Storage(format!("failed to create {}: {}", path_str, e))
-        })?;
+        let file = options
+            .open(&path)
+            .map_err(|e| Error::Storage(format!("failed to create {}: {}", path_str, e)))?;
 
         let actual_size = if is_block_device {
             // Get block device size
@@ -167,9 +169,7 @@ impl RawFile {
         const BLKGETSIZE64: libc::c_ulong = 0x80081272;
 
         let mut size: u64 = 0;
-        let ret = unsafe {
-            libc::ioctl(file.as_raw_fd(), BLKGETSIZE64, &mut size)
-        };
+        let ret = unsafe { libc::ioctl(file.as_raw_fd(), BLKGETSIZE64, &mut size) };
 
         if ret == -1 {
             return Err(Error::Storage(format!(
@@ -191,9 +191,8 @@ impl RawFile {
         let size = f.seek(SeekFrom::End(0)).map_err(|e| {
             Error::Storage(format!("failed to get device size for {}: {}", path, e))
         })?;
-        f.seek(SeekFrom::Start(0)).map_err(|e| {
-            Error::Storage(format!("failed to seek to start for {}: {}", path, e))
-        })?;
+        f.seek(SeekFrom::Start(0))
+            .map_err(|e| Error::Storage(format!("failed to seek to start for {}: {}", path, e)))?;
         Ok(size)
     }
 
@@ -214,13 +213,11 @@ impl RawFile {
         self.check_alignment(offset, buf.len())?;
 
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            Error::Storage(format!("seek failed on {}: {}", self.path, e))
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| Error::Storage(format!("seek failed on {}: {}", self.path, e)))?;
 
-        file.read(buf).map_err(|e| {
-            Error::Storage(format!("read failed on {}: {}", self.path, e))
-        })
+        file.read(buf)
+            .map_err(|e| Error::Storage(format!("read failed on {}: {}", self.path, e)))
     }
 
     /// Write data at the given offset
@@ -234,27 +231,25 @@ impl RawFile {
         self.check_alignment(offset, buf.len())?;
 
         let mut file = &self.file;
-        file.seek(SeekFrom::Start(offset)).map_err(|e| {
-            Error::Storage(format!("seek failed on {}: {}", self.path, e))
-        })?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| Error::Storage(format!("seek failed on {}: {}", self.path, e)))?;
 
-        file.write(buf).map_err(|e| {
-            Error::Storage(format!("write failed on {}: {}", self.path, e))
-        })
+        file.write(buf)
+            .map_err(|e| Error::Storage(format!("write failed on {}: {}", self.path, e)))
     }
 
     /// Sync data to disk
     pub fn sync(&self) -> Result<()> {
-        self.file.sync_all().map_err(|e| {
-            Error::Storage(format!("sync failed on {}: {}", self.path, e))
-        })
+        self.file
+            .sync_all()
+            .map_err(|e| Error::Storage(format!("sync failed on {}: {}", self.path, e)))
     }
 
     /// Sync data only (not metadata) to disk
     pub fn sync_data(&self) -> Result<()> {
-        self.file.sync_data().map_err(|e| {
-            Error::Storage(format!("sync_data failed on {}: {}", self.path, e))
-        })
+        self.file
+            .sync_data()
+            .map_err(|e| Error::Storage(format!("sync_data failed on {}: {}", self.path, e)))
     }
 
     /// Check alignment requirements
@@ -296,7 +291,7 @@ impl AlignedBuffer {
     /// Create a new aligned buffer with custom alignment
     #[cfg(target_os = "linux")]
     pub fn with_alignment(size: usize, alignment: usize) -> Self {
-        use std::alloc::{alloc_zeroed, Layout};
+        use std::alloc::{Layout, alloc_zeroed};
 
         // Round up size to alignment
         let aligned_size = (size + alignment - 1) / alignment * alignment;
@@ -369,7 +364,7 @@ impl Default for AlignedBuffer {
 #[cfg(target_os = "linux")]
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
-        use std::alloc::{dealloc, Layout};
+        use std::alloc::{Layout, dealloc};
 
         if !self.data.is_empty() {
             let layout = Layout::from_size_align(self.data.capacity(), self.alignment)
