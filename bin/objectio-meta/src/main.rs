@@ -15,11 +15,13 @@ use axum::{
 };
 use block_service::BlockMetaService;
 use clap::Parser;
+use objectio_meta_store::{MetaStore, OsdNode};
 use objectio_proto::block::block_service_server::BlockServiceServer;
 use objectio_proto::metadata::metadata_service_server::MetadataServiceServer;
-use service::{MetaService, OsdNode};
+use service::MetaService;
 use std::fmt::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
@@ -66,6 +68,10 @@ struct Args {
     #[arg(long)]
     replication: Option<u8>,
 
+    /// Data directory for persistent metadata (redb)
+    #[arg(long, default_value = "/var/lib/objectio/meta")]
+    data_dir: PathBuf,
+
     /// Admin user name (creates default admin on startup if no users exist)
     #[arg(long, default_value = "admin")]
     admin_user: String,
@@ -99,7 +105,7 @@ async fn main() -> Result<()> {
     // Replication mode takes precedence over EC settings
     let ec_config = if let Some(replication_count) = args.replication {
         info!("Storage mode: Replication (count={})", replication_count);
-        service::EcConfig::Replication {
+        objectio_meta_store::EcConfig::Replication {
             count: replication_count,
         }
     } else {
@@ -107,12 +113,25 @@ async fn main() -> Result<()> {
             "Storage mode: Erasure coding (k={}, m={})",
             args.ec_k, args.ec_m
         );
-        service::EcConfig::Mds {
+        objectio_meta_store::EcConfig::Mds {
             k: args.ec_k,
             m: args.ec_m,
         }
     };
-    let meta_service = MetaService::with_ec_config(ec_config);
+
+    // Open persistent store
+    let store_path = args.data_dir.join("meta.redb");
+    info!("Opening metadata store at {}", store_path.display());
+    let store = Arc::new(MetaStore::open(&store_path).unwrap_or_else(|e| {
+        panic!(
+            "Failed to open metadata store at {}: {}",
+            store_path.display(),
+            e
+        )
+    }));
+    info!("Metadata store opened successfully");
+
+    let meta_service = MetaService::with_store(ec_config, store.clone());
 
     // Ensure admin user exists (creates on first startup, returns existing on restarts)
     if let Some((access_key_id, secret_access_key)) = meta_service.ensure_admin(&args.admin_user) {
@@ -125,17 +144,24 @@ async fn main() -> Result<()> {
         info!("Admin user '{}' already exists", args.admin_user);
     }
 
-    // Register OSD nodes
-    for osd_addr in &args.osd {
-        // In a real implementation, we would connect to the OSD and get its info
-        // For now, create a placeholder with generated IDs
-        let node = OsdNode {
-            node_id: *uuid::Uuid::new_v4().as_bytes(),
-            address: osd_addr.clone(),
-            disk_ids: vec![*uuid::Uuid::new_v4().as_bytes()],
-            failure_domain: None,
-        };
-        meta_service.register_osd(node);
+    // Register OSD nodes from CLI args (skip if store already has nodes)
+    if !args.osd.is_empty() && !meta_service.has_persisted_osds() {
+        for osd_addr in &args.osd {
+            // In a real implementation, we would connect to the OSD and get its info
+            // For now, create a placeholder with generated IDs
+            let node = OsdNode {
+                node_id: *uuid::Uuid::new_v4().as_bytes(),
+                address: osd_addr.clone(),
+                disk_ids: vec![*uuid::Uuid::new_v4().as_bytes()],
+                failure_domain: None,
+            };
+            meta_service.register_osd(node);
+        }
+    } else if meta_service.has_persisted_osds() && !args.osd.is_empty() {
+        info!(
+            "Skipping --osd registration: {} OSD nodes already loaded from store",
+            meta_service.stats().osd_count
+        );
     }
 
     // Parse listen address
@@ -144,8 +170,8 @@ async fn main() -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e))?;
 
-    // Initialize block metadata service
-    let block_service = BlockMetaService::new();
+    // Initialize block metadata service with persistent store
+    let block_service = BlockMetaService::with_store(store);
     info!("Block storage service initialized");
 
     // Wrap services in Arc for sharing

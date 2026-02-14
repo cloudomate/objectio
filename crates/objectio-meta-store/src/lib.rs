@@ -1,13 +1,12 @@
-//! ObjectIO Metadata Store - Raft-based metadata service
-//!
-//! This crate implements the distributed metadata store using Raft consensus.
+//! ObjectIO Metadata Store — persistent metadata backed by redb.
 
-pub mod bucket;
-pub mod object;
 pub mod raft;
 pub mod store;
+pub mod tables;
+pub mod types;
 
-// Re-exports
-pub use bucket::BucketStore;
-pub use object::ObjectStore;
-pub use store::MetaStore;
+pub use store::{MetaStore, MetaStoreError, MetaStoreResult};
+pub use types::{
+    EcConfig, MultipartUploadState, OsdNode, PartState, StoredAccessKey, StoredAttachment,
+    StoredChunkRef, StoredSnapshot, StoredUser, StoredVolume,
+};

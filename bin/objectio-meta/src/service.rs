@@ -1,6 +1,9 @@
 //! Metadata gRPC service implementation
 
 use objectio_common::{NodeId, NodeStatus};
+use objectio_meta_store::{
+    EcConfig, MetaStore, MultipartUploadState, OsdNode, PartState, StoredAccessKey, StoredUser,
+};
 use objectio_placement::{
     Crush2, PlacementTemplate, ShardRole,
     topology::{ClusterTopology, DiskInfo, FailureDomainInfo, NodeInfo},
@@ -73,7 +76,6 @@ use objectio_proto::metadata::{
     SetBucketPolicyRequest,
     SetBucketPolicyResponse,
     ShardType,
-    StripeMeta,
     UserMeta,
     UserStatus,
     VersioningState,
@@ -81,82 +83,10 @@ use objectio_proto::metadata::{
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-
-/// OSD node information for placement (legacy, kept for compatibility)
-#[derive(Clone, Debug)]
-pub struct OsdNode {
-    pub node_id: [u8; 16],
-    pub address: String,
-    pub disk_ids: Vec<[u8; 16]>,
-    /// Failure domain (region/datacenter/rack)
-    pub failure_domain: Option<(String, String, String)>,
-}
-
-/// EC configuration for a storage class
-#[derive(Clone, Debug)]
-pub enum EcConfig {
-    /// MDS (Maximum Distance Separable) Reed-Solomon
-    Mds { k: u8, m: u8 },
-    /// LRC (Locally Repairable Codes)
-    #[allow(dead_code)]
-    Lrc { k: u8, l: u8, g: u8 },
-    /// Simple replication (no erasure coding)
-    /// count=1: single disk, no redundancy
-    /// count=3: 3-way replication
-    Replication { count: u8 },
-}
-
-impl Default for EcConfig {
-    fn default() -> Self {
-        EcConfig::Mds { k: 4, m: 2 }
-    }
-}
-
-/// State for an in-progress multipart upload
-#[derive(Clone, Debug)]
-pub struct MultipartUploadState {
-    pub bucket: String,
-    pub key: String,
-    pub upload_id: String,
-    pub content_type: String,
-    pub user_metadata: HashMap<String, String>,
-    pub initiated: u64,
-    pub parts: HashMap<u32, PartState>,
-}
-
-/// State for a completed part within a multipart upload
-#[derive(Clone, Debug)]
-pub struct PartState {
-    pub part_number: u32,
-    pub etag: String,
-    pub size: u64,
-    pub last_modified: u64,
-    pub stripes: Vec<StripeMeta>, // Multiple stripes for large parts
-}
-
-/// Internal user storage
-#[derive(Clone, Debug)]
-pub struct StoredUser {
-    pub user_id: String,
-    pub display_name: String,
-    pub arn: String,
-    pub status: i32, // UserStatus enum value
-    pub created_at: u64,
-    pub email: String,
-}
-
-/// Internal access key storage
-#[derive(Clone, Debug)]
-pub struct StoredAccessKey {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub user_id: String,
-    pub status: i32, // KeyStatus enum value
-    pub created_at: u64,
-}
 
 /// Metadata service state
 ///
@@ -187,6 +117,8 @@ pub struct MetaService {
     access_keys: RwLock<HashMap<String, StoredAccessKey>>,
     /// IAM: Map from user_id to their access_key_ids
     user_keys: RwLock<HashMap<String, Vec<String>>>,
+    /// Persistent store (None = in-memory only)
+    store: Option<Arc<MetaStore>>,
 }
 
 /// Statistics for the metadata service
@@ -248,6 +180,126 @@ impl MetaService {
             users: RwLock::new(HashMap::new()),
             access_keys: RwLock::new(HashMap::new()),
             user_keys: RwLock::new(HashMap::new()),
+            store: None,
+        }
+    }
+
+    /// Create a metadata service backed by persistent storage.
+    /// Loads all existing data from the store on startup.
+    pub fn with_store(ec_config: EcConfig, store: Arc<MetaStore>) -> Self {
+        let mut svc = Self::with_ec_config(ec_config);
+        svc.store = Some(store);
+        svc.load_from_store();
+        svc
+    }
+
+    /// Returns true if the store already has OSD nodes persisted.
+    pub fn has_persisted_osds(&self) -> bool {
+        !self.osd_nodes.read().is_empty()
+    }
+
+    /// Load all data from the persistent store into in-memory maps.
+    fn load_from_store(&self) {
+        let Some(store) = &self.store else { return };
+
+        // Buckets
+        match store.load_buckets() {
+            Ok(buckets) => {
+                let mut map = self.buckets.write();
+                for (name, bucket) in buckets {
+                    map.insert(name, bucket);
+                }
+                info!("Loaded {} buckets from store", map.len());
+            }
+            Err(e) => error!("Failed to load buckets: {}", e),
+        }
+
+        // Bucket policies
+        match store.load_bucket_policies() {
+            Ok(policies) => {
+                let mut map = self.bucket_policies.write();
+                for (name, policy) in policies {
+                    map.insert(name, policy);
+                }
+                info!("Loaded {} bucket policies from store", map.len());
+            }
+            Err(e) => error!("Failed to load bucket policies: {}", e),
+        }
+
+        // Multipart uploads
+        match store.load_multipart_uploads() {
+            Ok(uploads) => {
+                let mut map = self.multipart_uploads.write();
+                for (id, state) in uploads {
+                    map.insert(id, state);
+                }
+                info!("Loaded {} multipart uploads from store", map.len());
+            }
+            Err(e) => error!("Failed to load multipart uploads: {}", e),
+        }
+
+        // OSD nodes + topology rebuild
+        match store.load_osd_nodes() {
+            Ok(nodes) => {
+                let count = nodes.len();
+                let mut osd_nodes = self.osd_nodes.write();
+                for (_hex_id, node) in nodes {
+                    osd_nodes.push(node);
+                }
+                info!("Loaded {} OSD nodes from store", count);
+            }
+            Err(e) => error!("Failed to load OSD nodes: {}", e),
+        }
+
+        // Topology
+        match store.load_topology() {
+            Ok(Some(topology)) => {
+                info!(
+                    "Loaded cluster topology from store (version={})",
+                    topology.version
+                );
+                *self.topology.write() = topology.clone();
+                self.crush.write().update_topology(topology);
+            }
+            Ok(None) => {
+                // Rebuild topology from OSD nodes if no stored topology
+                let nodes = self.osd_nodes.read().clone();
+                for node in &nodes {
+                    self.update_topology_with_node(node);
+                }
+            }
+            Err(e) => error!("Failed to load topology: {}", e),
+        }
+
+        // Users
+        match store.load_users() {
+            Ok(users) => {
+                let mut user_map = self.users.write();
+                let mut user_keys = self.user_keys.write();
+                for (id, user) in users {
+                    user_keys.entry(id.clone()).or_default();
+                    user_map.insert(id, user);
+                }
+                info!("Loaded {} users from store", user_map.len());
+            }
+            Err(e) => error!("Failed to load users: {}", e),
+        }
+
+        // Access keys (rebuild user_keys index)
+        match store.load_access_keys() {
+            Ok(keys) => {
+                let mut key_map = self.access_keys.write();
+                let mut user_keys = self.user_keys.write();
+                for (id, key) in keys {
+                    user_keys
+                        .entry(key.user_id.clone())
+                        .or_default()
+                        .push(id.clone());
+                    key_map.insert(id, key);
+                }
+                info!("Loaded {} access keys from store", key_map.len());
+            }
+            Err(e) => error!("Failed to load access keys: {}", e),
         }
     }
 
@@ -288,7 +340,7 @@ impl MetaService {
             email: String::new(),
         };
 
-        self.users.write().insert(user_id.clone(), user);
+        self.users.write().insert(user_id.clone(), user.clone());
         self.user_keys.write().insert(user_id.clone(), Vec::new());
 
         // Create access key
@@ -303,12 +355,19 @@ impl MetaService {
             created_at: now,
         };
 
-        self.access_keys.write().insert(access_key_id.clone(), key);
+        self.access_keys
+            .write()
+            .insert(access_key_id.clone(), key.clone());
         self.user_keys
             .write()
             .entry(user_id)
             .or_default()
             .push(access_key_id.clone());
+
+        // Persist admin user + key atomically
+        if let Some(store) = &self.store {
+            store.put_user_and_key(&user, &key);
+        }
 
         info!(
             "Created admin user '{}' with access key {}",
@@ -352,6 +411,12 @@ impl MetaService {
 
         // Also update the CRUSH topology
         self.update_topology_with_node(&node);
+
+        // Persist OSD + topology atomically
+        if let Some(store) = &self.store {
+            let topology = self.topology.read().clone();
+            store.put_osd_and_topology(&hex::encode(node.node_id), &node, &topology);
+        }
     }
 
     /// Update CRUSH topology with a new OSD node
@@ -598,6 +663,10 @@ impl MetadataService for MetaService {
             .write()
             .insert(req.name.clone(), bucket.clone());
 
+        if let Some(store) = &self.store {
+            store.put_bucket(&req.name, &bucket);
+        }
+
         info!("Created bucket: {}", req.name);
 
         Ok(Response::new(CreateBucketResponse {
@@ -621,6 +690,10 @@ impl MetadataService for MetaService {
         // on OSDs, so we can't check emptiness from the meta service.
 
         self.buckets.write().remove(&req.name);
+
+        if let Some(store) = &self.store {
+            store.delete_bucket(&req.name);
+        }
 
         info!("Deleted bucket: {}", req.name);
 
@@ -882,7 +955,11 @@ impl MetadataService for MetaService {
         };
         self.multipart_uploads
             .write()
-            .insert(upload_id.clone(), state);
+            .insert(upload_id.clone(), state.clone());
+
+        if let Some(store) = &self.store {
+            store.put_multipart_upload(&upload_id, &state);
+        }
 
         info!(
             "Created multipart upload: bucket={}, key={}, upload_id={}",
@@ -933,6 +1010,11 @@ impl MetadataService for MetaService {
             stripes: req.stripes, // Multiple stripes for large parts
         };
         upload.parts.insert(req.part_number, part_state);
+
+        // Persist entire upload state (includes new part)
+        if let Some(store) = &self.store {
+            store.put_multipart_upload(&req.upload_id, upload);
+        }
 
         debug!(
             "Registered part {} for upload {}: size={}, etag={}",
@@ -1086,6 +1168,10 @@ impl MetadataService for MetaService {
         // Remove the completed upload from state
         self.multipart_uploads.write().remove(&req.upload_id);
 
+        if let Some(store) = &self.store {
+            store.delete_multipart_upload(&req.upload_id);
+        }
+
         info!(
             "Completed multipart upload: bucket={}, key={}, upload_id={}, size={}, parts={}",
             req.bucket,
@@ -1110,6 +1196,9 @@ impl MetadataService for MetaService {
         let removed = self.multipart_uploads.write().remove(&req.upload_id);
 
         if removed.is_some() {
+            if let Some(store) = &self.store {
+                store.delete_multipart_upload(&req.upload_id);
+            }
             info!(
                 "Aborted multipart upload: bucket={}, key={}, upload_id={}",
                 req.bucket, req.key, req.upload_id
@@ -1211,7 +1300,11 @@ impl MetadataService for MetaService {
 
         self.bucket_policies
             .write()
-            .insert(req.bucket.clone(), req.policy_json);
+            .insert(req.bucket.clone(), req.policy_json.clone());
+
+        if let Some(store) = &self.store {
+            store.put_bucket_policy(&req.bucket, &req.policy_json);
+        }
 
         info!("Set bucket policy for: {}", req.bucket);
 
@@ -1253,6 +1346,10 @@ impl MetadataService for MetaService {
         }
 
         self.bucket_policies.write().remove(&req.bucket);
+
+        if let Some(store) = &self.store {
+            store.delete_bucket_policy(&req.bucket);
+        }
 
         info!("Deleted bucket policy for: {}", req.bucket);
 
@@ -1297,7 +1394,7 @@ impl MetadataService for MetaService {
         let mut nodes = self.osd_nodes.write();
         if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
             existing.address = node.address.clone();
-            existing.disk_ids = node.disk_ids;
+            existing.disk_ids = node.disk_ids.clone();
             info!(
                 "Updated OSD registration: {} at {}",
                 hex::encode(node_id),
@@ -1310,7 +1407,14 @@ impl MetadataService for MetaService {
                 req.address,
                 num_disks
             );
-            nodes.push(node);
+            nodes.push(node.clone());
+        }
+        drop(nodes);
+
+        // Persist OSD + topology
+        if let Some(store) = &self.store {
+            let topology = self.topology.read().clone();
+            store.put_osd_and_topology(&hex::encode(node_id), &node, &topology);
         }
 
         // Get current topology version
@@ -1402,6 +1506,10 @@ impl MetadataService for MetaService {
 
         self.users.write().insert(user_id.clone(), user.clone());
         self.user_keys.write().insert(user_id.clone(), Vec::new());
+
+        if let Some(store) = &self.store {
+            store.put_user(&user_id, &user);
+        }
 
         info!("Created user: {}", req.display_name);
 
@@ -1497,6 +1605,7 @@ impl MetadataService for MetaService {
             .get_mut(&req.user_id)
             .ok_or_else(|| Status::not_found("user not found"))?;
         user.status = UserStatus::UserDeleted as i32;
+        let user_snapshot = user.clone();
 
         // Deactivate all user's keys
         let key_ids: Vec<String> = self
@@ -1507,9 +1616,19 @@ impl MetadataService for MetaService {
             .unwrap_or_default();
 
         let mut keys = self.access_keys.write();
-        for key_id in key_ids {
-            if let Some(key) = keys.get_mut(&key_id) {
+        for key_id in &key_ids {
+            if let Some(key) = keys.get_mut(key_id) {
                 key.status = KeyStatus::KeyInactive as i32;
+            }
+        }
+
+        // Persist updated user and deactivated keys
+        if let Some(store) = &self.store {
+            store.put_user(&req.user_id, &user_snapshot);
+            for key_id in &key_ids {
+                if let Some(key) = keys.get(key_id) {
+                    store.put_access_key(key_id, key);
+                }
             }
         }
 
@@ -1556,6 +1675,10 @@ impl MetadataService for MetaService {
             .entry(req.user_id.clone())
             .or_default()
             .push(access_key_id.clone());
+
+        if let Some(store) = &self.store {
+            store.put_access_key(&access_key_id, &key);
+        }
 
         info!(
             "Created access key {} for user {}",
@@ -1614,6 +1737,11 @@ impl MetadataService for MetaService {
             if let Some(keys) = self.user_keys.write().get_mut(&key.user_id) {
                 keys.retain(|id| id != &req.access_key_id);
             }
+
+            if let Some(store) = &self.store {
+                store.delete_access_key(&req.access_key_id);
+            }
+
             info!("Deleted access key: {}", req.access_key_id);
             Ok(Response::new(DeleteAccessKeyResponse { success: true }))
         } else {

@@ -2,6 +2,9 @@
 //!
 //! Provides volume and snapshot management for block storage.
 
+use objectio_meta_store::{
+    MetaStore, StoredAttachment, StoredChunkRef, StoredSnapshot, StoredVolume,
+};
 use objectio_proto::block::{
     // Attachment operations
     AttachVolumeRequest,
@@ -65,65 +68,13 @@ use objectio_proto::block::{
 };
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Default chunk size: 4MB
 const DEFAULT_CHUNK_SIZE: u32 = 4 * 1024 * 1024;
-
-/// Stored volume metadata
-#[derive(Clone, Debug)]
-pub struct StoredVolume {
-    pub volume_id: String,
-    pub name: String,
-    pub size_bytes: u64,
-    pub used_bytes: u64,
-    pub pool: String,
-    pub state: i32,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub parent_snapshot_id: String,
-    pub chunk_size_bytes: u32,
-    pub metadata: HashMap<String, String>,
-    pub qos: Option<VolumeQos>,
-}
-
-/// Stored snapshot metadata
-#[derive(Clone, Debug)]
-pub struct StoredSnapshot {
-    pub snapshot_id: String,
-    pub volume_id: String,
-    pub name: String,
-    pub size_bytes: u64,
-    pub unique_bytes: u64,
-    pub state: i32,
-    pub created_at: u64,
-    pub metadata: HashMap<String, String>,
-    /// Chunk references at snapshot time
-    pub chunk_refs: HashMap<u64, StoredChunkRef>,
-}
-
-/// Stored chunk reference
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-pub struct StoredChunkRef {
-    pub chunk_id: u64,
-    pub object_key: String,
-    pub etag: String,
-    pub size_bytes: u64,
-}
-
-/// Stored attachment information
-#[derive(Clone, Debug)]
-pub struct StoredAttachment {
-    pub volume_id: String,
-    pub target_type: i32,
-    pub target_address: String,
-    pub initiator: String,
-    pub attached_at: u64,
-    pub read_only: bool,
-}
 
 /// Block metadata service state
 pub struct BlockMetaService {
@@ -139,6 +90,8 @@ pub struct BlockMetaService {
     volume_chunks: RwLock<HashMap<String, HashMap<u64, StoredChunkRef>>>,
     /// Volume attachments
     attachments: RwLock<HashMap<String, StoredAttachment>>,
+    /// Persistent store (None = in-memory only)
+    store: Option<Arc<MetaStore>>,
 }
 
 /// Per-volume statistics for metrics export
@@ -186,6 +139,68 @@ impl BlockMetaService {
             volume_snapshots: RwLock::new(HashMap::new()),
             volume_chunks: RwLock::new(HashMap::new()),
             attachments: RwLock::new(HashMap::new()),
+            store: None,
+        }
+    }
+
+    /// Create a block metadata service backed by persistent storage.
+    pub fn with_store(store: Arc<MetaStore>) -> Self {
+        let mut svc = Self::new();
+        svc.store = Some(store);
+        svc.load_from_store();
+        svc
+    }
+
+    /// Load all block data from persistent store into in-memory maps.
+    fn load_from_store(&self) {
+        let Some(store) = &self.store else { return };
+
+        // Volumes (rebuild volume_names index)
+        match store.load_volumes() {
+            Ok(volumes) => {
+                let mut vol_map = self.volumes.write();
+                let mut name_map = self.volume_names.write();
+                let mut snap_map = self.volume_snapshots.write();
+                let mut chunk_map = self.volume_chunks.write();
+                for (id, vol) in volumes {
+                    name_map.insert(vol.name.clone(), id.clone());
+                    snap_map.entry(id.clone()).or_default();
+                    chunk_map.entry(id.clone()).or_default();
+                    vol_map.insert(id, vol);
+                }
+                info!("Loaded {} volumes from store", vol_map.len());
+            }
+            Err(e) => error!("Failed to load volumes: {}", e),
+        }
+
+        // Snapshots (rebuild volume_snapshots index)
+        match store.load_snapshots() {
+            Ok(snapshots) => {
+                let mut snap_map = self.snapshots.write();
+                let mut vol_snap_map = self.volume_snapshots.write();
+                for (id, snap) in snapshots {
+                    vol_snap_map
+                        .entry(snap.volume_id.clone())
+                        .or_default()
+                        .insert(id.clone());
+                    snap_map.insert(id, snap);
+                }
+                info!("Loaded {} snapshots from store", snap_map.len());
+            }
+            Err(e) => error!("Failed to load snapshots: {}", e),
+        }
+
+        // Chunks (rebuild volume_chunks)
+        match store.load_volume_chunks() {
+            Ok(chunks) => {
+                let mut chunk_map = self.volume_chunks.write();
+                let count = chunks.len();
+                for (vol_id, chunk_id, chunk) in chunks {
+                    chunk_map.entry(vol_id).or_default().insert(chunk_id, chunk);
+                }
+                info!("Loaded {} volume chunks from store", count);
+            }
+            Err(e) => error!("Failed to load volume chunks: {}", e),
         }
     }
 
@@ -332,6 +347,14 @@ impl BlockMetaService {
             if is_new && let Some(vol) = self.volumes.write().get_mut(volume_id) {
                 vol.used_bytes += chunk_ref.size_bytes;
                 vol.updated_at = Self::current_timestamp();
+
+                if let Some(store) = &self.store {
+                    store.put_volume(volume_id, vol);
+                }
+            }
+
+            if let Some(store) = &self.store {
+                store.put_chunk(volume_id, chunk_id, &chunk_ref);
             }
         }
     }
@@ -406,6 +429,10 @@ impl BlockService for BlockMetaService {
             .write()
             .insert(volume_id.clone(), HashSet::new());
 
+        if let Some(store) = &self.store {
+            store.put_volume(&volume_id, &volume);
+        }
+
         info!("Created volume: {} ({})", req.name, volume_id);
 
         Ok(Response::new(CreateVolumeResponse {
@@ -449,6 +476,10 @@ impl BlockService for BlockMetaService {
         self.volume_chunks.write().remove(&req.volume_id);
         self.volume_snapshots.write().remove(&req.volume_id);
         self.attachments.write().remove(&req.volume_id);
+
+        if let Some(store) = &self.store {
+            store.delete_volume_all(&req.volume_id);
+        }
 
         info!("Deleted volume: {} ({})", volume.name, req.volume_id);
 
@@ -534,6 +565,10 @@ impl BlockService for BlockMetaService {
         volume.size_bytes = req.new_size_bytes;
         volume.updated_at = Self::current_timestamp();
 
+        if let Some(store) = &self.store {
+            store.put_volume(&req.volume_id, volume);
+        }
+
         info!(
             "Resized volume {} to {} bytes",
             req.volume_id, req.new_size_bytes
@@ -587,6 +622,10 @@ impl BlockService for BlockMetaService {
             snaps.insert(snapshot_id.clone());
         }
 
+        if let Some(store) = &self.store {
+            store.put_snapshot(&snapshot_id, &snapshot);
+        }
+
         info!("Created snapshot {} for volume {}", req.name, req.volume_id);
 
         Ok(Response::new(CreateSnapshotResponse {
@@ -609,6 +648,10 @@ impl BlockService for BlockMetaService {
         // Remove from volume's snapshot list
         if let Some(snaps) = self.volume_snapshots.write().get_mut(&snapshot.volume_id) {
             snaps.remove(&req.snapshot_id);
+        }
+
+        if let Some(store) = &self.store {
+            store.delete_snapshot(&req.snapshot_id);
         }
 
         info!("Deleted snapshot {}", req.snapshot_id);
@@ -740,6 +783,10 @@ impl BlockService for BlockMetaService {
             .write()
             .insert(volume_id.clone(), HashSet::new());
 
+        if let Some(store) = &self.store {
+            store.put_volume(&volume_id, &volume);
+        }
+
         info!(
             "Cloned volume {} from snapshot {}",
             req.name, req.snapshot_id
@@ -804,6 +851,12 @@ impl BlockService for BlockMetaService {
             .write()
             .insert(req.volume_id.clone(), attachment.clone());
 
+        if let Some(store) = &self.store
+            && let Some(vol) = self.volumes.read().get(&req.volume_id)
+        {
+            store.put_volume(&req.volume_id, vol);
+        }
+
         info!("Attached volume {} as {}", req.volume_id, target_address);
 
         Ok(Response::new(AttachVolumeResponse {
@@ -833,6 +886,12 @@ impl BlockService for BlockMetaService {
         }
 
         self.attachments.write().remove(&req.volume_id);
+
+        if let Some(store) = &self.store
+            && let Some(vol) = self.volumes.read().get(&req.volume_id)
+        {
+            store.put_volume(&req.volume_id, vol);
+        }
 
         info!("Detached volume {}", req.volume_id);
 
@@ -916,6 +975,12 @@ impl BlockService for BlockMetaService {
             for chunk_id in start_chunk..end_chunk {
                 chunks.remove(&chunk_id);
             }
+
+            if let Some(store) = &self.store {
+                for chunk_id in start_chunk..end_chunk {
+                    store.delete_chunk(&req.volume_id, chunk_id);
+                }
+            }
         }
 
         debug!(
@@ -941,6 +1006,10 @@ impl BlockService for BlockMetaService {
 
         volume.qos = req.qos;
         volume.updated_at = Self::current_timestamp();
+
+        if let Some(store) = &self.store {
+            store.put_volume(&req.volume_id, volume);
+        }
 
         info!("Updated QoS for volume {}", req.volume_id);
 
