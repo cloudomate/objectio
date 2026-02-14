@@ -51,6 +51,9 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# Install rustfmt + clippy (not always bundled in the base image)
+RUN rustup component add rustfmt clippy
+
 WORKDIR /build
 
 # =============================================================================
