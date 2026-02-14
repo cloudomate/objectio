@@ -78,12 +78,12 @@ fn extract_user_metadata(headers: &HeaderMap) -> HashMap<String, String> {
     let mut metadata = HashMap::new();
     for (name, value) in headers.iter() {
         let name_str = name.as_str().to_lowercase();
-        if name_str.starts_with("x-amz-meta-") {
-            if let Ok(value_str) = value.to_str() {
-                // Strip the x-amz-meta- prefix for storage
-                let key = name_str.strip_prefix("x-amz-meta-").unwrap_or(&name_str);
-                metadata.insert(key.to_string(), value_str.to_string());
-            }
+        if name_str.starts_with("x-amz-meta-")
+            && let Ok(value_str) = value.to_str()
+        {
+            // Strip the x-amz-meta- prefix for storage
+            let key = name_str.strip_prefix("x-amz-meta-").unwrap_or(&name_str);
+            metadata.insert(key.to_string(), value_str.to_string());
         }
     }
     metadata
@@ -300,6 +300,7 @@ pub struct PostBucketParams {
     /// If present, this is a delete objects request
     delete: Option<String>,
     /// If present, this is a list multipart uploads request (also handled by GET)
+    #[allow(dead_code)]
     uploads: Option<String>,
 }
 
@@ -323,6 +324,7 @@ pub struct DeleteBucketParams {
     /// If present (even empty), this is a policy request
     policy: Option<String>,
     /// If present, this is a list multipart uploads request
+    #[allow(dead_code)]
     uploads: Option<String>,
 }
 
@@ -556,6 +558,7 @@ pub struct PartItem {
 /// Response for ListMultipartUploads
 #[derive(Serialize)]
 #[serde(rename = "ListMultipartUploadsResult")]
+#[allow(dead_code)]
 pub struct ListMultipartUploadsResult {
     #[serde(rename = "Bucket")]
     pub bucket: String,
@@ -580,6 +583,7 @@ pub struct ListMultipartUploadsResult {
 
 /// Upload item in ListMultipartUploads response
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct UploadItem {
     #[serde(rename = "Key")]
     pub key: String,
@@ -617,6 +621,7 @@ pub struct CompletePart {
 #[serde(rename = "Delete")]
 pub struct DeleteObjectsRequest {
     #[serde(rename = "Quiet", default)]
+    #[allow(dead_code)]
     pub quiet: bool,
     #[serde(rename = "Object", default)]
     pub objects: Vec<DeleteObjectIdentifier>,
@@ -1268,7 +1273,7 @@ pub async fn put_object(
                     &source_obj.object_id
                 };
 
-                for pos in 0..total_shards {
+                for (pos, shard) in shards.iter_mut().enumerate() {
                     if read_count >= ec_k {
                         break;
                     }
@@ -1291,7 +1296,7 @@ pub async fn put_object(
                         )
                         .await
                         {
-                            shards[pos] = Some(data);
+                            *shard = Some(data);
                             read_count += 1;
                         }
                     }
@@ -1400,7 +1405,7 @@ pub async fn put_object(
 
         // Split data into stripes (each stripe must fit in a block)
         let stripe_size = MAX_SHARD_SIZE;
-        let num_stripes = (body.len() + stripe_size - 1) / stripe_size;
+        let num_stripes = body.len().div_ceil(stripe_size);
 
         debug!(
             "Replication mode: writing {} replicas x {} stripes for {}/{} (total size={})",
@@ -1608,7 +1613,7 @@ pub async fn put_object(
     // shard_size = stripe_data_size / ec_k (approximately)
     // So max_stripe_data_size = MAX_SHARD_SIZE * ec_k
     let max_stripe_data_size = MAX_SHARD_SIZE * ec_k as usize;
-    let num_stripes = (body.len() + max_stripe_data_size - 1) / max_stripe_data_size;
+    let num_stripes = body.len().div_ceil(max_stripe_data_size);
 
     debug!(
         "EC mode: encoding {}/{} ({} bytes) into {} stripes with {}+{} shards each",
@@ -1651,7 +1656,7 @@ pub async fn put_object(
                 };
 
                 // Pad data to shard size
-                let shard_size = (stripe_data.len() + ec_k as usize - 1) / ec_k as usize;
+                let shard_size = stripe_data.len().div_ceil(ec_k as usize);
                 let padded_size = shard_size * ec_k as usize;
                 let mut padded_data = stripe_data.to_vec();
                 padded_data.resize(padded_size, 0);
@@ -2174,7 +2179,7 @@ pub async fn get_object(
         };
 
         // Try to read k data shards first (positions 0 to k-1)
-        for pos in 0..ec_k {
+        for (pos, shard) in shards[..ec_k].iter_mut().enumerate() {
             if read_count >= ec_k {
                 break;
             }
@@ -2202,7 +2207,7 @@ pub async fn get_object(
                 {
                     Ok(data) => {
                         debug!("Read data shard {} ({} bytes)", pos, data.len());
-                        shards[pos] = Some(data);
+                        *shard = Some(data);
                         read_count += 1;
                     }
                     Err(e) => {
@@ -2214,7 +2219,8 @@ pub async fn get_object(
 
         // If we don't have enough data shards, try parity shards
         if read_count < ec_k {
-            for pos in ec_k..total_shards {
+            for (i, shard) in shards[ec_k..].iter_mut().enumerate() {
+                let pos = ec_k + i;
                 if read_count >= ec_k {
                     break;
                 }
@@ -2245,7 +2251,7 @@ pub async fn get_object(
                     {
                         Ok(data) => {
                             debug!("Read parity shard {} ({} bytes)", pos, data.len());
-                            shards[pos] = Some(data);
+                            *shard = Some(data);
                             read_count += 1;
                         }
                         Err(e) => {
@@ -2762,7 +2768,7 @@ async fn put_bucket_policy_internal(state: Arc<AppState>, bucket: String, body: 
                     StatusCode::NOT_FOUND,
                 )
             } else if e.code() == tonic::Code::InvalidArgument {
-                S3Error::xml_response("MalformedPolicy", &e.message(), StatusCode::BAD_REQUEST)
+                S3Error::xml_response("MalformedPolicy", e.message(), StatusCode::BAD_REQUEST)
             } else {
                 error!("Failed to set bucket policy: {}", e);
                 S3Error::xml_response(
@@ -2983,7 +2989,7 @@ async fn upload_part_internal(
 
         // Split data into stripes (each stripe must fit in a block)
         let stripe_size = MAX_SHARD_SIZE;
-        let num_stripes = (body.len() + stripe_size - 1) / stripe_size;
+        let num_stripes = body.len().div_ceil(stripe_size);
 
         debug!(
             "Replication mode for part {}: writing {} replicas x {} stripes (size={})",
@@ -3108,7 +3114,7 @@ async fn upload_part_internal(
         // Calculate max raw data per stripe: each shard is data_size/k bytes
         // To keep each shard <= MAX_SHARD_SIZE, raw data must be <= MAX_SHARD_SIZE * k
         let max_stripe_data_size = MAX_SHARD_SIZE * ec_k as usize;
-        let num_stripes = (body.len() + max_stripe_data_size - 1) / max_stripe_data_size;
+        let num_stripes = body.len().div_ceil(max_stripe_data_size);
 
         debug!(
             "EC mode for part {}: {} stripes, {} shards/stripe (ec_k={}, ec_m={}), part_size={}",
@@ -3627,6 +3633,7 @@ async fn abort_multipart_upload_internal(
 }
 
 /// GET /{bucket}?uploads - List multipart uploads
+#[allow(dead_code)]
 pub async fn list_multipart_uploads(
     State(state): State<Arc<AppState>>,
     Path(bucket): Path<String>,
@@ -3778,6 +3785,7 @@ fn admin_auth_required_response() -> Response {
 }
 
 /// Check if request is from admin user, returns error response if not
+#[allow(clippy::result_large_err)]
 fn check_admin_access(auth: Option<Extension<AuthResult>>) -> Result<(), Response> {
     match auth {
         Some(Extension(ref auth_result)) => {

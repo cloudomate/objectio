@@ -44,7 +44,7 @@ pub const ALIGNMENT: u64 = 4096;
 /// Align a value up to the nearest multiple of ALIGNMENT
 #[inline]
 const fn align_up(value: u64) -> u64 {
-    (value + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT
+    value.div_ceil(ALIGNMENT) * ALIGNMENT
 }
 
 /// Superblock stored at the beginning of each disk
@@ -114,7 +114,7 @@ impl Superblock {
         let bitmap_offset = align_up(wal_offset + wal_size);
         let available_for_data = disk_size - bitmap_offset;
         let blocks_approx = available_for_data / u64::from(block_size);
-        let bitmap_size = align_up((blocks_approx + 7) / 8); // Align to 4KB
+        let bitmap_size = align_up(blocks_approx.div_ceil(8)); // Align to 4KB
 
         let index_offset = align_up(bitmap_offset + bitmap_size);
         let index_size = align_up((blocks_approx / 100).max(1) * 4096); // ~1% of blocks for index
@@ -196,7 +196,7 @@ impl Superblock {
             return Err(Error::Storage("superblock too small".into()));
         }
 
-        let mut buf = &data[..];
+        let mut buf = data;
 
         let mut magic = [0u8; 8];
         buf.copy_to_slice(&mut magic);

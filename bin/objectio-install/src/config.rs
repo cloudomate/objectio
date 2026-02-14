@@ -29,15 +29,18 @@ impl EcProfile {
     }
 
     /// Common presets
+    #[allow(dead_code)]
     pub fn preset_2_1() -> Self {
         Self { k: 2, m: 1 }
     } // 3 disks, 66% efficiency
     pub fn preset_4_2() -> Self {
         Self { k: 4, m: 2 }
     } // 6 disks, 66% efficiency
+    #[allow(dead_code)]
     pub fn preset_8_4() -> Self {
         Self { k: 8, m: 4 }
     } // 12 disks, 66% efficiency
+    #[allow(dead_code)]
     pub fn preset_replication() -> Self {
         Self { k: 1, m: 2 }
     } // 3-way replication
@@ -78,6 +81,7 @@ impl Default for GatewayConfig {
 }
 
 /// Generate gateway configuration
+#[allow(dead_code)]
 pub fn generate_gateway_config(meta_endpoint: &str) -> String {
     let config = GatewayConfig {
         meta_endpoint: meta_endpoint.to_string(),
@@ -187,6 +191,7 @@ level = "info"
 /// Generate OSD configuration
 ///
 /// block_size_bytes: Storage block size in bytes (default 4MB = 4194304)
+#[allow(dead_code)]
 pub fn generate_osd_config(disks: &[String], meta_endpoint: &str) -> String {
     generate_osd_config_with_block_size(disks, meta_endpoint, 4194304)
 }

@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
                 "/_admin/access-keys/{access_key_id}",
                 delete(s3::admin_delete_access_key),
             )
-            .layer(body_limit.clone())
+            .layer(body_limit)
             .layer(middleware::from_fn_with_state(auth_state, auth_layer))
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())

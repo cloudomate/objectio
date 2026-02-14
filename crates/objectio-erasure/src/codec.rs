@@ -162,7 +162,7 @@ impl ErasureCodec {
         let k = self.data_shards();
 
         // Calculate shard size (pad to multiple of k, minimum 64 bytes for SIMD)
-        let shard_size = ((data.len() + k - 1) / k).max(64);
+        let shard_size = data.len().div_ceil(k).max(64);
         let padded_size = shard_size * k;
 
         // Create padded data
@@ -214,7 +214,7 @@ impl ErasureCodec {
         let shard_size = shards
             .iter()
             .find_map(|s| s.as_ref().map(|v| v.len()))
-            .ok_or_else(|| ErasureError::InsufficientShards {
+            .ok_or(ErasureError::InsufficientShards {
                 available: 0,
                 required: k,
             })?;
@@ -223,10 +223,8 @@ impl ErasureCodec {
         let data_shards_ok = shards[..k].iter().all(|s| s.is_some());
         if data_shards_ok {
             let mut result = Vec::with_capacity(k * shard_size);
-            for shard in shards.iter().take(k) {
-                if let Some(data) = shard {
-                    result.extend_from_slice(data);
-                }
+            for data in shards.iter().take(k).flatten() {
+                result.extend_from_slice(data);
             }
             result.truncate(original_size);
             return Ok(result);
@@ -265,7 +263,7 @@ impl ErasureCodec {
                                 if let Some(ref rec) = recovered_shards[i] {
                                     Some(rec.as_slice())
                                 } else {
-                                    shards[i].as_ref().map(|v| v.as_slice())
+                                    shards[i].as_deref()
                                 }
                             })
                             .collect();
@@ -286,7 +284,7 @@ impl ErasureCodec {
                         if let Some(ref rec) = recovered_shards[i] {
                             Some(rec.as_slice())
                         } else {
-                            shards[i].as_ref().map(|v| v.as_slice())
+                            shards[i].as_deref()
                         }
                     })
                     .collect();
@@ -315,8 +313,8 @@ impl ErasureCodec {
 
         // Build output from data shards
         let mut output = Vec::with_capacity(k * shard_size);
-        for i in 0..k {
-            output.extend_from_slice(&decoded[i]);
+        for shard in decoded.iter().take(k) {
+            output.extend_from_slice(shard);
         }
 
         output.truncate(original_size);
@@ -334,10 +332,10 @@ impl ErasureCodec {
         }
 
         // Check all shards have same size
-        if let Some(first_len) = shards.first().map(Vec::len) {
-            if !shards.iter().all(|s| s.len() == first_len) {
-                return Ok(false);
-            }
+        if let Some(first_len) = shards.first().map(Vec::len)
+            && !shards.iter().all(|s| s.len() == first_len)
+        {
+            return Ok(false);
         }
 
         // Convert to slice references

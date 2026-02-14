@@ -79,20 +79,15 @@ impl Default for CacheCapacity {
 }
 
 /// Write policy for the cache
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WritePolicy {
     /// Write to disk and cache simultaneously (default, strong durability)
+    #[default]
     WriteThrough,
     /// Write to cache only, flush asynchronously (high throughput)
     WriteBack,
     /// Write to disk only, do not cache writes (for large sequential writes)
     WriteAround,
-}
-
-impl Default for WritePolicy {
-    fn default() -> Self {
-        WritePolicy::WriteThrough
-    }
 }
 
 /// Cache statistics for monitoring
@@ -275,12 +270,12 @@ impl BlockCache {
         }
 
         // Check if replacing an existing dirty entry
-        if let Some(old) = entries.get(&key) {
-            if old.dirty {
-                // Already dirty, don't increment count
-                entries.insert(key, CacheEntry::new_dirty(data, clock));
-                return;
-            }
+        if let Some(old) = entries.get(&key)
+            && old.dirty
+        {
+            // Already dirty, don't increment count
+            entries.insert(key, CacheEntry::new_dirty(data, clock));
+            return;
         }
 
         entries.insert(key, CacheEntry::new_dirty(data, clock));
@@ -308,14 +303,14 @@ impl BlockCache {
     /// Mark an entry as clean (after write-back flush)
     pub fn mark_clean(&self, key: &CacheKey) -> bool {
         let mut entries = self.entries.write();
-        if let Some(entry) = entries.get_mut(key) {
-            if entry.dirty {
-                entry.dirty = false;
-                entry.dirty_since = None;
-                self.stats.dirty_count.fetch_sub(1, Ordering::Relaxed);
-                self.stats.writebacks.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
+        if let Some(entry) = entries.get_mut(key)
+            && entry.dirty
+        {
+            entry.dirty = false;
+            entry.dirty_since = None;
+            self.stats.dirty_count.fetch_sub(1, Ordering::Relaxed);
+            self.stats.writebacks.fetch_add(1, Ordering::Relaxed);
+            return true;
         }
         false
     }

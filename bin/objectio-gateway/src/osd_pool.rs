@@ -19,6 +19,7 @@ pub enum OsdPoolError {
     ConnectionFailed(String),
 
     #[error("no nodes available")]
+    #[allow(dead_code)]
     NoNodesAvailable,
 }
 
@@ -37,12 +38,13 @@ impl NodeId {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }
 
     pub fn to_hex(&self) -> String {
-        hex::encode(&self.0)
+        hex::encode(self.0)
     }
 }
 
@@ -54,6 +56,7 @@ impl From<[u8; 16]> for NodeId {
 
 /// Information about a connected OSD node
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct OsdNode {
     pub node_id: NodeId,
     pub address: String,
@@ -145,6 +148,7 @@ impl OsdPool {
     }
 
     /// Get a client for a specific node
+    #[allow(dead_code)]
     pub async fn get_client(
         &self,
         node_id: &[u8],
@@ -186,6 +190,7 @@ impl OsdPool {
     }
 
     /// Remove a node from the pool
+    #[allow(dead_code)]
     pub async fn disconnect(&self, node_id: &NodeId) {
         if let Some(node) = self.nodes.write().await.remove(node_id) {
             self.address_map.write().await.remove(&node.address);
@@ -194,11 +199,13 @@ impl OsdPool {
     }
 
     /// Get all connected node IDs
+    #[allow(dead_code)]
     pub async fn connected_nodes(&self) -> Vec<NodeId> {
         self.nodes.read().await.keys().cloned().collect()
     }
 
     /// Get the number of connected nodes
+    #[allow(dead_code)]
     pub async fn node_count(&self) -> usize {
         self.nodes.read().await.len()
     }
@@ -220,6 +227,7 @@ impl Default for OsdPool {
 }
 
 /// Helper to write a shard to the appropriate OSD
+#[allow(clippy::too_many_arguments)]
 pub async fn write_shard_to_osd(
     pool: &OsdPool,
     placement: &NodePlacement,

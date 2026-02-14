@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use std::fs;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// ObjectIO disk magic bytes (first 8 bytes of superblock)
 const OBJECTIO_MAGIC: &[u8] = b"OBJIO001";

@@ -29,9 +29,7 @@ use futures::stream::{self, StreamExt};
 use objectio_proto::metadata::{
     GetListingNodesRequest, ListingNode, ObjectMeta, metadata_service_client::MetadataServiceClient,
 };
-use objectio_proto::storage::{
-    ListObjectsMetaRequest, storage_service_client::StorageServiceClient,
-};
+use objectio_proto::storage::ListObjectsMetaRequest;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -39,7 +37,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::osd_pool::OsdPool;
 
@@ -74,6 +72,7 @@ pub enum ScatterGatherError {
     Grpc(#[from] tonic::Status),
 
     #[error("Connection error: {0}")]
+    #[allow(dead_code)]
     Connection(String),
 }
 
@@ -173,6 +172,7 @@ impl ListContinuationToken {
     }
 
     /// Decode token from base64 string
+    #[allow(clippy::result_large_err)]
     pub fn decode(s: &str) -> Result<Self, ScatterGatherError> {
         let bytes = URL_SAFE_NO_PAD
             .decode(s)
@@ -181,6 +181,7 @@ impl ListContinuationToken {
     }
 
     /// Check if all shards are exhausted
+    #[allow(dead_code)]
     pub fn all_exhausted(&self) -> bool {
         self.shard_cursors.values().all(|c| c.exhausted)
     }
@@ -190,6 +191,7 @@ impl ListContinuationToken {
 struct ShardResult {
     shard_id: u32,
     objects: Vec<ObjectMeta>,
+    #[allow(dead_code)]
     next_token: String,
     is_truncated: bool,
 }
@@ -283,7 +285,7 @@ impl ScatterGatherEngine {
         );
 
         // 2. Parse continuation token if provided
-        let (shard_cursors, is_first_page) = if let Some(token_str) = continuation_token {
+        let (shard_cursors, _is_first_page) = if let Some(token_str) = continuation_token {
             let token = ListContinuationToken::decode(token_str)?;
 
             // Verify signature
@@ -456,13 +458,14 @@ impl ScatterGatherEngine {
     }
 
     /// K-way merge sorted results from multiple shards
+    #[allow(clippy::result_large_err, clippy::type_complexity)]
     fn k_way_merge(
         &self,
         shard_results: Vec<ShardResult>,
         max_keys: usize,
     ) -> Result<(Vec<ObjectMeta>, HashMap<u32, ShardCursor>, bool), ScatterGatherError> {
         // Track per-shard state
-        let mut shard_buffers: HashMap<u32, (Vec<ObjectMeta>, bool)> = shard_results
+        let shard_buffers: HashMap<u32, (Vec<ObjectMeta>, bool)> = shard_results
             .into_iter()
             .map(|r| (r.shard_id, (r.objects, r.is_truncated)))
             .collect();
@@ -499,14 +502,14 @@ impl ScatterGatherEngine {
 
             // Push next element from same shard
             let next_index = entry.index + 1;
-            if let Some((objects, _)) = shard_buffers.get(&entry.shard_id) {
-                if next_index < objects.len() {
-                    heap.push(MergeEntry {
-                        object: objects[next_index].clone(),
-                        shard_id: entry.shard_id,
-                        index: next_index,
-                    });
-                }
+            if let Some((objects, _)) = shard_buffers.get(&entry.shard_id)
+                && next_index < objects.len()
+            {
+                heap.push(MergeEntry {
+                    object: objects[next_index].clone(),
+                    shard_id: entry.shard_id,
+                    index: next_index,
+                });
             }
         }
 
@@ -519,7 +522,7 @@ impl ScatterGatherEngine {
         // Build new cursors
         let new_cursors: HashMap<u32, ShardCursor> = shard_buffers
             .iter()
-            .map(|(shard_id, (objects, is_truncated))| {
+            .map(|(shard_id, (_objects, is_truncated))| {
                 let last_key = last_key_per_shard
                     .get(shard_id)
                     .cloned()
@@ -548,5 +551,6 @@ pub struct ListObjectsResult {
     /// Continuation token for next page (if truncated)
     pub next_continuation_token: Option<String>,
     /// Number of keys returned
+    #[allow(dead_code)]
     pub key_count: u32,
 }

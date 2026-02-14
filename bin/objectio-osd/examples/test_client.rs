@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let write_result = write_response.into_inner();
     println!("Write successful!");
-    println!("Object ID: {}", hex::encode(&object_id));
+    println!("Object ID: {}", hex::encode(object_id));
     if let Some(loc) = &write_result.location {
         println!(
             "Location: disk={}, offset={}",

@@ -237,6 +237,7 @@ impl BTreeIndex {
     }
 
     /// Range scan between two keys
+    #[allow(dead_code)]
     pub fn scan_range(
         &self,
         start: &MetadataKey,
@@ -400,6 +401,7 @@ impl BTreeIndex {
     }
 
     /// Check if empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -415,6 +417,7 @@ impl BTreeIndex {
 
     /// Get all entries (for debugging/testing)
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn entries(&self) -> Vec<(MetadataKey, Vec<u8>)> {
         let tree = self.tree.read();
         tree.iter()

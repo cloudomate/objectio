@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// SMART attribute IDs
 const ATTR_TEMPERATURE: u8 = 194;
@@ -218,75 +218,74 @@ impl SmartMonitor {
         }
 
         // Parse SMART attributes
-        if let Some(ata_smart) = json.get("ata_smart_attributes") {
-            if let Some(table) = ata_smart.get("table").and_then(|t| t.as_array()) {
-                for attr in table {
-                    let id = attr.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
-                    let name = attr
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let value = attr.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let worst = attr.get("worst").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let threshold = attr.get("thresh").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let raw_value = attr
-                        .get("raw")
-                        .and_then(|r| r.get("value"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+        if let Some(ata_smart) = json.get("ata_smart_attributes")
+            && let Some(table) = ata_smart.get("table").and_then(|t| t.as_array())
+        {
+            for attr in table {
+                let id = attr.get("id").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                let name = attr
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let value = attr.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
+                let worst = attr.get("worst").and_then(|v| v.as_u64()).unwrap_or(0);
+                let threshold = attr.get("thresh").and_then(|v| v.as_u64()).unwrap_or(0);
+                let raw_value = attr
+                    .get("raw")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
-                    let smart_attr = SmartAttribute {
-                        id,
-                        name,
-                        value,
-                        worst,
-                        threshold,
-                        raw_value,
-                    };
+                let smart_attr = SmartAttribute {
+                    id,
+                    name,
+                    value,
+                    worst,
+                    threshold,
+                    raw_value,
+                };
 
-                    // Extract key attributes
-                    match id {
-                        ATTR_TEMPERATURE => {
-                            // Temperature is usually in raw value, but can be modified
-                            let temp = if raw_value < 100 {
-                                raw_value
-                            } else {
-                                // Some drives store temp in lower 8 bits
-                                raw_value & 0xFF
-                            };
-                            health.temperature_celsius = Some(temp);
-                        }
-                        ATTR_REALLOCATED_SECTORS => {
-                            health.reallocated_sectors = raw_value;
-                        }
-                        ATTR_PENDING_SECTORS => {
-                            health.pending_sectors = raw_value;
-                        }
-                        ATTR_POWER_ON_HOURS => {
-                            health.power_on_hours = raw_value;
-                        }
-                        ATTR_UNCORRECTABLE_ERRORS => {
-                            health.uncorrectable_errors = raw_value;
-                        }
-                        ATTR_COMMAND_TIMEOUT => {
-                            health.command_timeout_count = raw_value;
-                        }
-                        _ => {}
+                // Extract key attributes
+                match id {
+                    ATTR_TEMPERATURE => {
+                        // Temperature is usually in raw value, but can be modified
+                        let temp = if raw_value < 100 {
+                            raw_value
+                        } else {
+                            // Some drives store temp in lower 8 bits
+                            raw_value & 0xFF
+                        };
+                        health.temperature_celsius = Some(temp);
                     }
-
-                    health.attributes.insert(id, smart_attr);
+                    ATTR_REALLOCATED_SECTORS => {
+                        health.reallocated_sectors = raw_value;
+                    }
+                    ATTR_PENDING_SECTORS => {
+                        health.pending_sectors = raw_value;
+                    }
+                    ATTR_POWER_ON_HOURS => {
+                        health.power_on_hours = raw_value;
+                    }
+                    ATTR_UNCORRECTABLE_ERRORS => {
+                        health.uncorrectable_errors = raw_value;
+                    }
+                    ATTR_COMMAND_TIMEOUT => {
+                        health.command_timeout_count = raw_value;
+                    }
+                    _ => {}
                 }
+
+                health.attributes.insert(id, smart_attr);
             }
         }
 
         // Also check for NVMe temperature
-        if health.temperature_celsius.is_none() {
-            if let Some(temp) = json.get("temperature") {
-                if let Some(current) = temp.get("current").and_then(|v| v.as_u64()) {
-                    health.temperature_celsius = Some(current);
-                }
-            }
+        if health.temperature_celsius.is_none()
+            && let Some(temp) = json.get("temperature")
+            && let Some(current) = temp.get("current").and_then(|v| v.as_u64())
+        {
+            health.temperature_celsius = Some(current);
         }
 
         // Calculate health score

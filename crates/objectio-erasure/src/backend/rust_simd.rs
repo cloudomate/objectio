@@ -145,8 +145,8 @@ impl ErasureBackend for RustSimdBackend {
             .map_err(|e| ErasureError::InvalidConfig(e.to_string()))?;
 
         // Add data shards (indices 0 to k-1) using add_original_shard
-        for i in 0..k {
-            if let Some(data) = shards[i] {
+        for (i, shard) in shards.iter().enumerate().take(k) {
+            if let Some(data) = shard {
                 decoder
                     .add_original_shard(i, data)
                     .map_err(|e| ErasureError::DecodingFailed(e.to_string()))?;
@@ -170,8 +170,8 @@ impl ErasureBackend for RustSimdBackend {
         let mut all_shards: Vec<Vec<u8>> = Vec::with_capacity(k + m);
 
         // Add data shards (original or reconstructed)
-        for i in 0..k {
-            if let Some(data) = shards[i] {
+        for (i, shard) in shards.iter().enumerate().take(k) {
+            if let Some(data) = shard {
                 all_shards.push(data.to_vec());
             } else if let Some(restored) = result.restored_original(i) {
                 all_shards.push(restored.to_vec());
@@ -253,7 +253,10 @@ impl RustSimdLrcBackend {
                 "local_parity_shards must be > 0".into(),
             ));
         }
-        if config.data_shards % config.local_parity_shards != 0 {
+        if !config
+            .data_shards
+            .is_multiple_of(config.local_parity_shards)
+        {
             return Err(ErasureError::InvalidConfig(
                 "data_shards must be divisible by local_parity_shards".into(),
             ));
@@ -516,7 +519,7 @@ impl LrcBackend for RustSimdLrcBackend {
             let mut all_available = true;
 
             for &idx in &group.data_shard_indices {
-                if idx != missing_index && shards.get(idx).map_or(true, |s| s.is_none()) {
+                if idx != missing_index && shards.get(idx).is_none_or(|s| s.is_none()) {
                     all_available = false;
                     break;
                 }
@@ -525,7 +528,7 @@ impl LrcBackend for RustSimdLrcBackend {
             // Check local parity is available
             if shards
                 .get(group.local_parity_index)
-                .map_or(true, |s| s.is_none())
+                .is_none_or(|s| s.is_none())
             {
                 all_available = false;
             }
@@ -536,12 +539,12 @@ impl LrcBackend for RustSimdLrcBackend {
 
                 // XOR data shards in group (except missing)
                 for &idx in &group.data_shard_indices {
-                    if idx != missing_index {
-                        if let Some(Some(data)) = shards.get(idx) {
-                            for (i, byte) in data.iter().enumerate() {
-                                if i < shard_size {
-                                    recovered[i] ^= byte;
-                                }
+                    if idx != missing_index
+                        && let Some(Some(data)) = shards.get(idx)
+                    {
+                        for (i, byte) in data.iter().enumerate() {
+                            if i < shard_size {
+                                recovered[i] ^= byte;
                             }
                         }
                     }

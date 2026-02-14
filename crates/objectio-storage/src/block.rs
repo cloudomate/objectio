@@ -112,7 +112,7 @@ impl BlockBitmap {
     /// Create a new bitmap for the given number of blocks (all free)
     #[must_use]
     pub fn new(total_blocks: u64) -> Self {
-        let bytes_needed = ((total_blocks + 7) / 8) as usize;
+        let bytes_needed = total_blocks.div_ceil(8) as usize;
         Self {
             data: RwLock::new(vec![0u8; bytes_needed]),
             total_blocks,
@@ -123,7 +123,7 @@ impl BlockBitmap {
 
     /// Load bitmap from bytes
     pub fn from_bytes(data: &[u8], total_blocks: u64) -> Self {
-        let mut bitmap_data = vec![0u8; ((total_blocks + 7) / 8) as usize];
+        let mut bitmap_data = vec![0u8; total_blocks.div_ceil(8) as usize];
         let copy_len = bitmap_data.len().min(data.len());
         bitmap_data[..copy_len].copy_from_slice(&data[..copy_len]);
 
@@ -192,13 +192,13 @@ impl BlockBitmap {
         }
 
         // Wrap around: search from start to hint
-        if hint > 0 {
-            if let Some(block) = self.find_free_in_range(&data, 0, hint) {
-                Self::set_in_slice(&mut data, block);
-                self.free_blocks.fetch_sub(1, Ordering::Relaxed);
-                self.search_hint.store(block + 1, Ordering::Relaxed);
-                return Some(block);
-            }
+        if hint > 0
+            && let Some(block) = self.find_free_in_range(&data, 0, hint)
+        {
+            Self::set_in_slice(&mut data, block);
+            self.free_blocks.fetch_sub(1, Ordering::Relaxed);
+            self.search_hint.store(block + 1, Ordering::Relaxed);
+            return Some(block);
         }
 
         None
@@ -226,13 +226,13 @@ impl BlockBitmap {
         }
 
         // Wrap around: search from start to hint
-        if hint > 0 {
-            if let Some(extent) = self.find_free_extent_in_range(&data, 0, hint, count) {
-                self.mark_extent_used(&mut data, &extent);
-                self.free_blocks.fetch_sub(count, Ordering::Relaxed);
-                self.search_hint.store(extent.end(), Ordering::Relaxed);
-                return Some(extent);
-            }
+        if hint > 0
+            && let Some(extent) = self.find_free_extent_in_range(&data, 0, hint, count)
+        {
+            self.mark_extent_used(&mut data, &extent);
+            self.free_blocks.fetch_sub(count, Ordering::Relaxed);
+            self.search_hint.store(extent.end(), Ordering::Relaxed);
+            return Some(extent);
         }
 
         None
@@ -240,12 +240,7 @@ impl BlockBitmap {
 
     /// Find a free block in the given range
     fn find_free_in_range(&self, data: &[u8], start: u64, end: u64) -> Option<u64> {
-        for block in start..end.min(self.total_blocks) {
-            if !Self::is_set_in_slice(data, block) {
-                return Some(block);
-            }
-        }
-        None
+        (start..end.min(self.total_blocks)).find(|&block| !Self::is_set_in_slice(data, block))
     }
 
     /// Find a contiguous extent in the given range
@@ -431,13 +426,9 @@ impl BlockAllocator {
 
     /// Allocate a single block
     pub fn allocate(&self) -> Result<u64> {
-        self.bitmap
-            .allocate()
-            .ok_or_else(|| Error::DiskFull)
-            .map(|block| {
-                self.mark_dirty();
-                block
-            })
+        self.bitmap.allocate().ok_or(Error::DiskFull).inspect(|_| {
+            self.mark_dirty();
+        })
     }
 
     /// Allocate multiple blocks (not necessarily contiguous)
@@ -463,10 +454,9 @@ impl BlockAllocator {
     pub fn allocate_extent(&self, count: u64) -> Result<Extent> {
         self.bitmap
             .allocate_extent(count)
-            .ok_or_else(|| Error::DiskFull)
-            .map(|extent| {
+            .ok_or(Error::DiskFull)
+            .inspect(|_| {
                 self.mark_dirty();
-                extent
             })
     }
 

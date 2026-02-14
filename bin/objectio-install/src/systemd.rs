@@ -124,6 +124,7 @@ WantedBy=multi-user.target
 }
 
 /// Generate systemd unit for all services (convenience)
+#[allow(dead_code)]
 pub fn generate_all_units() -> Vec<(&'static str, String)> {
     vec![
         ("objectio-gateway", generate_gateway_unit()),

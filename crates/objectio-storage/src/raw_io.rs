@@ -254,13 +254,13 @@ impl RawFile {
 
     /// Check alignment requirements
     fn check_alignment(&self, offset: u64, size: usize) -> Result<()> {
-        if offset as usize % ALIGNMENT != 0 {
+        if !(offset as usize).is_multiple_of(ALIGNMENT) {
             return Err(Error::Storage(format!(
                 "offset {} is not aligned to {}",
                 offset, ALIGNMENT
             )));
         }
-        if size % ALIGNMENT != 0 {
+        if !size.is_multiple_of(ALIGNMENT) {
             return Err(Error::Storage(format!(
                 "size {} is not aligned to {}",
                 size, ALIGNMENT
@@ -294,7 +294,7 @@ impl AlignedBuffer {
         use std::alloc::{Layout, alloc_zeroed};
 
         // Round up size to alignment
-        let aligned_size = (size + alignment - 1) / alignment * alignment;
+        let aligned_size = size.div_ceil(alignment) * alignment;
 
         // Use aligned allocation for O_DIRECT compatibility
         let layout = Layout::from_size_align(aligned_size, alignment)
@@ -315,7 +315,7 @@ impl AlignedBuffer {
     #[cfg(not(target_os = "linux"))]
     pub fn with_alignment(size: usize, alignment: usize) -> Self {
         // On macOS, F_NOCACHE doesn't require strict alignment
-        let aligned_size = (size + alignment - 1) / alignment * alignment;
+        let aligned_size = size.div_ceil(alignment) * alignment;
         let data = vec![0u8; aligned_size];
         Self { data, alignment }
     }

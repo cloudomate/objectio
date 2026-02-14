@@ -198,6 +198,7 @@ impl GrpcMetrics {
 
 /// Disk status information for metrics
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct DiskStatusInfo {
     pub path: String,
     pub capacity: u64,
@@ -210,6 +211,7 @@ pub struct DiskStatusInfo {
 
 /// OSD status information for metrics
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct OsdStatus {
     pub disks: Vec<DiskStatusInfo>,
     pub total_capacity: u64,
@@ -330,6 +332,7 @@ impl OsdService {
     }
 
     /// Create OSD service with default metadata directory
+    #[allow(dead_code)]
     pub fn new_default(disk_paths: Vec<String>, block_size: u32) -> Result<Self, String> {
         let data_dir = PathBuf::from("./osd-metadata");
         Self::new(disk_paths, block_size, data_dir)
@@ -346,6 +349,7 @@ impl OsdService {
     }
 
     /// Get disk count
+    #[allow(dead_code)]
     pub fn disk_count(&self) -> usize {
         self.disks.len()
     }
@@ -409,6 +413,7 @@ impl OsdService {
     }
 
     /// Allocate a block for writing
+    #[allow(clippy::result_large_err)]
     fn allocate_block(&self, disk_idx: usize) -> Result<u64, Status> {
         // Simple allocation: use shard count as next block
         // In production, this would use the BlockAllocator
@@ -886,7 +891,7 @@ impl StorageService for OsdService {
 
         for (meta_key, value) in entries {
             // Parse bucket/key from metadata key
-            if let Some((bucket, key)) = meta_key.parse_object_meta() {
+            if let Some((_bucket, key)) = meta_key.parse_object_meta() {
                 // Skip if before start_after
                 if !req.start_after.is_empty() && key <= req.start_after {
                     continue;

@@ -198,6 +198,7 @@ async fn main() -> Result<()> {
 }
 
 /// Initialize node with specified role(s)
+#[allow(clippy::too_many_arguments)]
 async fn init_node(
     roles: Vec<String>,
     disks: Option<Vec<String>>,

@@ -164,7 +164,6 @@ impl MetadataWal {
 
         let file = OpenOptions::new()
             .create(true)
-            .write(true)
             .append(true)
             .open(&path)
             .map_err(|e| Error::Storage(format!("failed to open WAL: {}", e)))?;
@@ -306,10 +305,10 @@ impl MetadataWal {
             while offset + RECORD_HEADER_SIZE + 4 <= bytes_read {
                 match WalRecord::from_bytes(&buf[offset..bytes_read]) {
                     Ok((record, size)) => {
-                        if record.lsn >= from_lsn {
-                            if let Some(op) = MetadataOp::from_bytes(&record.data) {
-                                callback(record.lsn, op)?;
-                            }
+                        if record.lsn >= from_lsn
+                            && let Some(op) = MetadataOp::from_bytes(&record.data)
+                        {
+                            callback(record.lsn, op)?;
                         }
                         last_lsn = record.lsn;
                         offset += size;
@@ -385,7 +384,6 @@ impl MetadataWal {
 
         // Reopen writer to new file
         let file = OpenOptions::new()
-            .write(true)
             .append(true)
             .open(&self.path)
             .map_err(|e| Error::Storage(format!("failed to reopen WAL: {}", e)))?;

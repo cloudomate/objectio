@@ -367,10 +367,10 @@ impl MetadataStore {
                             info!("Background snapshot completed: {:?}", path);
 
                             let snapshot_lsn = index.last_snapshot_lsn();
-                            if snapshot_lsn > 0 {
-                                if let Err(e) = wal.truncate_before(snapshot_lsn) {
-                                    warn!("Failed to truncate WAL: {}", e);
-                                }
+                            if snapshot_lsn > 0
+                                && let Err(e) = wal.truncate_before(snapshot_lsn)
+                            {
+                                warn!("Failed to truncate WAL: {}", e);
                             }
                         }
                         Err(e) => {

@@ -70,10 +70,10 @@ impl AuthState {
         // Check cache first
         {
             let cache = self.credential_cache.read();
-            if let Some(cred) = cache.get(access_key_id) {
-                if cred.cached_at.elapsed().as_secs() < self.cache_ttl_secs {
-                    return Ok(cred.clone());
-                }
+            if let Some(cred) = cache.get(access_key_id)
+                && cred.cached_at.elapsed().as_secs() < self.cache_ttl_secs
+            {
+                return Ok(cred.clone());
             }
         }
 
@@ -214,9 +214,8 @@ fn parse_authorization_header(header: &str) -> Result<ParsedAuth, AuthError> {
                 .collect(),
             signature: captures.get(3).unwrap().as_str().to_string(),
         })
-    } else if header.starts_with("AWS ") {
+    } else if let Some(credentials) = header.strip_prefix("AWS ") {
         // SigV2 format: AWS AccessKeyId:Signature
-        let credentials = &header[4..]; // Skip "AWS "
         let parts: Vec<&str> = credentials.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err(AuthError::AccessDenied(
@@ -400,11 +399,11 @@ fn build_canonicalized_amz_headers<B>(request: &Request<B>) -> String {
 
     for (name, value) in request.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        if name_lower.starts_with("x-amz-") {
-            if let Ok(value_str) = value.to_str() {
-                let trimmed = value_str.split_whitespace().collect::<Vec<_>>().join(" ");
-                amz_headers.entry(name_lower).or_default().push(trimmed);
-            }
+        if name_lower.starts_with("x-amz-")
+            && let Ok(value_str) = value.to_str()
+        {
+            let trimmed = value_str.split_whitespace().collect::<Vec<_>>().join(" ");
+            amz_headers.entry(name_lower).or_default().push(trimmed);
         }
     }
 
@@ -650,11 +649,11 @@ fn url_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
             }
             result.push('%');
             result.push_str(&hex);
@@ -689,6 +688,7 @@ pub enum AuthError {
     /// Request has expired
     RequestTimeTooSkewed,
     /// Internal error
+    #[allow(dead_code)]
     InternalError,
 }
 
@@ -739,6 +739,7 @@ impl IntoResponse for AuthError {
 }
 
 /// Extension trait for getting auth result from request
+#[allow(dead_code)]
 pub trait AuthExt {
     /// Get the authenticated user's result from request extensions
     fn auth_result(&self) -> Option<&AuthResult>;

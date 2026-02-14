@@ -12,7 +12,7 @@ use axum::{
     routing::get,
 };
 use clap::Parser;
-use objectio_block::metrics::{HealthStatus, MetricsCollector, OsdMetrics, PrometheusExporter};
+use objectio_block::metrics::{MetricsCollector, PrometheusExporter};
 use objectio_proto::metadata::{
     FailureDomainInfo, RegisterOsdRequest, metadata_service_client::MetadataServiceClient,
 };
@@ -81,6 +81,7 @@ struct Config {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
 struct OsdConfig {
     #[serde(default)]
     node_id: Option<String>,
@@ -243,7 +244,7 @@ async fn main() -> Result<()> {
     };
 
     let node_id_bytes = *osd_service.node_id();
-    let node_id = hex::encode(&node_id_bytes);
+    let node_id = hex::encode(node_id_bytes);
     info!("OSD node ID: {}", node_id);
 
     // Get disk IDs for registration
@@ -275,7 +276,7 @@ async fn main() -> Result<()> {
         // Fallback: use localhost when listening on all interfaces
         format!(
             "http://127.0.0.1:{}",
-            listen.split(':').last().unwrap_or("9002")
+            listen.split(':').next_back().unwrap_or("9002")
         )
     } else {
         format!("http://{}", listen)
@@ -410,6 +411,7 @@ async fn main() -> Result<()> {
 }
 
 /// Register this OSD with the metadata service
+#[allow(clippy::result_large_err)]
 async fn register_with_meta(
     meta_endpoint: &str,
     node_id: &[u8; 16],

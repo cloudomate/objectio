@@ -473,7 +473,7 @@ impl WriteAheadLog {
         let record_len = record_bytes.len();
 
         // Align to 4KB boundary for next write
-        let aligned_len = ((record_len + 4095) / 4096) * 4096;
+        let aligned_len = record_len.div_ceil(4096) * 4096;
 
         let offset = {
             let mut header = self.header.lock();
@@ -518,9 +518,6 @@ impl WriteAheadLog {
     ///
     /// Returns a map of transaction ID -> list of write operations
     pub fn replay(&self) -> Result<HashMap<u64, Vec<WriteOp>>> {
-        let header = self.header.lock().clone();
-        drop(header);
-
         let mut offset = WAL_HEADER_SIZE;
         let end_offset = self.header.lock().write_offset;
 
@@ -546,10 +543,10 @@ impl WriteAheadLog {
                     transactions.insert(record.txn_id, vec![]);
                 }
                 RecordType::Write => {
-                    if let Some(writes) = transactions.get_mut(&record.txn_id) {
-                        if let Ok(write_op) = WriteOp::from_bytes(&record.data) {
-                            writes.push(write_op);
-                        }
+                    if let Some(writes) = transactions.get_mut(&record.txn_id)
+                        && let Ok(write_op) = WriteOp::from_bytes(&record.data)
+                    {
+                        writes.push(write_op);
                     }
                 }
                 RecordType::Commit => {
@@ -567,7 +564,7 @@ impl WriteAheadLog {
 
             // Move to next aligned position
             let record_size = record.serialized_size();
-            let aligned_size = ((record_size + 4095) / 4096) * 4096;
+            let aligned_size = record_size.div_ceil(4096) * 4096;
             offset += aligned_size as u64;
         }
 
