@@ -97,6 +97,7 @@ const LATENCY_BUCKET_BOUNDARIES_MS: [u64; 11] =
     [1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 10000];
 
 impl OperationMetrics {
+    #[allow(dead_code)]
     fn new() -> Self {
         Self::default()
     }

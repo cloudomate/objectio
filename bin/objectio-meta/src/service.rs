@@ -267,10 +267,9 @@ impl MetaService {
                 let keys = self.user_keys.read();
                 if let Some(key_ids) = keys.get(&admin_user.user_id)
                     && let Some(first_key_id) = key_ids.first()
+                    && let Some(key) = self.access_keys.read().get(first_key_id)
                 {
-                    if let Some(key) = self.access_keys.read().get(first_key_id) {
-                        return Some((key.access_key_id.clone(), key.secret_access_key.clone()));
-                    }
+                    return Some((key.access_key_id.clone(), key.secret_access_key.clone()));
                 }
             }
             return None;

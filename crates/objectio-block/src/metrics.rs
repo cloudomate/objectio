@@ -880,7 +880,7 @@ pub fn export_histogram_prometheus(
     let buckets = histogram.bucket_counts();
     let mut cumulative = 0u64;
 
-    for (_i, (boundary_us, count)) in buckets.iter().enumerate() {
+    for (boundary_us, count) in buckets.iter() {
         cumulative += count;
         let boundary_secs = *boundary_us as f64 / 1_000_000.0;
 
