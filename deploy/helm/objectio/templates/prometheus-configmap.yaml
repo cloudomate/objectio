@@ -1,0 +1,66 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "objectio.prometheus.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: {{ .Values.monitoring.prometheus.scrapeInterval }}
+      evaluation_interval: {{ .Values.monitoring.prometheus.scrapeInterval }}
+
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+
+      - job_name: 'objectio-gateway'
+        metrics_path: /metrics
+        scrape_interval: 10s
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: {{ include "objectio.gateway.fullname" . }}
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: http
+            action: keep
+
+      - job_name: 'objectio-meta'
+        scrape_interval: 15s
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: {{ include "objectio.meta.headless" . }}
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: grpc
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: instance
+
+      - job_name: 'objectio-osd'
+        scrape_interval: 15s
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [{{ .Release.Namespace | quote }}]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: {{ include "objectio.osd.headless" . }}
+            action: keep
+          - source_labels: [__meta_kubernetes_endpoint_port_name]
+            regex: grpc
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: osd_instance
+{{- end }}

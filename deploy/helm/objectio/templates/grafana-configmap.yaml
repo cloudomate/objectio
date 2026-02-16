@@ -1,0 +1,36 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "objectio.grafana.fullname" . }}-provisioning
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://{{ include "objectio.prometheus.fullname" . }}:{{ .Values.monitoring.prometheus.service.port }}
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"
+          httpMethod: POST
+
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: 'ObjectIO Dashboards'
+        orgId: 1
+        folder: 'ObjectIO'
+        folderUid: 'objectio'
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 30
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+{{- end }}

@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "objectio.osd.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osd
+spec:
+  serviceName: {{ include "objectio.osd.headless" . }}
+  replicas: {{ .Values.osd.replicas }}
+  selector:
+    matchLabels:
+      {{- include "objectio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: osd
+  template:
+    metadata:
+      labels:
+        {{- include "objectio.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: osd
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: config-renderer
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.osd.image.repository }}:{{ .Values.osd.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ORDINAL=$(echo "$HOSTNAME" | rev | cut -d- -f1 | rev)
+              NODE_NAME="{{ include "objectio.osd.fullname" . }}-${ORDINAL}"
+              ADVERTISE_ADDR="{{ include "objectio.osd.fullname" . }}-${ORDINAL}.{{ include "objectio.osd.headless" . }}:{{ .Values.osd.service.port }}"
+              sed \
+                -e "s/__NODE_NAME__/${NODE_NAME}/g" \
+                -e "s/__ADVERTISE_ADDR__/${ADVERTISE_ADDR}/g" \
+                /tmp/osd-template/osd.toml.tpl > /etc/objectio/osd.toml
+              echo "Rendered OSD config for ${NODE_NAME}:"
+              cat /etc/objectio/osd.toml
+          volumeMounts:
+            - name: config-template
+              mountPath: /tmp/osd-template
+            - name: config
+              mountPath: /etc/objectio
+      containers:
+        - name: osd
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.osd.image.repository }}:{{ .Values.osd.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "--config"
+            - "/etc/objectio/osd.toml"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.osd.service.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.osd.service.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /etc/objectio
+            - name: data
+              mountPath: /data/disk0
+            - name: state
+              mountPath: /var/lib/objectio
+          resources:
+            {{- toYaml .Values.osd.resources | nindent 12 }}
+      volumes:
+        - name: config-template
+          configMap:
+            name: {{ include "objectio.osd.fullname" . }}-config
+        - name: config
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.osd.persistence.data.storageClass }}
+        storageClassName: {{ .Values.osd.persistence.data.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.osd.persistence.data.size }}
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.osd.persistence.state.storageClass }}
+        storageClassName: {{ .Values.osd.persistence.state.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.osd.persistence.state.size }}

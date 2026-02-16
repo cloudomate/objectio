@@ -135,3 +135,11 @@ jobs:
 
             echo "::endgroup::"
           done
+
+      - name: Package and push Helm chart
+        run: |
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          helm package deploy/helm/objectio \
+            --version "0.1.0-${SHA_SHORT}" \
+            --app-version "${SHA_SHORT}"
+          helm push objectio-*.tgz oci://${{ env.REGISTRY }}

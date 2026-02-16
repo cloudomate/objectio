@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "objectio.meta.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meta
+spec:
+  serviceName: {{ include "objectio.meta.headless" . }}
+  replicas: {{ .Values.meta.replicas }}
+  selector:
+    matchLabels:
+      {{- include "objectio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: meta
+  template:
+    metadata:
+      labels:
+        {{- include "objectio.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: meta
+    spec:
+      containers:
+        - name: meta
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.meta.image.repository }}:{{ .Values.meta.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ORDINAL=$(echo "$HOSTNAME" | rev | cut -d- -f1 | rev)
+              NODE_ID=$((ORDINAL + 1))
+              exec objectio-meta \
+                --node-id "$NODE_ID" \
+                --listen "0.0.0.0:{{ .Values.meta.service.port }}" \
+                --peers "{{ include "objectio.metaPeers" . }}" \
+                --data-dir /var/lib/objectio/meta \
+                --log-level "{{ .Values.meta.logLevel }}"
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.meta.service.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.meta.service.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/objectio
+          resources:
+            {{- toYaml .Values.meta.resources | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.meta.persistence.storageClass }}
+        storageClassName: {{ .Values.meta.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.meta.persistence.size }}

@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "objectio.osd.fullname" . }}-config
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osd
+data:
+  osd.toml.tpl: |
+    [osd]
+    node_name = "__NODE_NAME__"
+    listen = "0.0.0.0:{{ .Values.osd.service.port }}"
+    meta_endpoint = "http://{{ include "objectio.meta.fullname" . }}:{{ .Values.meta.service.port }}"
+    weight = 1.0
+
+    [osd.failure_domain]
+    region = {{ .Values.osd.failureDomain.region | quote }}
+    datacenter = {{ .Values.osd.failureDomain.datacenter | quote }}
+    rack = {{ .Values.osd.failureDomain.rack | quote }}
+
+    [storage]
+    disks = ["/data/disk0/{{ .Values.osd.storage.diskFile }}"]
+    block_size = {{ .Values.osd.storage.blockSize | int }}
+    data_dir = "/var/lib/objectio/osd"
+
+    [logging]
+    level = {{ .Values.osd.logLevel | quote }}

@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "objectio.gateway.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "objectio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        {{- include "objectio.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "--listen"
+            - "0.0.0.0:{{ .Values.gateway.service.port }}"
+            - "--meta-endpoint"
+            - "http://{{ include "objectio.meta.fullname" . }}:{{ .Values.meta.service.port }}"
+            - "--ec-k"
+            - {{ .Values.ec.k | quote }}
+            - "--ec-m"
+            - {{ .Values.ec.m | quote }}
+            {{- if .Values.gateway.noAuth }}
+            - "--no-auth"
+            {{- end }}
+            - "--log-level"
+            - {{ .Values.gateway.logLevel | quote }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
