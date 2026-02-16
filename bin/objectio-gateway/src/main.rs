@@ -99,6 +99,10 @@ struct Args {
     #[arg(long, default_value = "us-east-1")]
     region: String,
 
+    /// Iceberg REST Catalog warehouse location (S3 URL prefix for table data)
+    #[arg(long, default_value = "s3://objectio-warehouse")]
+    warehouse_location: String,
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -221,9 +225,11 @@ async fn main() -> Result<()> {
     let scatter_gather = ScatterGatherEngine::new(osd_pool.clone(), signing_key.as_bytes());
 
     // Build Iceberg REST Catalog router (before AppState consumes meta_client)
-    let warehouse_location = "s3://objectio-warehouse".to_string();
-    let iceberg_router = objectio_iceberg::router(meta_client.clone(), warehouse_location);
-    info!("Iceberg REST Catalog enabled at /iceberg/v1/*");
+    let iceberg_router = objectio_iceberg::router(meta_client.clone(), args.warehouse_location.clone());
+    info!(
+        "Iceberg REST Catalog enabled at /iceberg/v1/* (warehouse: {})",
+        args.warehouse_location
+    );
 
     // Create application state
     let state = Arc::new(AppState {

@@ -7,9 +7,15 @@
 #   docker compose down -v   # Stop + delete all data
 #   docker compose logs -f   # View logs
 #
-# Test:
+# S3 Test:
 #   aws --endpoint-url http://localhost:9000 s3 mb s3://test
 #   objectio-cli -e http://localhost:9100 volume list
+#
+# Iceberg REST Catalog:
+#   curl http://localhost:9000/iceberg/v1/config
+#   curl -X POST http://localhost:9000/iceberg/v1/namespaces \
+#     -H 'Content-Type: application/json' \
+#     -d '{"namespace":["analytics"],"properties":{}}'
 #
 # Each OSD gets a Docker local volume (10GB, ext4) mounted as /data/disk0.
 # Docker creates folders under /var/lib/docker/volumes/ on the host.
@@ -31,7 +37,7 @@ x-osd-common: &osd-common
 
 services:
   # ==========================================================================
-  # S3 Gateway (EC 3+2)
+  # S3 Gateway + Iceberg REST Catalog (EC 3+2)
   # ==========================================================================
   gateway:
     image: cr.imys.in/objectio/objectio-gateway:latest
@@ -47,6 +53,8 @@ services:
       - "3"
       - "--ec-m"
       - "2"
+      - "--warehouse-location"
+      - "s3://objectio-warehouse"
       - "--no-auth"
       - "--log-level"
       - "info"
