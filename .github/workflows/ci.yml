@@ -6,14 +6,10 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  REGISTRY_URL: cr.imys.in
-  REGISTRY_PROJECT: objectio
-
 jobs:
   ci:
     name: fmt + lint + test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -52,19 +48,20 @@ jobs:
     name: Build & Push Docker Images
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    environment: prod
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Login to registry
-        run: echo "${REGISTRY_PASSWORD}" | docker login ${{ env.REGISTRY_URL }} -u "${REGISTRY_USERNAME}" --password-stdin
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_URL }}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
       - name: Build and push images
+        env:
+          REGISTRY: ${{ secrets.REGISTRY_URL }}/${{ secrets.REGISTRY_PROJECT }}
         run: |
           SHA_SHORT=$(git rev-parse --short HEAD)
-
-          REGISTRY="${REGISTRY_URL}/${REGISTRY_PROJECT}"
 
           for PAIR in gateway:objectio-gateway meta:objectio-meta osd:objectio-osd cli:objectio-cli all:objectio; do
             TARGET="${PAIR%%:*}"
