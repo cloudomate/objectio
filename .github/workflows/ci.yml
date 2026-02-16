@@ -49,17 +49,18 @@ jobs:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: prod
+    permissions:
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Login to registry
-        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_URL }}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build and push images
         env:
-          REGISTRY: ${{ secrets.REGISTRY_URL }}/${{ secrets.REGISTRY_PROJECT }}
+          REGISTRY: ghcr.io/${{ github.repository_owner }}
         run: |
           SHA_SHORT=$(git rev-parse --short HEAD)
 
