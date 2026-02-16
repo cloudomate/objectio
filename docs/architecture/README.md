@@ -5,12 +5,13 @@ This section describes the system architecture of ObjectIO.
 ## Contents
 
 - [Components](components.md) - Detailed component descriptions
+- [Block Storage](block-storage.md) - Distributed block storage design
 - [Data Protection](data-protection.md) - Erasure coding and replication
 - [Deployment Options](deployment-options.md) - Configuration by hardware topology
 
 ## Overview
 
-ObjectIO is a distributed object storage system with three main layers:
+ObjectIO is a software-defined storage (SDS) platform with S3 object and block storage interfaces, built on three service layers:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -38,10 +39,12 @@ ObjectIO is a distributed object storage system with three main layers:
 │  ┌───────────────────────────────────────────────────────────────────┐  │
 │  │                    objectio-meta                                  │  │
 │  │                                                                   │  │
-│  │  Stores ONLY cluster configuration (not object metadata):         │  │
+│  │  Stores cluster configuration and metadata (redb persistence):    │  │
 │  │  • Bucket definitions (name, owner, storage_class)               │  │
 │  │  • OSD topology (node_id, address, failure_domain)               │  │
 │  │  • Bucket policies (access control)                              │  │
+│  │  • IAM users and access keys                                     │  │
+│  │  • Volume/snapshot metadata (block storage)                      │  │
 │  │  • CRUSH 2.0 placement algorithm                                 │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────┬───────────────────────────────────────────────┘
@@ -97,7 +100,7 @@ ObjectIO uses a **distributed metadata model** (similar to Ceph) where:
 │  │ storage_class   │  │ failure_domain  │  │ policy_json     │          │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘          │
 │                                                                         │
-│  Small, rarely changes, simple persistence (redb or JSON snapshot)      │
+│  Persisted via redb; in-memory HashMap cache for fast reads             │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -330,19 +333,22 @@ No C/C++ dependencies for core functionality (ISA-L is optional for performance)
 
 | Component | Binary | Purpose | Status |
 |-----------|--------|---------|--------|
-| **S3 Gateway** | `objectio-gateway` | S3 REST API, auth, EC encode/decode | ✅ Complete |
-| **Metadata Service** | `objectio-meta` | Buckets, topology, CRUSH placement | ✅ Complete |
-| **Storage Node (OSD)** | `objectio-osd` | Shard storage, object metadata | ✅ Complete |
-| **Admin CLI** | `objectio-cli` | Cluster management | ✅ Complete |
-| **Installer** | `objectio-install` | Automated deployment | ✅ Complete |
+| **S3 Gateway** | `objectio-gateway` | S3 REST API, auth, EC encode/decode | Complete |
+| **Metadata Service** | `objectio-meta` | Buckets, topology, IAM, volumes, CRUSH placement (redb persistence) | Complete |
+| **Block Storage** | `objectio-block` | Volume manager, chunk mapper, write cache/journal, QoS | Complete |
+| **Storage Node (OSD)** | `objectio-osd` | Shard storage, object metadata, block I/O | Complete |
+| **Admin CLI** | `objectio-cli` | Cluster, user, and volume management | Complete |
+| **Installer** | `objectio-install` | Automated deployment | Complete |
 
 ## Metadata Distribution Summary
 
 | Data | Location | Persistence | Notes |
 |------|----------|-------------|-------|
-| **Bucket definitions** | Meta service | In-memory (planned: redb) | Small, rarely changes |
-| **OSD topology** | Meta service | In-memory (planned: redb) | Updated on OSD join/leave |
-| **Bucket policies** | Meta service | In-memory (planned: redb) | Access control rules |
+| **Bucket definitions** | Meta service | redb + in-memory cache | Small, rarely changes |
+| **OSD topology** | Meta service | redb + in-memory cache | Updated on OSD join/leave |
+| **Bucket policies** | Meta service | redb + in-memory cache | Access control rules |
+| **IAM users/keys** | Meta service | redb + in-memory cache | Authentication credentials |
+| **Volume metadata** | Meta service | redb + in-memory cache | Block storage volumes/snapshots |
 | **CRUSH map** | Meta service | Computed from topology | Not stored, computed |
 | **Object metadata** | Primary OSD | WAL + B-tree | Persisted, crash-safe |
 | **Shard data** | All k+m OSDs | Raw disk blocks | Checksummed (CRC32C) |
@@ -519,4 +525,5 @@ struct CachedCredential {
 ## Next Steps
 
 - [Components](components.md) - Detailed component descriptions
+- [Block Storage](block-storage.md) - Distributed block storage design
 - [Data Protection](data-protection.md) - Erasure coding and replication strategies

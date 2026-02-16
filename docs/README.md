@@ -1,6 +1,6 @@
 # ObjectIO Documentation
 
-ObjectIO is a pure Software Defined Storage (SDS) system written in Rust that provides S3 API compatibility with erasure coding and replication for data protection.
+ObjectIO is a software-defined storage (SDS) platform written in Rust that provides S3-compatible object storage and distributed block storage with erasure coding for data protection.
 
 ## Quick Links
 
@@ -8,6 +8,7 @@ ObjectIO is a pure Software Defined Storage (SDS) system written in Rust that pr
 |-------|-------------|
 | [Getting Started](getting-started.md) | Quick start guide for new users |
 | [Architecture](architecture/README.md) | System design and components |
+| [Block Storage](architecture/block-storage.md) | Volumes, snapshots, QoS |
 | [Storage Engine](storage/README.md) | Disk layout, caching, erasure coding |
 | [Deployment](deployment/README.md) | Installation and configuration |
 | [API Reference](api/README.md) | S3 API and authentication |
@@ -19,10 +20,13 @@ ObjectIO is a pure Software Defined Storage (SDS) system written in Rust that pr
 docs/
 ├── README.md                    # This file
 ├── getting-started.md           # Quick start guide
+├── DESIGN.md                    # Detailed design document
 ├── architecture/
 │   ├── README.md                # Architecture overview
 │   ├── components.md            # Component details
-│   └── data-protection.md       # EC and replication
+│   ├── block-storage.md         # Block storage design
+│   ├── data-protection.md       # EC and replication
+│   └── deployment-options.md    # Configuration by topology
 ├── storage/
 │   ├── README.md                # Storage overview
 │   ├── disk-layout.md           # Raw disk format
@@ -46,6 +50,7 @@ docs/
 ## Key Features
 
 - **S3 API Compatibility**: Works with aws-cli, boto3, s3cmd, and any S3-compatible SDK
+- **Block Storage**: Distributed volumes with thin provisioning, snapshots, clones, and QoS
 - **Erasure Coding**: Storage-efficient data protection (4+2, 8+4, LRC)
 - **Raw Disk Access**: O_DIRECT/F_NOCACHE for maximum performance
 - **Flexible Deployment**: Single-node to multi-datacenter scale
@@ -55,47 +60,47 @@ docs/
 
 | Component | Binary | Purpose |
 |-----------|--------|---------|
-| S3 Gateway | `objectio-gateway` | S3 REST API, authentication |
-| Metadata Service | `objectio-meta` | Bucket/object metadata (in-memory) |
-| Storage Node (OSD) | `objectio-osd` | Raw disk storage, erasure coding |
-| Admin CLI | `objectio-cli` | Cluster management |
+| S3 Gateway | `objectio-gateway` | S3 REST API, authentication, erasure encoding |
+| Metadata Service | `objectio-meta` | Bucket/object/volume metadata (redb persistence) |
+| Storage Node (OSD) | `objectio-osd` | Raw disk storage, shard I/O, block storage gRPC |
+| Admin CLI | `objectio-cli` | Cluster, user, and volume management |
 | Installer | `objectio-install` | Automated deployment |
 
 ## Implementation Status
 
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Phase 1: Foundation | ✅ Complete | Workspace structure, core types, protobuf |
-| Phase 2: Storage Engine | ✅ Complete | Raw disk I/O, B-tree + WAL + ARC cache |
-| Phase 3: Cluster Metadata | ⚠️ Partial | In-memory only; Raft + persistence pending |
-| Phase 4: S3 API Gateway | ✅ Complete | HTTP server, S3 operations, XML responses |
-| Phase 5: Reliability | ⚠️ Partial | Health checks done; repair manager pending |
-| Phase 6: Auth & Installer | ✅ Complete | SigV4, bucket policies, installer |
-| Phase 7: LRC & Backends | ✅ Complete | ISA-L backend, LRC codes (not wired to API) |
-| Phase 8: External IAM | 📋 Planned | OIDC, OpenFGA integration |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Storage Engine | Complete | Raw disk I/O, B-tree + WAL + ARC cache |
+| S3 API Gateway | Complete | HTTP server, S3 operations, XML responses, multipart |
+| Metadata Persistence | Complete | redb-backed storage with in-memory cache |
+| CRUSH 2.0 Placement | Complete | HRW hashing, rack/node/disk-aware, integrated |
+| Erasure Coding | Complete | Reed-Solomon (rust-simd + ISA-L), LRC |
+| Authentication | Complete | SigV4, bucket policies, IAM users |
+| Block Storage | Complete | Volumes, snapshots, clones, QoS, write cache/journal |
+| Raft Consensus | Placeholder | openraft dependency exists, state machine scaffolded |
+| External IAM | Planned | OIDC, OpenFGA integration |
 
-### Implementation Gaps
+### Known Gaps
 
-| Component | Planned | Actual | Impact |
-|-----------|---------|--------|--------|
-| Cluster Metadata | redb + Raft | In-memory HashMap | Data lost on restart; single point of failure |
-| Placement | CRUSH 2.0 | Simple hash rotation | Code exists but not wired up |
-| LRC API | Exposed via config | Backend only | LRC encoding works but not selectable |
-| io_uring | Async I/O | Sync O_DIRECT | Uses standard sync I/O |
-
-> See [Architecture Components](architecture/components.md) for detailed implementation status.
+| Area | Current State | Impact |
+|------|--------------|--------|
+| Raft consensus | Placeholder — single meta node | No HA for metadata (redb provides persistence, not replication) |
+| io_uring | Standard sync O_DIRECT | Uses blocking I/O on Tokio spawn_blocking |
+| LRC in API | Backend implemented | LRC encoding works but not yet selectable via S3 API |
+| Repair manager | Not implemented | Background scrubbing/repair not yet automated |
 
 ## Technology Stack
 
 | Component | Crate | Status |
 |-----------|-------|--------|
-| Async Runtime | `tokio` | ✅ Used |
-| HTTP Framework | `axum` | ✅ Used |
-| gRPC | `tonic` | ✅ Used |
-| Erasure Coding | `reed-solomon-simd`, `erasure-isa-l` | ✅ Used |
-| Consensus | `openraft` | ⚠️ Dependency exists, not integrated |
-| KV Store | `redb` | ⚠️ Dependency exists, not integrated |
-| OSD Metadata | Custom B-tree + WAL | ✅ Fully implemented |
+| Async Runtime | `tokio` | In use |
+| HTTP Framework | `axum` 0.8 | In use |
+| gRPC | `tonic` 0.12 / `prost` 0.13 | In use |
+| Erasure Coding | `reed-solomon-simd`, `erasure-isa-l` | In use |
+| Consensus | `openraft` 0.9 | Dependency exists, placeholder impl |
+| KV Store | `redb` 2.4 | In use (meta persistence) |
+| OSD Metadata | Custom B-tree + WAL + ARC | In use |
+| Block Storage | `objectio-block` | In use |
 
 ## Contributing
 
@@ -103,4 +108,4 @@ See the [architecture documentation](architecture/README.md) for design details 
 
 ## License
 
-See [LICENSE](../LICENSE) for details.
+[Apache License 2.0](../LICENSE)

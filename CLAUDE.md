@@ -168,7 +168,7 @@ Binaries live in `bin/`, not `src/`:
 
 ## Workspace Conventions
 
-- **Rust edition 2024**, minimum rustc 1.92
+- **Rust edition 2024**, minimum rustc 1.93
 - **Clippy**: `all`, `pedantic`, and `nursery` lints enabled workspace-wide (see `[workspace.lints.clippy]` in root Cargo.toml). No crate-specific overrides — all lint config is workspace-level.
 - **unsafe_code**: warn level
 - **Async runtime**: Tokio (full features) everywhere

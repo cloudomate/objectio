@@ -1,10 +1,10 @@
 # Getting Started with ObjectIO
 
-This guide will help you get ObjectIO running quickly.
+This guide will help you get ObjectIO running quickly. ObjectIO is a software-defined storage platform providing S3 object storage and distributed block storage.
 
 ## Prerequisites
 
-- Rust 1.92+ (for building from source)
+- Rust 1.93+ (for building from source)
 - Docker and Docker Compose (for containerized deployment)
 - Linux or macOS
 
@@ -41,7 +41,7 @@ The fastest way to try ObjectIO is using Docker Compose.
 ### 1. Clone and Build
 
 ```bash
-git clone https://github.com/your-org/objectio.git
+git clone https://github.com/objectio/objectio.git
 cd objectio
 
 # Build Docker images

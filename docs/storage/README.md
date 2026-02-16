@@ -68,7 +68,7 @@ See [Disk Layout](disk-layout.md) for detailed format specifications.
 
 Each OSD maintains a local metadata store (separate from the cluster metadata service) for tracking shards stored on its disks.
 
-> **Implementation Status**: ✅ Fully implemented with custom B-tree index, WAL, and ARC cache.
+> **Implementation Status**: Fully implemented with custom B-tree index, WAL, and ARC cache.
 
 ### Architecture
 

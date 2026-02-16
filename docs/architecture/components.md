@@ -65,19 +65,19 @@ Gateways are stateless and can be horizontally scaled. Use a load balancer (HAPr
 
 ## Metadata Service (`objectio-meta`)
 
-The Metadata Service manages all cluster metadata.
-
-> **Implementation Status**: The current implementation uses in-memory storage. Raft consensus and persistent storage (redb or custom B-tree) are planned but not yet implemented.
+The Metadata Service manages all cluster metadata with redb persistence.
 
 ### Responsibilities
 
 - **Bucket Metadata**: Create, delete, list buckets
 - **Object Metadata**: Object locations, versions, user metadata
+- **Volume Metadata**: Block storage volumes, snapshots, chunks
 - **OSD Registration**: Track available storage nodes
-- **Placement Decisions**: Shard placement (CRUSH 2.0 code exists but not wired up)
+- **Placement Decisions**: CRUSH 2.0 (HRW hashing) for shard placement
+- **IAM**: Users, access keys, bucket policies
 - **Bucket Policies**: JSON-based access control
 
-### Current Architecture (In-Memory)
+### Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -91,43 +91,45 @@ The Metadata Service manages all cluster metadata.
 │          │                                                       │
 │          ▼                                                       │
 │   ┌─────────────────────────────────────────────────────────────┐│
-│   │              MetaService (parking_lot::RwLock)              ││
+│   │              MetaService (in-memory cache + redb)           ││
 │   │  ┌───────────────┐  ┌───────────────┐  ┌─────────────────┐  ││
-│   │  │   buckets:    │  │   objects:    │  │   osd_nodes:    │  ││
+│   │  │   buckets:    │  │   users:      │  │   osd_nodes:    │  ││
 │   │  │   HashMap     │  │   HashMap     │  │   Vec<OsdNode>  │  ││
 │   │  └───────────────┘  └───────────────┘  └─────────────────┘  ││
-│   │  ┌───────────────────────────────────────────────────────┐  ││
-│   │  │   bucket_policies: HashMap<String, String>            │  ││
-│   │  └───────────────────────────────────────────────────────┘  ││
+│   │  ┌───────────────┐  ┌───────────────┐  ┌─────────────────┐  ││
+│   │  │  volumes:     │  │  access_keys: │  │  policies:      │  ││
+│   │  │  HashMap      │  │  HashMap      │  │  HashMap        │  ││
+│   │  └───────────────┘  └───────────────┘  └─────────────────┘  ││
+│   └─────────────────────────────────────────────────────────────┘│
+│          │                                                       │
+│          ▼                                                       │
+│   ┌─────────────────────────────────────────────────────────────┐│
+│   │              redb (persistent KV store)                     ││
+│   │  Tables: buckets, bucket_policies, multipart_uploads,       ││
+│   │          osd_nodes, cluster_topology, users, access_keys,   ││
+│   │          volumes, snapshots, volume_chunks                  ││
 │   └─────────────────────────────────────────────────────────────┘│
 │                                                                  │
-│   ⚠️  NO PERSISTENCE - Data lost on restart                      │
-│   ⚠️  NO RAFT - Single point of failure                          │
+│   ✅ All writes persisted to redb                                │
+│   ✅ Data loaded from redb on startup                            │
+│   ✅ CRUSH 2.0 placement integrated                             │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Planned Architecture (With Raft + Persistence)
+The service maintains in-memory HashMaps for fast reads and persists all writes to redb. On startup, all data is loaded from redb into memory.
+
+### Planned: Raft HA
+
+Raft consensus (via openraft) is scaffolded but not yet active. Currently the meta service runs as a single instance. When Raft is completed, deploy 3, 5, or 7 nodes:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Metadata Service (Planned)                    │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   ┌─────────────┐        ┌─────────────┐                         │
-│   │   gRPC      │        │   Raft      │  ← openraft             │
-│   │   Server    │◄──────►│   Engine    │                         │
-│   └─────────────┘        └──────┬──────┘                         │
-│                                 │                                │
-│                    ┌────────────┴────────────┐                   │
-│                    │     State Machine       │                   │
-│                    │  (B-tree + WAL or redb) │                   │
-│                    └─────────────────────────┘                   │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+3 nodes: Survives 1 failure
+5 nodes: Survives 2 failures
+7 nodes: Survives 3 failures
 ```
 
-### Data Stored (Cluster Metadata)
+### Data Stored
 
 | Category | Contents | Purpose |
 |----------|----------|---------|
@@ -137,24 +139,16 @@ The Metadata Service manages all cluster metadata.
 | **Shard Locations** | position, node_id, disk_id, offset, shard_type, local_group | Exact shard placement |
 | **OSD Registry** | node_id, address, disk_ids | Available storage nodes |
 | **Bucket Policies** | bucket → policy_json | Access control |
+| **IAM Users** | user_id, display_name, email, ARN, status | User management |
+| **Access Keys** | access_key_id, secret, user_id, status | S3 authentication |
+| **Volumes** | volume_id, name, size, pool, state | Block storage volumes |
+| **Snapshots** | snapshot_id, volume_id, name, chunk_manifest | COW snapshots |
 | **Multipart Uploads** | upload_id, bucket, key, parts | In-progress uploads |
-
-### Cluster Configuration (Current)
-
-Currently runs as a single instance. When Raft is implemented, deploy 3, 5, or 7 nodes:
-
-```
-3 nodes: Survives 1 failure
-5 nodes: Survives 2 failures
-7 nodes: Survives 3 failures
-```
 
 ### Known Limitations
 
-1. **No persistence**: All metadata lost on service restart
-2. **Single point of failure**: No replication or failover
-3. **CRUSH 2.0 not wired**: Uses simple hash-based placement instead
-4. **No LRC in placement**: Only MDS (Reed-Solomon) placement exposed
+1. **Single point of failure**: Raft not yet active (data is persistent via redb, but no replication)
+2. **No LRC in placement**: Only MDS (Reed-Solomon) placement exposed via API
 
 ---
 

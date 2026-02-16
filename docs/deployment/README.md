@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This section covers deploying ObjectIO in various configurations.
+This section covers deploying ObjectIO (S3 object storage + block storage) in various configurations.
 
 ## Contents
 
@@ -14,7 +14,7 @@ This section covers deploying ObjectIO in various configurations.
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/objectio.git
+git clone https://github.com/objectio/objectio.git
 cd objectio
 
 # Build Docker images
@@ -62,7 +62,7 @@ sudo ./objectio-install --config install.toml
 
 - Linux (kernel 4.19+) or macOS (10.15+)
 - Docker 24+ (for container deployment)
-- Rust 1.92+ (for building from source)
+- Rust 1.93+ (for building from source)
 
 ## Cluster Sizing
 
@@ -88,10 +88,11 @@ For 8+4 erasure coding:
 
 | Port | Service | Protocol |
 |------|---------|----------|
-| 9000 | S3 Gateway | HTTP/HTTPS |
+| 9000 | S3 Gateway (API + metrics) | HTTP/HTTPS |
 | 9100 | Metadata gRPC | gRPC |
-| 9101 | Metadata Raft | gRPC |
+| 9101 | Metadata metrics | HTTP |
 | 9200 | OSD gRPC | gRPC |
+| 9201 | OSD metrics | HTTP |
 
 ## Security Checklist
 

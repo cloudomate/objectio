@@ -18,6 +18,7 @@ Thumbs.db
 .env.local
 *.pem
 *.key
+*.local.md
 
 # Logs
 *.log
