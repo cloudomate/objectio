@@ -71,6 +71,8 @@ impl MetaStore {
             let _t = write_txn.open_table(tables::VOLUMES)?;
             let _t = write_txn.open_table(tables::SNAPSHOTS)?;
             let _t = write_txn.open_table(tables::VOLUME_CHUNKS)?;
+            let _t = write_txn.open_table(tables::ICEBERG_NAMESPACES)?;
+            let _t = write_txn.open_table(tables::ICEBERG_TABLES)?;
         }
         write_txn.commit()?;
 
@@ -366,6 +368,103 @@ impl MetaStore {
         {
             error!("Failed to delete chunks for volume '{}': {}", volume_id, e);
         }
+    }
+
+    // ---- Iceberg Namespaces (raw bytes, prost-encoded) ----
+
+    pub fn put_iceberg_namespace(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::ICEBERG_NAMESPACES, key, data) {
+            error!("Failed to persist iceberg namespace '{}': {}", key, e);
+        }
+    }
+
+    pub fn get_iceberg_namespace(&self, key: &str) -> MetaStoreResult<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::ICEBERG_NAMESPACES)?;
+        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+    }
+
+    pub fn delete_iceberg_namespace(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::ICEBERG_NAMESPACES, key) {
+            error!("Failed to delete iceberg namespace '{}': {}", key, e);
+        }
+    }
+
+    pub fn list_iceberg_namespaces(&self, prefix: &str) -> MetaStoreResult<Vec<(String, Vec<u8>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::ICEBERG_NAMESPACES)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            let k = entry.0.value().to_string();
+            if prefix.is_empty() || k.starts_with(prefix) {
+                result.push((k, entry.1.value().to_vec()));
+            }
+        }
+        Ok(result)
+    }
+
+    // ---- Iceberg Tables (raw bytes, prost-encoded) ----
+
+    pub fn put_iceberg_table(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::ICEBERG_TABLES, key, data) {
+            error!("Failed to persist iceberg table '{}': {}", key, e);
+        }
+    }
+
+    pub fn get_iceberg_table(&self, key: &str) -> MetaStoreResult<Option<Vec<u8>>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::ICEBERG_TABLES)?;
+        Ok(table.get(key)?.map(|v| v.value().to_vec()))
+    }
+
+    pub fn delete_iceberg_table(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::ICEBERG_TABLES, key) {
+            error!("Failed to delete iceberg table '{}': {}", key, e);
+        }
+    }
+
+    pub fn list_iceberg_tables(
+        &self,
+        namespace_prefix: &str,
+    ) -> MetaStoreResult<Vec<(String, Vec<u8>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::ICEBERG_TABLES)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            let k = entry.0.value().to_string();
+            if k.starts_with(namespace_prefix) {
+                result.push((k, entry.1.value().to_vec()));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Compare-and-swap for Iceberg table metadata location.
+    /// Returns true if the swap succeeded (current value matched `expected`).
+    pub fn cas_iceberg_table(
+        &self,
+        key: &str,
+        expected: &[u8],
+        new: &[u8],
+    ) -> MetaStoreResult<bool> {
+        let write_txn = self.db.begin_write()?;
+        let swapped = {
+            let mut table = write_txn.open_table(tables::ICEBERG_TABLES)?;
+            // Read and compare, then drop the guard before mutating
+            let matches = table.get(key)?.is_some_and(|val| val.value() == expected);
+            if matches {
+                table.insert(key, new)?;
+                true
+            } else {
+                false
+            }
+        };
+        if swapped {
+            write_txn.commit()?;
+        }
+        Ok(swapped)
     }
 
     // ---- Generic helpers ----

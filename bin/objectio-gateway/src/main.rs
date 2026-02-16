@@ -220,6 +220,11 @@ async fn main() -> Result<()> {
     let signing_key = format!("objectio-scatter-gather-{}", args.region);
     let scatter_gather = ScatterGatherEngine::new(osd_pool.clone(), signing_key.as_bytes());
 
+    // Build Iceberg REST Catalog router (before AppState consumes meta_client)
+    let warehouse_location = "s3://objectio-warehouse".to_string();
+    let iceberg_router = objectio_iceberg::router(meta_client.clone(), warehouse_location);
+    info!("Iceberg REST Catalog enabled at /iceberg/v1/*");
+
     // Create application state
     let state = Arc::new(AppState {
         meta_client,
@@ -290,6 +295,8 @@ async fn main() -> Result<()> {
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
             .with_state(state)
+            // Iceberg REST Catalog (nested after with_state since it has its own state)
+            .nest("/iceberg", iceberg_router.clone())
     } else {
         info!("Authentication is DISABLED (development mode)");
         info!("Admin API is ENABLED (no auth required in dev mode)");
@@ -344,6 +351,8 @@ async fn main() -> Result<()> {
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
             .with_state(state)
+            // Iceberg REST Catalog (nested after with_state since it has its own state)
+            .nest("/iceberg", iceberg_router)
     };
 
     // Parse listen address

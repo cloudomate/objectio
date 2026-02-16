@@ -37,6 +37,7 @@ crc32c = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 objectio-auth = { workspace = true }
+objectio-iceberg = { workspace = true }
 http = "1.2"
 chrono = "0.4"
 ring = { workspace = true }

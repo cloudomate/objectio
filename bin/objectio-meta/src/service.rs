@@ -51,6 +51,36 @@ use objectio_proto::metadata::{
     GetPlacementResponse,
     GetUserRequest,
     GetUserResponse,
+    // Iceberg types
+    IcebergCommitTableRequest,
+    IcebergCommitTableResponse,
+    IcebergCreateNamespaceRequest,
+    IcebergCreateNamespaceResponse,
+    IcebergCreateTableRequest,
+    IcebergCreateTableResponse,
+    IcebergDropNamespaceRequest,
+    IcebergDropNamespaceResponse,
+    IcebergDropTableRequest,
+    IcebergDropTableResponse,
+    IcebergListNamespacesRequest,
+    IcebergListNamespacesResponse,
+    IcebergListTablesRequest,
+    IcebergListTablesResponse,
+    IcebergLoadNamespaceRequest,
+    IcebergLoadNamespaceResponse,
+    IcebergLoadTableRequest,
+    IcebergLoadTableResponse,
+    IcebergNamespace,
+    IcebergNamespaceExistsRequest,
+    IcebergNamespaceExistsResponse,
+    IcebergRenameTableRequest,
+    IcebergRenameTableResponse,
+    IcebergTableEntry,
+    IcebergTableExistsRequest,
+    IcebergTableExistsResponse,
+    IcebergTableIdentifier,
+    IcebergUpdateNamespacePropertiesRequest,
+    IcebergUpdateNamespacePropertiesResponse,
     KeyStatus,
     ListAccessKeysRequest,
     ListAccessKeysResponse,
@@ -82,6 +112,7 @@ use objectio_proto::metadata::{
     metadata_service_server::MetadataService,
 };
 use parking_lot::RwLock;
+use prost::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -117,6 +148,10 @@ pub struct MetaService {
     access_keys: RwLock<HashMap<String, StoredAccessKey>>,
     /// IAM: Map from user_id to their access_key_ids
     user_keys: RwLock<HashMap<String, Vec<String>>>,
+    /// Iceberg: namespace key -> properties (prost-encoded bytes in store, HashMap in memory)
+    iceberg_namespaces: RwLock<HashMap<String, HashMap<String, String>>>,
+    /// Iceberg: table key ("ns\0table") -> IcebergTableEntry
+    iceberg_tables: RwLock<HashMap<String, IcebergTableEntry>>,
     /// Persistent store (None = in-memory only)
     store: Option<Arc<MetaStore>>,
 }
@@ -180,6 +215,8 @@ impl MetaService {
             users: RwLock::new(HashMap::new()),
             access_keys: RwLock::new(HashMap::new()),
             user_keys: RwLock::new(HashMap::new()),
+            iceberg_namespaces: RwLock::new(HashMap::new()),
+            iceberg_tables: RwLock::new(HashMap::new()),
             store: None,
         }
     }
@@ -300,6 +337,40 @@ impl MetaService {
                 info!("Loaded {} access keys from store", key_map.len());
             }
             Err(e) => error!("Failed to load access keys: {}", e),
+        }
+
+        // Iceberg namespaces
+        match store.list_iceberg_namespaces("") {
+            Ok(entries) => {
+                let mut ns_map = self.iceberg_namespaces.write();
+                for (key, bytes) in entries {
+                    match IcebergCreateNamespaceResponse::decode(bytes.as_slice()) {
+                        Ok(resp) => {
+                            ns_map.insert(key, resp.properties);
+                        }
+                        Err(e) => error!("Failed to decode iceberg namespace '{}': {}", key, e),
+                    }
+                }
+                info!("Loaded {} iceberg namespaces from store", ns_map.len());
+            }
+            Err(e) => error!("Failed to load iceberg namespaces: {}", e),
+        }
+
+        // Iceberg tables
+        match store.list_iceberg_tables("") {
+            Ok(entries) => {
+                let mut tbl_map = self.iceberg_tables.write();
+                for (key, bytes) in entries {
+                    match IcebergTableEntry::decode(bytes.as_slice()) {
+                        Ok(entry) => {
+                            tbl_map.insert(key, entry);
+                        }
+                        Err(e) => error!("Failed to decode iceberg table '{}': {}", key, e),
+                    }
+                }
+                info!("Loaded {} iceberg tables from store", tbl_map.len());
+            }
+            Err(e) => error!("Failed to load iceberg tables: {}", e),
         }
     }
 
@@ -477,6 +548,17 @@ impl MetaService {
             "Updated CRUSH topology with node {}",
             hex::encode(osd_node.node_id)
         );
+    }
+
+    /// Encode namespace levels into a store key using null byte separator.
+    fn iceberg_ns_key(levels: &[String]) -> String {
+        levels.join("\x00")
+    }
+
+    /// Encode namespace + table name into a store key.
+    fn iceberg_table_key(ns_levels: &[String], table_name: &str) -> String {
+        let ns = Self::iceberg_ns_key(ns_levels);
+        format!("{ns}\x00{table_name}")
     }
 
     /// Generate object key for internal storage
@@ -1794,5 +1876,472 @@ impl MetadataService for MetaService {
                 email: user.email,
             }),
         }))
+    }
+
+    // =========== Iceberg Catalog Operations ===========
+
+    async fn iceberg_create_namespace(
+        &self,
+        request: Request<IcebergCreateNamespaceRequest>,
+    ) -> Result<Response<IcebergCreateNamespaceResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.namespace_levels.is_empty() {
+            return Err(Status::invalid_argument("namespace levels cannot be empty"));
+        }
+
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        if self.iceberg_namespaces.read().contains_key(&ns_key) {
+            return Err(Status::already_exists("namespace already exists"));
+        }
+
+        // If multi-level, verify parent exists
+        if req.namespace_levels.len() > 1 {
+            let parent_key =
+                Self::iceberg_ns_key(&req.namespace_levels[..req.namespace_levels.len() - 1]);
+            if !self.iceberg_namespaces.read().contains_key(&parent_key) {
+                return Err(Status::not_found("parent namespace does not exist"));
+            }
+        }
+
+        let properties = req.properties.clone();
+        self.iceberg_namespaces
+            .write()
+            .insert(ns_key.clone(), properties.clone());
+
+        if let Some(store) = &self.store {
+            let resp = IcebergCreateNamespaceResponse {
+                namespace_levels: req.namespace_levels.clone(),
+                properties: properties.clone(),
+            };
+            store.put_iceberg_namespace(&ns_key, &resp.encode_to_vec());
+        }
+
+        info!("Created iceberg namespace: {:?}", req.namespace_levels);
+
+        Ok(Response::new(IcebergCreateNamespaceResponse {
+            namespace_levels: req.namespace_levels,
+            properties,
+        }))
+    }
+
+    async fn iceberg_load_namespace(
+        &self,
+        request: Request<IcebergLoadNamespaceRequest>,
+    ) -> Result<Response<IcebergLoadNamespaceResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        let properties = self
+            .iceberg_namespaces
+            .read()
+            .get(&ns_key)
+            .cloned()
+            .ok_or_else(|| Status::not_found("namespace not found"))?;
+
+        Ok(Response::new(IcebergLoadNamespaceResponse {
+            namespace_levels: req.namespace_levels,
+            properties,
+        }))
+    }
+
+    async fn iceberg_drop_namespace(
+        &self,
+        request: Request<IcebergDropNamespaceRequest>,
+    ) -> Result<Response<IcebergDropNamespaceResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        // Check namespace exists
+        if !self.iceberg_namespaces.read().contains_key(&ns_key) {
+            return Err(Status::not_found("namespace not found"));
+        }
+
+        // Check for tables in namespace
+        let table_prefix = format!("{ns_key}\x00");
+        let has_tables = self
+            .iceberg_tables
+            .read()
+            .keys()
+            .any(|k| k.starts_with(&table_prefix));
+        if has_tables {
+            return Err(Status::failed_precondition(
+                "namespace is not empty (contains tables)",
+            ));
+        }
+
+        // Check for child namespaces
+        let child_prefix = format!("{ns_key}\x00");
+        let has_children = self
+            .iceberg_namespaces
+            .read()
+            .keys()
+            .any(|k| k.starts_with(&child_prefix));
+        if has_children {
+            return Err(Status::failed_precondition(
+                "namespace is not empty (contains child namespaces)",
+            ));
+        }
+
+        self.iceberg_namespaces.write().remove(&ns_key);
+
+        if let Some(store) = &self.store {
+            store.delete_iceberg_namespace(&ns_key);
+        }
+
+        info!("Dropped iceberg namespace: {:?}", req.namespace_levels);
+
+        Ok(Response::new(IcebergDropNamespaceResponse {
+            success: true,
+        }))
+    }
+
+    async fn iceberg_list_namespaces(
+        &self,
+        request: Request<IcebergListNamespacesRequest>,
+    ) -> Result<Response<IcebergListNamespacesResponse>, Status> {
+        let req = request.into_inner();
+
+        let parent_key = if req.parent_levels.is_empty() {
+            String::new()
+        } else {
+            Self::iceberg_ns_key(&req.parent_levels)
+        };
+
+        // If parent specified, verify it exists
+        if !parent_key.is_empty() && !self.iceberg_namespaces.read().contains_key(&parent_key) {
+            return Err(Status::not_found("parent namespace not found"));
+        }
+
+        let prefix = if parent_key.is_empty() {
+            String::new()
+        } else {
+            format!("{parent_key}\x00")
+        };
+
+        let namespaces: Vec<IcebergNamespace> = self
+            .iceberg_namespaces
+            .read()
+            .keys()
+            .filter(|k| {
+                if prefix.is_empty() {
+                    // Top-level: keys with no null byte separator
+                    !k.contains('\x00')
+                } else {
+                    // Direct children: starts with prefix and no additional null bytes after prefix
+                    k.starts_with(&prefix) && !k[prefix.len()..].contains('\x00')
+                }
+            })
+            .map(|k| {
+                let levels: Vec<String> = k.split('\x00').map(String::from).collect();
+                IcebergNamespace { levels }
+            })
+            .collect();
+
+        Ok(Response::new(IcebergListNamespacesResponse { namespaces }))
+    }
+
+    async fn iceberg_update_namespace_properties(
+        &self,
+        request: Request<IcebergUpdateNamespacePropertiesRequest>,
+    ) -> Result<Response<IcebergUpdateNamespacePropertiesResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        let mut ns_map = self.iceberg_namespaces.write();
+        let properties = ns_map
+            .get_mut(&ns_key)
+            .ok_or_else(|| Status::not_found("namespace not found"))?;
+
+        let mut updated = Vec::new();
+        let mut removed = Vec::new();
+        let mut missing = Vec::new();
+
+        // Apply removals
+        for key in &req.removals {
+            if properties.remove(key).is_some() {
+                removed.push(key.clone());
+            } else {
+                missing.push(key.clone());
+            }
+        }
+
+        // Apply updates
+        for (key, value) in &req.updates {
+            properties.insert(key.clone(), value.clone());
+            updated.push(key.clone());
+        }
+
+        // Persist
+        if let Some(store) = &self.store {
+            let resp = IcebergCreateNamespaceResponse {
+                namespace_levels: req.namespace_levels.clone(),
+                properties: properties.clone(),
+            };
+            store.put_iceberg_namespace(&ns_key, &resp.encode_to_vec());
+        }
+
+        Ok(Response::new(IcebergUpdateNamespacePropertiesResponse {
+            updated,
+            removed,
+            missing,
+        }))
+    }
+
+    async fn iceberg_namespace_exists(
+        &self,
+        request: Request<IcebergNamespaceExistsRequest>,
+    ) -> Result<Response<IcebergNamespaceExistsResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+        let exists = self.iceberg_namespaces.read().contains_key(&ns_key);
+        Ok(Response::new(IcebergNamespaceExistsResponse { exists }))
+    }
+
+    async fn iceberg_create_table(
+        &self,
+        request: Request<IcebergCreateTableRequest>,
+    ) -> Result<Response<IcebergCreateTableResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        // Verify namespace exists
+        if !self.iceberg_namespaces.read().contains_key(&ns_key) {
+            return Err(Status::not_found("namespace not found"));
+        }
+
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        if self.iceberg_tables.read().contains_key(&table_key) {
+            return Err(Status::already_exists("table already exists"));
+        }
+
+        let now = Self::current_timestamp();
+        let entry = IcebergTableEntry {
+            metadata_location: req.metadata_location.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.iceberg_tables
+            .write()
+            .insert(table_key.clone(), entry.clone());
+
+        if let Some(store) = &self.store {
+            store.put_iceberg_table(&table_key, &entry.encode_to_vec());
+        }
+
+        info!(
+            "Created iceberg table: {:?}.{}",
+            req.namespace_levels, req.table_name
+        );
+
+        Ok(Response::new(IcebergCreateTableResponse {
+            metadata_location: req.metadata_location,
+        }))
+    }
+
+    async fn iceberg_load_table(
+        &self,
+        request: Request<IcebergLoadTableRequest>,
+    ) -> Result<Response<IcebergLoadTableResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        let entry = self
+            .iceberg_tables
+            .read()
+            .get(&table_key)
+            .cloned()
+            .ok_or_else(|| Status::not_found("table not found"))?;
+
+        Ok(Response::new(IcebergLoadTableResponse {
+            metadata_location: entry.metadata_location,
+        }))
+    }
+
+    async fn iceberg_commit_table(
+        &self,
+        request: Request<IcebergCommitTableRequest>,
+    ) -> Result<Response<IcebergCommitTableResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        let mut tables = self.iceberg_tables.write();
+        let entry = tables
+            .get(&table_key)
+            .ok_or_else(|| Status::not_found("table not found"))?;
+
+        // CAS: verify current metadata location matches expected
+        if entry.metadata_location != req.current_metadata_location {
+            return Err(Status::failed_precondition(format!(
+                "metadata location mismatch: expected '{}', actual '{}'",
+                req.current_metadata_location, entry.metadata_location
+            )));
+        }
+
+        let now = Self::current_timestamp();
+        let new_entry = IcebergTableEntry {
+            metadata_location: req.new_metadata_location.clone(),
+            created_at: entry.created_at,
+            updated_at: now,
+        };
+
+        // Persist with CAS in store
+        if let Some(store) = &self.store {
+            let old_bytes = entry.encode_to_vec();
+            let new_bytes = new_entry.encode_to_vec();
+            match store.cas_iceberg_table(&table_key, &old_bytes, &new_bytes) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(Status::failed_precondition(
+                        "concurrent metadata update detected",
+                    ));
+                }
+                Err(e) => {
+                    error!("Failed to CAS iceberg table '{}': {}", table_key, e);
+                    return Err(Status::internal("failed to commit table update"));
+                }
+            }
+        }
+
+        tables.insert(table_key, new_entry);
+
+        debug!(
+            "Committed iceberg table {:?}.{}: {} -> {}",
+            req.namespace_levels,
+            req.table_name,
+            req.current_metadata_location,
+            req.new_metadata_location
+        );
+
+        Ok(Response::new(IcebergCommitTableResponse {
+            metadata_location: req.new_metadata_location,
+        }))
+    }
+
+    async fn iceberg_drop_table(
+        &self,
+        request: Request<IcebergDropTableRequest>,
+    ) -> Result<Response<IcebergDropTableResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        let removed = self.iceberg_tables.write().remove(&table_key);
+        if removed.is_none() {
+            return Err(Status::not_found("table not found"));
+        }
+
+        if let Some(store) = &self.store {
+            store.delete_iceberg_table(&table_key);
+        }
+
+        info!(
+            "Dropped iceberg table: {:?}.{} (purge={})",
+            req.namespace_levels, req.table_name, req.purge
+        );
+
+        Ok(Response::new(IcebergDropTableResponse { success: true }))
+    }
+
+    async fn iceberg_rename_table(
+        &self,
+        request: Request<IcebergRenameTableRequest>,
+    ) -> Result<Response<IcebergRenameTableResponse>, Status> {
+        let req = request.into_inner();
+        let source = req
+            .source
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("source is required"))?;
+        let dest = req
+            .destination
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("destination is required"))?;
+
+        let src_key = Self::iceberg_table_key(&source.namespace_levels, &source.name);
+        let dst_key = Self::iceberg_table_key(&dest.namespace_levels, &dest.name);
+
+        // Verify destination namespace exists
+        let dst_ns_key = Self::iceberg_ns_key(&dest.namespace_levels);
+        if !self.iceberg_namespaces.read().contains_key(&dst_ns_key) {
+            return Err(Status::not_found("destination namespace not found"));
+        }
+
+        let mut tables = self.iceberg_tables.write();
+
+        // Check source exists
+        let entry = tables
+            .remove(&src_key)
+            .ok_or_else(|| Status::not_found("source table not found"))?;
+
+        // Check destination doesn't exist
+        if tables.contains_key(&dst_key) {
+            // Put source back
+            tables.insert(src_key, entry);
+            return Err(Status::already_exists("destination table already exists"));
+        }
+
+        tables.insert(dst_key.clone(), entry.clone());
+
+        if let Some(store) = &self.store {
+            store.delete_iceberg_table(&src_key);
+            store.put_iceberg_table(&dst_key, &entry.encode_to_vec());
+        }
+
+        info!(
+            "Renamed iceberg table: {:?}.{} -> {:?}.{}",
+            source.namespace_levels, source.name, dest.namespace_levels, dest.name
+        );
+
+        Ok(Response::new(IcebergRenameTableResponse { success: true }))
+    }
+
+    async fn iceberg_list_tables(
+        &self,
+        request: Request<IcebergListTablesRequest>,
+    ) -> Result<Response<IcebergListTablesResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = Self::iceberg_ns_key(&req.namespace_levels);
+
+        // Verify namespace exists
+        if !self.iceberg_namespaces.read().contains_key(&ns_key) {
+            return Err(Status::not_found("namespace not found"));
+        }
+
+        let prefix = format!("{ns_key}\x00");
+
+        let identifiers: Vec<IcebergTableIdentifier> = self
+            .iceberg_tables
+            .read()
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .filter_map(|k| {
+                // Table key is "ns1\x00ns2\x00table_name"
+                // Strip the ns prefix to get table name
+                let table_name = &k[prefix.len()..];
+                // Only include direct tables (no additional null bytes)
+                if table_name.contains('\x00') {
+                    None
+                } else {
+                    Some(IcebergTableIdentifier {
+                        namespace_levels: req.namespace_levels.clone(),
+                        name: table_name.to_string(),
+                    })
+                }
+            })
+            .collect();
+
+        Ok(Response::new(IcebergListTablesResponse { identifiers }))
+    }
+
+    async fn iceberg_table_exists(
+        &self,
+        request: Request<IcebergTableExistsRequest>,
+    ) -> Result<Response<IcebergTableExistsResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+        let exists = self.iceberg_tables.read().contains_key(&table_key);
+        Ok(Response::new(IcebergTableExistsResponse { exists }))
     }
 }

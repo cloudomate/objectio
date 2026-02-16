@@ -20,3 +20,10 @@ pub const ACCESS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("acce
 pub const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
 pub const SNAPSHOTS: TableDefinition<&str, &[u8]> = TableDefinition::new("snapshots");
 pub const VOLUME_CHUNKS: TableDefinition<&str, &[u8]> = TableDefinition::new("volume_chunks");
+
+// Iceberg catalog
+// Key: namespace path (e.g. "db1" or "db1\x00schema1"), Value: prost-encoded properties
+pub const ICEBERG_NAMESPACES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("iceberg_namespaces");
+// Key: "ns1\x00ns2\x00table_name", Value: prost-encoded IcebergTableEntry
+pub const ICEBERG_TABLES: TableDefinition<&str, &[u8]> = TableDefinition::new("iceberg_tables");

@@ -1845,6 +1845,7 @@ dependencies = [
  "objectio-client",
  "objectio-common",
  "objectio-erasure",
+ "objectio-iceberg",
  "objectio-proto",
  "objectio-s3",
  "parking_lot",
@@ -1862,6 +1863,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "objectio-iceberg"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "objectio-common",
+ "objectio-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic",
+ "tracing",
  "uuid",
 ]
 
@@ -1900,6 +1916,7 @@ dependencies = [
  "objectio-placement",
  "objectio-proto",
  "parking_lot",
+ "prost",
  "rand",
  "serde",
  "serde_json",

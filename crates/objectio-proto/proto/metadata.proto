@@ -47,6 +47,21 @@ service MetadataService {
     rpc ListAccessKeys(ListAccessKeysRequest) returns (ListAccessKeysResponse);
     rpc DeleteAccessKey(DeleteAccessKeyRequest) returns (DeleteAccessKeyResponse);
     rpc GetAccessKeyForAuth(GetAccessKeyForAuthRequest) returns (GetAccessKeyForAuthResponse);
+
+    // Iceberg catalog operations
+    rpc IcebergCreateNamespace(IcebergCreateNamespaceRequest) returns (IcebergCreateNamespaceResponse);
+    rpc IcebergLoadNamespace(IcebergLoadNamespaceRequest) returns (IcebergLoadNamespaceResponse);
+    rpc IcebergDropNamespace(IcebergDropNamespaceRequest) returns (IcebergDropNamespaceResponse);
+    rpc IcebergListNamespaces(IcebergListNamespacesRequest) returns (IcebergListNamespacesResponse);
+    rpc IcebergUpdateNamespaceProperties(IcebergUpdateNamespacePropertiesRequest) returns (IcebergUpdateNamespacePropertiesResponse);
+    rpc IcebergNamespaceExists(IcebergNamespaceExistsRequest) returns (IcebergNamespaceExistsResponse);
+    rpc IcebergCreateTable(IcebergCreateTableRequest) returns (IcebergCreateTableResponse);
+    rpc IcebergLoadTable(IcebergLoadTableRequest) returns (IcebergLoadTableResponse);
+    rpc IcebergCommitTable(IcebergCommitTableRequest) returns (IcebergCommitTableResponse);
+    rpc IcebergDropTable(IcebergDropTableRequest) returns (IcebergDropTableResponse);
+    rpc IcebergRenameTable(IcebergRenameTableRequest) returns (IcebergRenameTableResponse);
+    rpc IcebergListTables(IcebergListTablesRequest) returns (IcebergListTablesResponse);
+    rpc IcebergTableExists(IcebergTableExistsRequest) returns (IcebergTableExistsResponse);
 }
 
 // Bucket metadata
@@ -549,4 +564,149 @@ message GetAccessKeyForAuthRequest {
 message GetAccessKeyForAuthResponse {
     AccessKeyMeta access_key = 1;   // Includes secret_access_key
     UserMeta user = 2;
+}
+
+// ============ Iceberg Catalog Messages ============
+
+// Iceberg namespace (multi-level, e.g. ["db1", "schema1"])
+message IcebergNamespace {
+    repeated string levels = 1;
+}
+
+// Iceberg table identifier
+message IcebergTableIdentifier {
+    repeated string namespace_levels = 1;
+    string name = 2;
+}
+
+// Iceberg table entry stored in meta
+message IcebergTableEntry {
+    string metadata_location = 1;   // S3 URL to metadata.json
+    uint64 created_at = 2;
+    uint64 updated_at = 3;
+}
+
+// ---- Namespace RPCs ----
+
+message IcebergCreateNamespaceRequest {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+}
+
+message IcebergCreateNamespaceResponse {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+}
+
+message IcebergLoadNamespaceRequest {
+    repeated string namespace_levels = 1;
+}
+
+message IcebergLoadNamespaceResponse {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+}
+
+message IcebergDropNamespaceRequest {
+    repeated string namespace_levels = 1;
+}
+
+message IcebergDropNamespaceResponse {
+    bool success = 1;
+}
+
+message IcebergListNamespacesRequest {
+    repeated string parent_levels = 1;  // empty = list top-level
+}
+
+message IcebergListNamespacesResponse {
+    repeated IcebergNamespace namespaces = 1;
+}
+
+message IcebergUpdateNamespacePropertiesRequest {
+    repeated string namespace_levels = 1;
+    repeated string removals = 2;
+    map<string, string> updates = 3;
+}
+
+message IcebergUpdateNamespacePropertiesResponse {
+    repeated string updated = 1;
+    repeated string removed = 2;
+    repeated string missing = 3;    // keys requested for removal that didn't exist
+}
+
+message IcebergNamespaceExistsRequest {
+    repeated string namespace_levels = 1;
+}
+
+message IcebergNamespaceExistsResponse {
+    bool exists = 1;
+}
+
+// ---- Table RPCs ----
+
+message IcebergCreateTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string metadata_location = 3;   // S3 URL to initial metadata.json
+}
+
+message IcebergCreateTableResponse {
+    string metadata_location = 1;
+}
+
+message IcebergLoadTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message IcebergLoadTableResponse {
+    string metadata_location = 1;
+}
+
+message IcebergCommitTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string current_metadata_location = 3;   // Expected (CAS)
+    string new_metadata_location = 4;       // Desired
+}
+
+message IcebergCommitTableResponse {
+    string metadata_location = 1;
+}
+
+message IcebergDropTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    bool purge = 3;
+}
+
+message IcebergDropTableResponse {
+    bool success = 1;
+}
+
+message IcebergRenameTableRequest {
+    IcebergTableIdentifier source = 1;
+    IcebergTableIdentifier destination = 2;
+}
+
+message IcebergRenameTableResponse {
+    bool success = 1;
+}
+
+message IcebergListTablesRequest {
+    repeated string namespace_levels = 1;
+}
+
+message IcebergListTablesResponse {
+    repeated IcebergTableIdentifier identifiers = 1;
+}
+
+message IcebergTableExistsRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message IcebergTableExistsResponse {
+    bool exists = 1;
 }

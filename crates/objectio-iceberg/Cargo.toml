@@ -1,0 +1,20 @@
+[package]
+name = "objectio-iceberg"
+description = "Iceberg REST Catalog for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-proto = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+prost = { workspace = true }
+
+[lints]
+workspace = true

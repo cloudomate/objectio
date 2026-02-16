@@ -13,6 +13,7 @@ members = [
     "crates/objectio-client",
     "crates/objectio-auth",
     "crates/objectio-block",
+    "crates/objectio-iceberg",
 
     # Binary crates
     "bin/objectio-gateway",
@@ -111,6 +112,7 @@ objectio-s3 = { path = "crates/objectio-s3" }
 objectio-client = { path = "crates/objectio-client" }
 objectio-auth = { path = "crates/objectio-auth" }
 objectio-block = { path = "crates/objectio-block" }
+objectio-iceberg = { path = "crates/objectio-iceberg" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
