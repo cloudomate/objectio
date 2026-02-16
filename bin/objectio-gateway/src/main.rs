@@ -247,119 +247,78 @@ async fn main() -> Result<()> {
     let body_limit = DefaultBodyLimit::max(100 * 1024 * 1024);
     info!("Max single-part upload size: 100 MB");
 
+    // Build S3 routes with AppState, then convert to Router<()>
+    let s3_routes = Router::new()
+        // Metrics and health routes FIRST (no auth, must come before wildcards)
+        .route("/metrics", get(metrics_handler))
+        .route("/health", get(s3::health_check))
+        // Service endpoint (list buckets)
+        .route("/", get(s3::list_buckets))
+        // Bucket operations (including ?policy and ?uploads query params)
+        .route("/{bucket}", put(s3::create_bucket))
+        .route("/{bucket}", delete(s3::delete_bucket))
+        .route("/{bucket}", head(s3::head_bucket))
+        .route("/{bucket}", get(s3::list_objects))
+        // POST /{bucket}?delete - batch delete objects
+        .route("/{bucket}", post(s3::post_bucket))
+        // Bucket with trailing slash (s3fs compatibility)
+        .route("/{bucket}/", head(s3::head_bucket_trailing))
+        .route("/{bucket}/", get(s3::list_objects_trailing))
+        // Object operations (with multipart upload support via query params)
+        // PUT /{bucket}/{key} - simple upload
+        // PUT /{bucket}/{key}?uploadId=X&partNumber=N - upload part
+        .route("/{bucket}/{*key}", put(s3::put_object_with_params))
+        // GET /{bucket}/{key} - get object
+        // GET /{bucket}/{key}?uploadId=X - list parts
+        .route("/{bucket}/{*key}", get(s3::get_object_with_params))
+        .route("/{bucket}/{*key}", head(s3::head_object))
+        // DELETE /{bucket}/{key} - delete object
+        // DELETE /{bucket}/{key}?uploadId=X - abort multipart upload
+        .route("/{bucket}/{*key}", delete(s3::delete_object_with_params))
+        // POST /{bucket}/{key}?uploads - initiate multipart upload
+        // POST /{bucket}/{key}?uploadId=X - complete multipart upload
+        .route("/{bucket}/{*key}", post(s3::post_object))
+        // Admin API
+        .route("/_admin/users", get(s3::admin_list_users))
+        .route("/_admin/users", post(s3::admin_create_user))
+        .route("/_admin/users/{user_id}", delete(s3::admin_delete_user))
+        .route(
+            "/_admin/users/{user_id}/access-keys",
+            get(s3::admin_list_access_keys),
+        )
+        .route(
+            "/_admin/users/{user_id}/access-keys",
+            post(s3::admin_create_access_key),
+        )
+        .route(
+            "/_admin/access-keys/{access_key_id}",
+            delete(s3::admin_delete_access_key),
+        )
+        .with_state(state);
+
+    // Merge S3 (Router<()>) + Iceberg (Router<()>), then apply shared layers.
+    // This ensures auth covers both S3 and Iceberg endpoints.
     let app = if !args.no_auth {
         info!("Authentication is ENABLED (credentials from metadata service)");
         info!("Admin API is ENABLED (requires 'admin' user credentials)");
         info!("Metrics endpoint: /metrics (no auth)");
         Router::new()
-            // Metrics and health routes FIRST (no auth, must come before wildcards)
-            .route("/metrics", get(metrics_handler))
-            .route("/health", get(s3::health_check))
-            // Service endpoint (list buckets)
-            .route("/", get(s3::list_buckets))
-            // Bucket operations (including ?policy and ?uploads query params)
-            .route("/{bucket}", put(s3::create_bucket))
-            .route("/{bucket}", delete(s3::delete_bucket))
-            .route("/{bucket}", head(s3::head_bucket))
-            .route("/{bucket}", get(s3::list_objects))
-            // POST /{bucket}?delete - batch delete objects
-            .route("/{bucket}", post(s3::post_bucket))
-            // Bucket with trailing slash (s3fs compatibility)
-            .route("/{bucket}/", head(s3::head_bucket_trailing))
-            .route("/{bucket}/", get(s3::list_objects_trailing))
-            // Object operations (with multipart upload support via query params)
-            // PUT /{bucket}/{key} - simple upload
-            // PUT /{bucket}/{key}?uploadId=X&partNumber=N - upload part
-            .route("/{bucket}/{*key}", put(s3::put_object_with_params))
-            // GET /{bucket}/{key} - get object
-            // GET /{bucket}/{key}?uploadId=X - list parts
-            .route("/{bucket}/{*key}", get(s3::get_object_with_params))
-            .route("/{bucket}/{*key}", head(s3::head_object))
-            // DELETE /{bucket}/{key} - delete object
-            // DELETE /{bucket}/{key}?uploadId=X - abort multipart upload
-            .route("/{bucket}/{*key}", delete(s3::delete_object_with_params))
-            // POST /{bucket}/{key}?uploads - initiate multipart upload
-            // POST /{bucket}/{key}?uploadId=X - complete multipart upload
-            .route("/{bucket}/{*key}", post(s3::post_object))
-            // Admin API (requires 'admin' user - checked in handlers)
-            .route("/_admin/users", get(s3::admin_list_users))
-            .route("/_admin/users", post(s3::admin_create_user))
-            .route("/_admin/users/{user_id}", delete(s3::admin_delete_user))
-            .route(
-                "/_admin/users/{user_id}/access-keys",
-                get(s3::admin_list_access_keys),
-            )
-            .route(
-                "/_admin/users/{user_id}/access-keys",
-                post(s3::admin_create_access_key),
-            )
-            .route(
-                "/_admin/access-keys/{access_key_id}",
-                delete(s3::admin_delete_access_key),
-            )
+            .merge(s3_routes)
+            .nest("/iceberg", iceberg_router)
             .layer(body_limit)
             .layer(middleware::from_fn_with_state(auth_state, auth_layer))
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
-            .with_state(state)
-            // Iceberg REST Catalog (nested after with_state since it has its own state)
-            .nest("/iceberg", iceberg_router.clone())
     } else {
         info!("Authentication is DISABLED (development mode)");
         info!("Admin API is ENABLED (no auth required in dev mode)");
         info!("Metrics endpoint: /metrics");
         Router::new()
-            // Metrics and health routes FIRST (must come before wildcards)
-            .route("/metrics", get(metrics_handler))
-            .route("/health", get(s3::health_check))
-            // Service endpoint (list buckets)
-            .route("/", get(s3::list_buckets))
-            // Bucket operations (including ?policy and ?uploads query params)
-            .route("/{bucket}", put(s3::create_bucket))
-            .route("/{bucket}", delete(s3::delete_bucket))
-            .route("/{bucket}", head(s3::head_bucket))
-            .route("/{bucket}", get(s3::list_objects))
-            // POST /{bucket}?delete - batch delete objects
-            .route("/{bucket}", post(s3::post_bucket))
-            // Bucket with trailing slash (s3fs compatibility)
-            .route("/{bucket}/", head(s3::head_bucket_trailing))
-            .route("/{bucket}/", get(s3::list_objects_trailing))
-            // Object operations (with multipart upload support via query params)
-            // PUT /{bucket}/{key} - simple upload
-            // PUT /{bucket}/{key}?uploadId=X&partNumber=N - upload part
-            .route("/{bucket}/{*key}", put(s3::put_object_with_params))
-            // GET /{bucket}/{key} - get object
-            // GET /{bucket}/{key}?uploadId=X - list parts
-            .route("/{bucket}/{*key}", get(s3::get_object_with_params))
-            .route("/{bucket}/{*key}", head(s3::head_object))
-            // DELETE /{bucket}/{key} - delete object
-            // DELETE /{bucket}/{key}?uploadId=X - abort multipart upload
-            .route("/{bucket}/{*key}", delete(s3::delete_object_with_params))
-            // POST /{bucket}/{key}?uploads - initiate multipart upload
-            // POST /{bucket}/{key}?uploadId=X - complete multipart upload
-            .route("/{bucket}/{*key}", post(s3::post_object))
-            // Admin API (no auth in dev mode)
-            .route("/_admin/users", get(s3::admin_list_users))
-            .route("/_admin/users", post(s3::admin_create_user))
-            .route("/_admin/users/{user_id}", delete(s3::admin_delete_user))
-            .route(
-                "/_admin/users/{user_id}/access-keys",
-                get(s3::admin_list_access_keys),
-            )
-            .route(
-                "/_admin/users/{user_id}/access-keys",
-                post(s3::admin_create_access_key),
-            )
-            .route(
-                "/_admin/access-keys/{access_key_id}",
-                delete(s3::admin_delete_access_key),
-            )
+            .merge(s3_routes)
+            .nest("/iceberg", iceberg_router)
             .layer(body_limit)
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
-            .with_state(state)
-            // Iceberg REST Catalog (nested after with_state since it has its own state)
-            .nest("/iceberg", iceberg_router)
     };
 
     // Parse listen address
