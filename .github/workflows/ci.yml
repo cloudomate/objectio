@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGES: gateway:objectio-gateway meta:objectio-meta osd:objectio-osd cli:objectio-cli all:objectio
+
 jobs:
   ci:
     name: fmt + lint + test
@@ -44,20 +48,26 @@ jobs:
           docker volume rm ci-target-${{ github.run_id }} || true
           docker rmi objectio-ci:${{ github.run_id }} || true
 
-  build-and-push:
-    name: Build & Push Docker Images
+  build:
+    name: Build (${{ matrix.arch }})
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -69,21 +79,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push images
-        env:
-          REGISTRY: ghcr.io/${{ github.repository_owner }}
+      - name: Build and push per-arch images
         run: |
           SHA_SHORT=$(git rev-parse --short HEAD)
 
-          for PAIR in gateway:objectio-gateway meta:objectio-meta osd:objectio-osd cli:objectio-cli all:objectio; do
+          for PAIR in ${{ env.IMAGES }}; do
             TARGET="${PAIR%%:*}"
             IMAGE="${PAIR##*:}"
-            echo "::group::Building $IMAGE (target: $TARGET)"
+            echo "::group::Building $IMAGE (target: $TARGET, arch: ${{ matrix.arch }})"
             docker buildx build \
-              --platform linux/amd64,linux/arm64 \
+              --platform ${{ matrix.platform }} \
               --target "$TARGET" \
-              -t "$REGISTRY/$IMAGE:latest" \
-              -t "$REGISTRY/$IMAGE:$SHA_SHORT" \
+              -t "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-${{ matrix.arch }}" \
               --push \
               .
             echo "::endgroup::"
@@ -92,3 +99,39 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker image prune -f --filter "until=168h"
+
+  manifest:
+    name: Create multi-arch manifests
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifests
+        run: |
+          SHA_SHORT=$(git rev-parse --short HEAD)
+
+          for PAIR in ${{ env.IMAGES }}; do
+            IMAGE="${PAIR##*:}"
+            echo "::group::Manifest $IMAGE"
+
+            for TAG in latest "$SHA_SHORT"; do
+              docker buildx imagetools create \
+                -t "${{ env.REGISTRY }}/$IMAGE:$TAG" \
+                "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-amd64" \
+                "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-arm64"
+            done
+
+            echo "::endgroup::"
+          done
