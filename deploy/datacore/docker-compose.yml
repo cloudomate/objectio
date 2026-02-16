@@ -21,13 +21,13 @@
 # Docker creates folders under /var/lib/docker/volumes/ on the host.
 
 x-meta-common: &meta-common
-  image: cr.imys.in/objectio/objectio-meta:latest
+  image: ghcr.io/cloudomate/objectio-meta:latest
   networks:
     - objectio-net
   restart: unless-stopped
 
 x-osd-common: &osd-common
-  image: cr.imys.in/objectio/objectio-osd:latest
+  image: ghcr.io/cloudomate/objectio-osd:latest
   user: root
   networks:
     - objectio-net
@@ -40,7 +40,7 @@ services:
   # S3 Gateway + Iceberg REST Catalog (EC 3+2)
   # ==========================================================================
   gateway:
-    image: cr.imys.in/objectio/objectio-gateway:latest
+    image: ghcr.io/cloudomate/objectio-gateway:latest
     hostname: gateway
     ports:
       - "9000:9000"
