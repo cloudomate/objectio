@@ -26,6 +26,12 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 - CRUSH 2.0 (HRW hashing) for rack/node/disk-aware placement
 - Pluggable EC backends — pure Rust (portable) or ISA-L (x86, 2-5x faster)
 
+**Iceberg REST Catalog**
+- Apache Iceberg REST Catalog API hosted on the gateway
+- Namespace and table management with metadata persisted via the Meta service
+- IAM-style access control at namespace and table level
+- Works with Spark, Trino, Flink, and other Iceberg-compatible engines
+
 **Architecture**
 - Stateless gateways — scale horizontally behind a load balancer
 - Raft-ready metadata cluster with redb persistence
@@ -35,17 +41,18 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 ## Architecture
 
 ```
-                    ┌──────────────────────────────────────┐
-                    │            Clients                   │
-                    │   S3 (aws-cli, boto3)   Block (iSCSI)│
-                    └───────────────┬──────────────────────┘
-                                    │
-                       ┌────────────▼────────────┐
-                       │   Gateway (:9000)       │
-                       │   S3 API + Block Gateway│
-                       │   SigV4 Auth            │
-                       │   Erasure Encoding      │
-                       └────────────┬────────────┘
+                ┌───────────────────────────────────────────────┐
+                │                    Clients                    │
+                │  S3 (aws-cli, boto3)  Iceberg (Spark/Trino)  │
+                │  Block (iSCSI/NVMe-oF)                       │
+                └───────────────────────┬───────────────────────┘
+                                        │
+                       ┌────────────────▼────────────────┐
+                       │        Gateway (:9000)          │
+                       │  S3 API + Iceberg REST Catalog  │
+                       │  Block Gateway + SigV4 Auth     │
+                       │  Erasure Encoding               │
+                       └────────────────┬────────────────┘
                                     │
                  ┌──────────────────┼──────────────────┐
                  │                  │                  │
@@ -151,6 +158,38 @@ objectio-cli -e http://localhost:9100 volume list
 objectio-cli -e http://localhost:9100 snapshot create <volume-id> --name snap1
 ```
 
+### Iceberg REST Catalog
+
+The gateway hosts an Apache Iceberg REST Catalog at `/iceberg/v1/`.
+
+```bash
+ENDPOINT=http://localhost:9000/iceberg/v1
+
+# Get catalog config
+curl -s $ENDPOINT/config | jq .
+
+# Create a namespace
+curl -s -X POST $ENDPOINT/namespaces \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":["analytics"],"properties":{"owner":"alice"}}' | jq .
+
+# List namespaces
+curl -s $ENDPOINT/namespaces | jq .
+
+# Create a table
+curl -s -X POST $ENDPOINT/namespaces/analytics/tables \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"events","schema":{"type":"struct","fields":[{"id":1,"name":"id","type":"long","required":true}]}}' | jq .
+
+# List tables
+curl -s $ENDPOINT/namespaces/analytics/tables | jq .
+
+# Load table metadata
+curl -s $ENDPOINT/namespaces/analytics/tables/events | jq .
+```
+
+Use `--warehouse-location` on the gateway to set the S3 URL prefix for table data (default: `s3://objectio-warehouse`).
+
 ### User Management
 
 ```bash
@@ -164,7 +203,7 @@ objectio-cli -e http://localhost:9100 key create <user-id>
 
 | Component | Binary | Port | Description |
 |-----------|--------|------|-------------|
-| **Gateway** | `objectio-gateway` | 9000 | S3 API + block gateway (stateless, horizontally scalable) |
+| **Gateway** | `objectio-gateway` | 9000 | S3 API + Iceberg REST Catalog + block gateway (stateless, horizontally scalable) |
 | **Meta** | `objectio-meta` | 9100 | Metadata cluster — buckets, objects, volumes, IAM, CRUSH placement (Raft + redb) |
 | **OSD** | `objectio-osd` | 9200 | Storage daemon — shard storage, block I/O, raw disk with WAL |
 | **CLI** | `objectio-cli` | - | Admin CLI for user, volume, and cluster management |
@@ -180,6 +219,25 @@ objectio-cli -e http://localhost:9100 key create <user-id>
 | **Policy** | GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy |
 | **Versioning** | PutBucketVersioning, GetBucketVersioning |
 | **Auth** | AWS Signature V4 (SigV4) |
+
+## Iceberg REST Catalog
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /iceberg/v1/config` | Catalog configuration |
+| `POST /iceberg/v1/namespaces` | Create namespace |
+| `GET /iceberg/v1/namespaces` | List namespaces |
+| `GET /iceberg/v1/namespaces/{ns}` | Get namespace |
+| `DELETE /iceberg/v1/namespaces/{ns}` | Drop namespace |
+| `POST /iceberg/v1/namespaces/{ns}/tables` | Create table |
+| `GET /iceberg/v1/namespaces/{ns}/tables` | List tables |
+| `GET /iceberg/v1/namespaces/{ns}/tables/{table}` | Load table |
+| `DELETE /iceberg/v1/namespaces/{ns}/tables/{table}` | Drop table |
+| `POST /iceberg/v1/tables/rename` | Rename table |
+| `PUT /iceberg/v1/namespaces/{ns}/policy` | Set namespace policy |
+| `PUT /iceberg/v1/namespaces/{ns}/tables/{table}/policy` | Set table policy |
+
+Access control uses IAM-style policies with `iceberg:` action prefix (e.g., `iceberg:LoadTable`) and `arn:obio:iceberg:::` ARNs.
 
 ## Block Storage Features
 
