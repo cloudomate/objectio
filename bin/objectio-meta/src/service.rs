@@ -367,6 +367,14 @@ impl MetaService {
                 for (key, bytes) in entries {
                     match IcebergTableEntry::decode(bytes.as_slice()) {
                         Ok(entry) => {
+                            if entry.metadata_json.is_empty() {
+                                warn!(
+                                    "Iceberg table '{}' has no inline metadata \
+                                     (created by older catalog version); \
+                                     load-table will fail until it is dropped and re-created",
+                                    key
+                                );
+                            }
                             tbl_map.insert(key, entry);
                         }
                         Err(e) => error!("Failed to decode iceberg table '{}': {}", key, e),

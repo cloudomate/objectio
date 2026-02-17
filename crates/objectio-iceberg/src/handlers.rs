@@ -72,9 +72,8 @@ async fn check_table_policy(
         return Ok(());
     };
 
-    // Check namespace-level policy first
-    let ns_arn = build_iceberg_arn(ns_levels, None);
-    check_ns_policy(state, auth, ns_levels, action, &ns_arn).await?;
+    // Check namespace-level policy first (use the table ARN so ns/* patterns match)
+    check_ns_policy(state, auth, ns_levels, action, resource_arn).await?;
 
     // Then check table-level policy
     let policy_bytes = state
@@ -238,6 +237,21 @@ pub async fn drop_namespace(
     Path(namespace): Path<String>,
 ) -> Result<StatusCode> {
     let levels = parse_namespace(&namespace);
+
+    // Check parent namespace policy for multi-level namespaces
+    if levels.len() > 1 {
+        let parent = &levels[..levels.len() - 1];
+        let parent_arn = build_iceberg_arn(parent, None);
+        check_ns_policy(
+            &state,
+            auth.as_ref(),
+            parent,
+            "iceberg:DropNamespace",
+            &parent_arn,
+        )
+        .await?;
+    }
+
     let arn = build_iceberg_arn(&levels, None);
     check_ns_policy(
         &state,
@@ -263,6 +277,21 @@ pub async fn update_namespace_properties(
 ) -> Result<Json<UpdateNamespacePropertiesResponse>> {
     let levels = parse_namespace(&namespace);
     let arn = build_iceberg_arn(&levels, None);
+
+    // Check parent namespace policy for multi-level namespaces
+    if levels.len() > 1 {
+        let parent = &levels[..levels.len() - 1];
+        let parent_arn = build_iceberg_arn(parent, None);
+        check_ns_policy(
+            &state,
+            auth.as_ref(),
+            parent,
+            "iceberg:UpdateNamespaceProperties",
+            &parent_arn,
+        )
+        .await?;
+    }
+
     check_ns_policy(
         &state,
         auth.as_ref(),
@@ -271,6 +300,14 @@ pub async fn update_namespace_properties(
         &arn,
     )
     .await?;
+
+    // Reject non-admin attempts to set or remove the __policy property
+    let touches_policy = req.updates.contains_key("__policy")
+        || req.removals.iter().any(|k| k == "__policy");
+    if touches_policy {
+        require_admin(auth.as_ref())?;
+    }
+
     let resp = state
         .catalog
         .update_namespace_properties(levels, req.removals, req.updates)
@@ -315,7 +352,7 @@ pub async fn create_table(
     Json(req): Json<CreateTableRequest>,
 ) -> Result<(StatusCode, Json<LoadTableResponse>)> {
     let levels = parse_namespace(&namespace);
-    let arn = build_iceberg_arn(&levels, None);
+    let arn = build_iceberg_arn(&levels, Some(&req.name));
     check_ns_policy(&state, auth.as_ref(), &levels, "iceberg:CreateTable", &arn).await?;
 
     // Build initial table metadata (Iceberg v2 format)
@@ -375,12 +412,8 @@ pub async fn create_table(
         "refs": {}
     });
 
-    let metadata_location = format!(
-        "s3://{}/{}/metadata/00000-{}.metadata.json",
-        "objectio-warehouse",
-        location.trim_start_matches("s3://"),
-        table_uuid
-    );
+    let metadata_location =
+        format!("{location}/metadata/00000-{table_uuid}.metadata.json");
 
     let metadata_bytes = serde_json::to_vec(&metadata)
         .map_err(|e| IcebergError::internal(format!("failed to serialize metadata: {e}")))?;
@@ -422,6 +455,13 @@ pub async fn load_table(
     .await?;
     let (metadata_location, metadata_bytes) = state.catalog.load_table(levels, &table).await?;
 
+    if metadata_bytes.is_empty() {
+        return Err(IcebergError::internal(
+            "table metadata is empty — this table was likely created with an older catalog \
+             version that did not persist inline metadata; please drop and re-create the table",
+        ));
+    }
+
     let metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes)
         .map_err(|e| IcebergError::internal(format!("failed to deserialize metadata: {e}")))?;
 
@@ -457,6 +497,14 @@ pub async fn update_table(
     // 1. Load current metadata
     let (current_location, metadata_bytes) =
         state.catalog.load_table(levels.clone(), &table).await?;
+
+    if metadata_bytes.is_empty() {
+        return Err(IcebergError::internal(
+            "table metadata is empty — this table was likely created with an older catalog \
+             version that did not persist inline metadata; please drop and re-create the table",
+        ));
+    }
+
     let mut md: serde_json::Value = serde_json::from_slice(&metadata_bytes)
         .map_err(|e| IcebergError::internal(format!("failed to deserialize metadata: {e}")))?;
 
@@ -591,13 +639,13 @@ pub async fn rename_table(
         &src_arn,
     )
     .await?;
-    // Check policy on destination namespace (need CreateTable equivalent)
-    let dst_arn = build_iceberg_arn(&req.destination.namespace, None);
+    // Check policy on destination namespace (rename creates a table in the destination)
+    let dst_arn = build_iceberg_arn(&req.destination.namespace, Some(&req.destination.name));
     check_ns_policy(
         &state,
         auth.as_ref(),
         &req.destination.namespace,
-        "iceberg:RenameTable",
+        "iceberg:CreateTable",
         &dst_arn,
     )
     .await?;
