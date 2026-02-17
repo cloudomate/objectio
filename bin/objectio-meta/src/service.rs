@@ -62,6 +62,8 @@ use objectio_proto::metadata::{
     IcebergDropNamespaceResponse,
     IcebergDropTableRequest,
     IcebergDropTableResponse,
+    IcebergGetTablePolicyRequest,
+    IcebergGetTablePolicyResponse,
     IcebergListNamespacesRequest,
     IcebergListNamespacesResponse,
     IcebergListTablesRequest,
@@ -75,6 +77,8 @@ use objectio_proto::metadata::{
     IcebergNamespaceExistsResponse,
     IcebergRenameTableRequest,
     IcebergRenameTableResponse,
+    IcebergSetTablePolicyRequest,
+    IcebergSetTablePolicyResponse,
     IcebergTableEntry,
     IcebergTableExistsRequest,
     IcebergTableExistsResponse,
@@ -2020,26 +2024,53 @@ impl MetadataService for MetaService {
             format!("{parent_key}\x00")
         };
 
-        let namespaces: Vec<IcebergNamespace> = self
+        let page_size = if req.page_size == 0 {
+            100
+        } else {
+            req.page_size.min(1000)
+        } as usize;
+
+        let mut keys: Vec<String> = self
             .iceberg_namespaces
             .read()
             .keys()
             .filter(|k| {
                 if prefix.is_empty() {
-                    // Top-level: keys with no null byte separator
                     !k.contains('\x00')
                 } else {
-                    // Direct children: starts with prefix and no additional null bytes after prefix
                     k.starts_with(&prefix) && !k[prefix.len()..].contains('\x00')
                 }
             })
+            .cloned()
+            .collect();
+        keys.sort();
+
+        // Skip past page_token
+        if !req.page_token.is_empty() {
+            keys.retain(|k| k.as_str() > req.page_token.as_str());
+        }
+
+        let has_more = keys.len() > page_size;
+        let keys: Vec<String> = keys.into_iter().take(page_size).collect();
+
+        let next_page_token = if has_more {
+            keys.last().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let namespaces: Vec<IcebergNamespace> = keys
+            .iter()
             .map(|k| {
                 let levels: Vec<String> = k.split('\x00').map(String::from).collect();
                 IcebergNamespace { levels }
             })
             .collect();
 
-        Ok(Response::new(IcebergListNamespacesResponse { namespaces }))
+        Ok(Response::new(IcebergListNamespacesResponse {
+            namespaces,
+            next_page_token,
+        }))
     }
 
     async fn iceberg_update_namespace_properties(
@@ -2122,6 +2153,8 @@ impl MetadataService for MetaService {
             metadata_location: req.metadata_location.clone(),
             created_at: now,
             updated_at: now,
+            metadata_json: req.metadata_json.clone(),
+            policy_json: Vec::new(),
         };
 
         self.iceberg_tables
@@ -2139,6 +2172,7 @@ impl MetadataService for MetaService {
 
         Ok(Response::new(IcebergCreateTableResponse {
             metadata_location: req.metadata_location,
+            metadata_json: req.metadata_json,
         }))
     }
 
@@ -2158,6 +2192,7 @@ impl MetadataService for MetaService {
 
         Ok(Response::new(IcebergLoadTableResponse {
             metadata_location: entry.metadata_location,
+            metadata_json: entry.metadata_json,
         }))
     }
 
@@ -2186,6 +2221,8 @@ impl MetadataService for MetaService {
             metadata_location: req.new_metadata_location.clone(),
             created_at: entry.created_at,
             updated_at: now,
+            metadata_json: req.new_metadata_json.clone(),
+            policy_json: entry.policy_json.clone(),
         };
 
         // Persist with CAS in store
@@ -2218,6 +2255,7 @@ impl MetadataService for MetaService {
 
         Ok(Response::new(IcebergCommitTableResponse {
             metadata_location: req.new_metadata_location,
+            metadata_json: req.new_metadata_json,
         }))
     }
 
@@ -2311,28 +2349,54 @@ impl MetadataService for MetaService {
 
         let prefix = format!("{ns_key}\x00");
 
-        let identifiers: Vec<IcebergTableIdentifier> = self
+        let page_size = if req.page_size == 0 {
+            100
+        } else {
+            req.page_size.min(1000)
+        } as usize;
+
+        let mut table_names: Vec<String> = self
             .iceberg_tables
             .read()
             .keys()
             .filter(|k| k.starts_with(&prefix))
             .filter_map(|k| {
-                // Table key is "ns1\x00ns2\x00table_name"
-                // Strip the ns prefix to get table name
                 let table_name = &k[prefix.len()..];
-                // Only include direct tables (no additional null bytes)
                 if table_name.contains('\x00') {
                     None
                 } else {
-                    Some(IcebergTableIdentifier {
-                        namespace_levels: req.namespace_levels.clone(),
-                        name: table_name.to_string(),
-                    })
+                    Some(table_name.to_string())
                 }
             })
             .collect();
+        table_names.sort();
 
-        Ok(Response::new(IcebergListTablesResponse { identifiers }))
+        // Skip past page_token
+        if !req.page_token.is_empty() {
+            table_names.retain(|n| n.as_str() > req.page_token.as_str());
+        }
+
+        let has_more = table_names.len() > page_size;
+        let table_names: Vec<String> = table_names.into_iter().take(page_size).collect();
+
+        let next_page_token = if has_more {
+            table_names.last().cloned().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let identifiers: Vec<IcebergTableIdentifier> = table_names
+            .iter()
+            .map(|name| IcebergTableIdentifier {
+                namespace_levels: req.namespace_levels.clone(),
+                name: name.clone(),
+            })
+            .collect();
+
+        Ok(Response::new(IcebergListTablesResponse {
+            identifiers,
+            next_page_token,
+        }))
     }
 
     async fn iceberg_table_exists(
@@ -2343,5 +2407,52 @@ impl MetadataService for MetaService {
         let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
         let exists = self.iceberg_tables.read().contains_key(&table_key);
         Ok(Response::new(IcebergTableExistsResponse { exists }))
+    }
+
+    async fn iceberg_set_table_policy(
+        &self,
+        request: Request<IcebergSetTablePolicyRequest>,
+    ) -> Result<Response<IcebergSetTablePolicyResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        let mut tables = self.iceberg_tables.write();
+        let entry = tables
+            .get_mut(&table_key)
+            .ok_or_else(|| Status::not_found("table not found"))?;
+
+        entry.policy_json = req.policy_json;
+
+        if let Some(store) = &self.store {
+            store.put_iceberg_table(&table_key, &entry.encode_to_vec());
+        }
+
+        info!(
+            "Set policy on iceberg table: {:?}.{}",
+            req.namespace_levels, req.table_name
+        );
+
+        Ok(Response::new(IcebergSetTablePolicyResponse {
+            success: true,
+        }))
+    }
+
+    async fn iceberg_get_table_policy(
+        &self,
+        request: Request<IcebergGetTablePolicyRequest>,
+    ) -> Result<Response<IcebergGetTablePolicyResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = Self::iceberg_table_key(&req.namespace_levels, &req.table_name);
+
+        let entry = self
+            .iceberg_tables
+            .read()
+            .get(&table_key)
+            .cloned()
+            .ok_or_else(|| Status::not_found("table not found"))?;
+
+        Ok(Response::new(IcebergGetTablePolicyResponse {
+            policy_json: entry.policy_json,
+        }))
     }
 }

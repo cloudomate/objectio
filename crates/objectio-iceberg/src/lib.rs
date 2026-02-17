@@ -4,15 +4,18 @@
 //! The router is nested at `/iceberg` in the gateway and delegates catalog state
 //! to the Meta gRPC service.
 
+pub mod access;
 pub mod catalog;
 pub mod error;
 pub mod handlers;
+pub mod metadata;
 pub mod types;
 
 use axum::Router;
-use axum::routing::{delete, get, head, post};
+use axum::routing::{delete, get, head, post, put};
 use catalog::IcebergCatalog;
 use handlers::IcebergState;
+use objectio_auth::policy::PolicyEvaluator;
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
 use std::sync::Arc;
 use tonic::transport::Channel;
@@ -21,11 +24,16 @@ use tonic::transport::Channel;
 ///
 /// The returned router should be nested at `/iceberg` by the gateway.
 /// Routes follow the Iceberg REST Catalog `OpenAPI` spec (v1 prefix).
-pub fn router(meta_client: MetadataServiceClient<Channel>, warehouse_location: String) -> Router {
+pub fn router(
+    meta_client: MetadataServiceClient<Channel>,
+    warehouse_location: String,
+    policy_evaluator: PolicyEvaluator,
+) -> Router {
     let catalog = IcebergCatalog::new(meta_client);
     let state = Arc::new(IcebergState {
         catalog,
         warehouse_location,
+        policy_evaluator,
     });
 
     Router::new()
@@ -46,6 +54,11 @@ pub fn router(meta_client: MetadataServiceClient<Channel>, warehouse_location: S
         .route(
             "/v1/namespaces/{namespace}/properties",
             post(handlers::update_namespace_properties),
+        )
+        // Namespace policy management
+        .route(
+            "/v1/namespaces/{namespace}/policy",
+            put(handlers::set_namespace_policy),
         )
         // Table operations
         .route(
@@ -71,6 +84,11 @@ pub fn router(meta_client: MetadataServiceClient<Channel>, warehouse_location: S
         .route(
             "/v1/namespaces/{namespace}/tables/{table}",
             delete(handlers::drop_table),
+        )
+        // Table policy management
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/policy",
+            put(handlers::set_table_policy),
         )
         // Rename table
         .route("/v1/tables/rename", post(handlers::rename_table))

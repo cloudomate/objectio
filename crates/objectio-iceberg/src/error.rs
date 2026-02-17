@@ -74,6 +74,15 @@ impl IcebergError {
     }
 
     #[must_use]
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            code: StatusCode::FORBIDDEN,
+            error_type: "ForbiddenException".to_string(),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             code: StatusCode::INTERNAL_SERVER_ERROR,

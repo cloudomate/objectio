@@ -4,11 +4,11 @@ use crate::error::IcebergError;
 use crate::types;
 use objectio_proto::metadata::{
     IcebergCommitTableRequest, IcebergCreateNamespaceRequest, IcebergCreateTableRequest,
-    IcebergDropNamespaceRequest, IcebergDropTableRequest, IcebergListNamespacesRequest,
-    IcebergListTablesRequest, IcebergLoadNamespaceRequest, IcebergLoadTableRequest,
-    IcebergNamespaceExistsRequest, IcebergRenameTableRequest, IcebergTableExistsRequest,
-    IcebergTableIdentifier, IcebergUpdateNamespacePropertiesRequest,
-    metadata_service_client::MetadataServiceClient,
+    IcebergDropNamespaceRequest, IcebergDropTableRequest, IcebergGetTablePolicyRequest,
+    IcebergListNamespacesRequest, IcebergListTablesRequest, IcebergLoadNamespaceRequest,
+    IcebergLoadTableRequest, IcebergNamespaceExistsRequest, IcebergRenameTableRequest,
+    IcebergSetTablePolicyRequest, IcebergTableExistsRequest, IcebergTableIdentifier,
+    IcebergUpdateNamespacePropertiesRequest, metadata_service_client::MetadataServiceClient,
 };
 use tonic::transport::Channel;
 
@@ -90,21 +90,37 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    /// List namespaces, optionally under a parent.
+    /// List namespaces, optionally under a parent, with pagination.
     ///
     /// # Errors
     /// Returns `IcebergError` if the parent namespace is not found.
-    pub async fn list_namespaces(&self, parent: Option<Vec<String>>) -> Result<Vec<Vec<String>>> {
+    pub async fn list_namespaces(
+        &self,
+        parent: Option<Vec<String>>,
+        page_token: Option<String>,
+        page_size: Option<u32>,
+    ) -> Result<(Vec<Vec<String>>, Option<String>)> {
         let resp = self
             .meta_client
             .clone()
             .iceberg_list_namespaces(IcebergListNamespacesRequest {
                 parent_levels: parent.unwrap_or_default(),
+                page_token: page_token.unwrap_or_default(),
+                page_size: page_size.unwrap_or(0),
             })
             .await?
             .into_inner();
 
-        Ok(resp.namespaces.into_iter().map(|ns| ns.levels).collect())
+        let next = if resp.next_page_token.is_empty() {
+            None
+        } else {
+            Some(resp.next_page_token)
+        };
+
+        Ok((
+            resp.namespaces.into_iter().map(|ns| ns.levels).collect(),
+            next,
+        ))
     }
 
     /// Update namespace properties (add/remove keys).
@@ -153,7 +169,7 @@ impl IcebergCatalog {
 
     // ---- Table operations ----
 
-    /// Register a new table in the catalog.
+    /// Register a new table in the catalog with its metadata JSON.
     ///
     /// # Errors
     /// Returns `IcebergError` if the namespace is not found or table already exists.
@@ -162,7 +178,8 @@ impl IcebergCatalog {
         ns_levels: Vec<String>,
         table_name: &str,
         metadata_location: &str,
-    ) -> Result<String> {
+        metadata_json: Vec<u8>,
+    ) -> Result<(String, Vec<u8>)> {
         let resp = self
             .meta_client
             .clone()
@@ -170,18 +187,23 @@ impl IcebergCatalog {
                 namespace_levels: ns_levels,
                 table_name: table_name.to_string(),
                 metadata_location: metadata_location.to_string(),
+                metadata_json,
             })
             .await?
             .into_inner();
 
-        Ok(resp.metadata_location)
+        Ok((resp.metadata_location, resp.metadata_json))
     }
 
-    /// Load a table's current metadata location.
+    /// Load a table's current metadata location and metadata JSON.
     ///
     /// # Errors
     /// Returns `IcebergError` if the table is not found.
-    pub async fn load_table(&self, ns_levels: Vec<String>, table_name: &str) -> Result<String> {
+    pub async fn load_table(
+        &self,
+        ns_levels: Vec<String>,
+        table_name: &str,
+    ) -> Result<(String, Vec<u8>)> {
         let resp = self
             .meta_client
             .clone()
@@ -192,10 +214,10 @@ impl IcebergCatalog {
             .await?
             .into_inner();
 
-        Ok(resp.metadata_location)
+        Ok((resp.metadata_location, resp.metadata_json))
     }
 
-    /// Atomically commit a table metadata update (CAS).
+    /// Atomically commit a table metadata update (CAS) with new metadata JSON.
     ///
     /// # Errors
     /// Returns `IcebergError` if the table is not found or the commit conflicts.
@@ -205,7 +227,8 @@ impl IcebergCatalog {
         table_name: &str,
         current_metadata_location: &str,
         new_metadata_location: &str,
-    ) -> Result<String> {
+        new_metadata_json: Vec<u8>,
+    ) -> Result<(String, Vec<u8>)> {
         let resp = self
             .meta_client
             .clone()
@@ -214,11 +237,12 @@ impl IcebergCatalog {
                 table_name: table_name.to_string(),
                 current_metadata_location: current_metadata_location.to_string(),
                 new_metadata_location: new_metadata_location.to_string(),
+                new_metadata_json,
             })
             .await?
             .into_inner();
 
-        Ok(resp.metadata_location)
+        Ok((resp.metadata_location, resp.metadata_json))
     }
 
     /// Drop a table from the catalog.
@@ -269,28 +293,43 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    /// List all tables in a namespace.
+    /// List all tables in a namespace with pagination.
     ///
     /// # Errors
     /// Returns `IcebergError` if the namespace is not found.
-    pub async fn list_tables(&self, ns_levels: Vec<String>) -> Result<Vec<types::TableIdentifier>> {
+    pub async fn list_tables(
+        &self,
+        ns_levels: Vec<String>,
+        page_token: Option<String>,
+        page_size: Option<u32>,
+    ) -> Result<(Vec<types::TableIdentifier>, Option<String>)> {
         let resp = self
             .meta_client
             .clone()
             .iceberg_list_tables(IcebergListTablesRequest {
                 namespace_levels: ns_levels,
+                page_token: page_token.unwrap_or_default(),
+                page_size: page_size.unwrap_or(0),
             })
             .await?
             .into_inner();
 
-        Ok(resp
-            .identifiers
-            .into_iter()
-            .map(|id| types::TableIdentifier {
-                namespace: id.namespace_levels,
-                name: id.name,
-            })
-            .collect())
+        let next = if resp.next_page_token.is_empty() {
+            None
+        } else {
+            Some(resp.next_page_token)
+        };
+
+        Ok((
+            resp.identifiers
+                .into_iter()
+                .map(|id| types::TableIdentifier {
+                    namespace: id.namespace_levels,
+                    name: id.name,
+                })
+                .collect(),
+            next,
+        ))
     }
 
     /// Check if a table exists.
@@ -308,5 +347,51 @@ impl IcebergCatalog {
             .await?
             .into_inner();
         Ok(resp.exists)
+    }
+
+    /// Get a table's access policy JSON.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` if the table is not found.
+    pub async fn get_table_policy(
+        &self,
+        ns_levels: Vec<String>,
+        table_name: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let resp = self
+            .meta_client
+            .clone()
+            .iceberg_get_table_policy(IcebergGetTablePolicyRequest {
+                namespace_levels: ns_levels,
+                table_name: table_name.to_string(),
+            })
+            .await?
+            .into_inner();
+        if resp.policy_json.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(resp.policy_json))
+        }
+    }
+
+    /// Set a table's access policy JSON.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` if the table is not found.
+    pub async fn set_table_policy(
+        &self,
+        ns_levels: Vec<String>,
+        table_name: &str,
+        policy_json: Vec<u8>,
+    ) -> Result<()> {
+        self.meta_client
+            .clone()
+            .iceberg_set_table_policy(IcebergSetTablePolicyRequest {
+                namespace_levels: ns_levels,
+                table_name: table_name.to_string(),
+                policy_json,
+            })
+            .await?;
+        Ok(())
     }
 }

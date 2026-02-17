@@ -27,6 +27,46 @@ pub struct ProtectionConfig {
     pub lrc_global_parity: u32,
 }
 
+/// Iceberg operation types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IcebergOperation {
+    GetConfig,
+    ListNamespaces,
+    CreateNamespace,
+    LoadNamespace,
+    DropNamespace,
+    NamespaceExists,
+    UpdateNamespaceProperties,
+    ListTables,
+    CreateTable,
+    LoadTable,
+    UpdateTable,
+    DropTable,
+    TableExists,
+    RenameTable,
+}
+
+impl IcebergOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IcebergOperation::GetConfig => "GetConfig",
+            IcebergOperation::ListNamespaces => "ListNamespaces",
+            IcebergOperation::CreateNamespace => "CreateNamespace",
+            IcebergOperation::LoadNamespace => "LoadNamespace",
+            IcebergOperation::DropNamespace => "DropNamespace",
+            IcebergOperation::NamespaceExists => "NamespaceExists",
+            IcebergOperation::UpdateNamespaceProperties => "UpdateNamespaceProperties",
+            IcebergOperation::ListTables => "ListTables",
+            IcebergOperation::CreateTable => "CreateTable",
+            IcebergOperation::LoadTable => "LoadTable",
+            IcebergOperation::UpdateTable => "UpdateTable",
+            IcebergOperation::DropTable => "DropTable",
+            IcebergOperation::TableExists => "TableExists",
+            IcebergOperation::RenameTable => "RenameTable",
+        }
+    }
+}
+
 /// S3 operation types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum S3Operation {
@@ -149,6 +189,8 @@ struct GatewayMetrics {
 pub struct S3Metrics {
     /// Per-operation metrics
     operations: RwLock<HashMap<S3Operation, OperationMetrics>>,
+    /// Per-Iceberg-operation metrics
+    iceberg_operations: RwLock<HashMap<IcebergOperation, OperationMetrics>>,
     /// Gateway metrics
     gateway: GatewayMetrics,
     /// Start time for uptime calculation
@@ -162,6 +204,7 @@ impl S3Metrics {
     pub fn new() -> Self {
         Self {
             operations: RwLock::new(HashMap::new()),
+            iceberg_operations: RwLock::new(HashMap::new()),
             gateway: GatewayMetrics::default(),
             start_time: Instant::now(),
             protection: RwLock::new(None),
@@ -190,6 +233,18 @@ impl S3Metrics {
     /// Record a simple operation (no body sizes)
     pub fn record_simple(&self, op: S3Operation, status_code: u16, latency_us: u64) {
         self.record_operation(op, status_code, 0, 0, latency_us);
+    }
+
+    /// Record an Iceberg operation
+    pub fn record_iceberg_operation(
+        &self,
+        op: IcebergOperation,
+        status_code: u16,
+        latency_us: u64,
+    ) {
+        let mut ops = self.iceberg_operations.write().unwrap();
+        let metrics = ops.entry(op).or_default();
+        metrics.record(status_code, 0, 0, latency_us);
     }
 
     /// Increment active connections
@@ -546,6 +601,89 @@ impl S3Metrics {
             .unwrap();
         }
 
+        // Iceberg operation metrics
+        let iceberg_ops = self.iceberg_operations.read().unwrap();
+        if !iceberg_ops.is_empty() {
+            writeln!(
+                output,
+                "# HELP objectio_iceberg_requests_total Total Iceberg requests by operation and status"
+            )
+            .unwrap();
+            writeln!(output, "# TYPE objectio_iceberg_requests_total counter").unwrap();
+            for (op, metrics) in iceberg_ops.iter() {
+                let op_name = op.as_str();
+                let success = metrics.requests_success.load(Ordering::Relaxed);
+                let client_err = metrics.requests_client_error.load(Ordering::Relaxed);
+                let server_err = metrics.requests_server_error.load(Ordering::Relaxed);
+                writeln!(
+                    output,
+                    "objectio_iceberg_requests_total{{operation=\"{}\",status=\"success\"}} {}",
+                    op_name, success
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_iceberg_requests_total{{operation=\"{}\",status=\"client_error\"}} {}",
+                    op_name, client_err
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_iceberg_requests_total{{operation=\"{}\",status=\"server_error\"}} {}",
+                    op_name, server_err
+                )
+                .unwrap();
+            }
+
+            writeln!(
+                output,
+                "# HELP objectio_iceberg_request_duration_seconds Iceberg request duration histogram"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "# TYPE objectio_iceberg_request_duration_seconds histogram"
+            )
+            .unwrap();
+            for (op, metrics) in iceberg_ops.iter() {
+                let op_name = op.as_str();
+                let total = metrics.requests_total.load(Ordering::Relaxed);
+                let sum_us = metrics.latency_sum_us.load(Ordering::Relaxed);
+
+                let mut cumulative = 0u64;
+                for (i, &boundary_ms) in LATENCY_BUCKET_BOUNDARIES_MS.iter().enumerate() {
+                    cumulative += metrics.latency_buckets[i].load(Ordering::Relaxed);
+                    writeln!(
+                        output,
+                        "objectio_iceberg_request_duration_seconds_bucket{{operation=\"{}\",le=\"{}\"}} {}",
+                        op_name,
+                        boundary_ms as f64 / 1000.0,
+                        cumulative
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "objectio_iceberg_request_duration_seconds_bucket{{operation=\"{}\",le=\"+Inf\"}} {}",
+                    op_name, total
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_iceberg_request_duration_seconds_sum{{operation=\"{}\"}} {}",
+                    op_name,
+                    sum_us as f64 / 1_000_000.0
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_iceberg_request_duration_seconds_count{{operation=\"{}\"}} {}",
+                    op_name, total
+                )
+                .unwrap();
+            }
+        }
+
         output
     }
 }
@@ -620,6 +758,20 @@ mod tests {
         assert!(output.contains("objectio_s3_requests_total"));
         assert!(output.contains("GetObject"));
         assert!(output.contains("PutObject"));
+    }
+
+    #[test]
+    fn test_record_iceberg_operation() {
+        let metrics = S3Metrics::new();
+        metrics.record_iceberg_operation(IcebergOperation::ListNamespaces, 200, 3000);
+        metrics.record_iceberg_operation(IcebergOperation::CreateTable, 409, 5000);
+        metrics.record_iceberg_operation(IcebergOperation::LoadTable, 500, 10000);
+
+        let output = metrics.export_prometheus();
+        assert!(output.contains("objectio_iceberg_requests_total"));
+        assert!(output.contains("ListNamespaces"));
+        assert!(output.contains("CreateTable"));
+        assert!(output.contains("objectio_iceberg_request_duration_seconds"));
     }
 
     #[test]

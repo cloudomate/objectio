@@ -38,11 +38,17 @@ pub struct LoadNamespaceResponse {
 #[derive(Debug, Serialize)]
 pub struct ListNamespacesResponse {
     pub namespaces: Vec<Vec<String>>,
+    #[serde(rename = "next-page-token", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ListNamespacesParams {
     pub parent: Option<String>,
+    #[serde(rename = "pageToken")]
+    pub page_token: Option<String>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,10 +232,27 @@ pub struct RenameTableRequest {
 #[derive(Debug, Serialize)]
 pub struct ListTablesResponse {
     pub identifiers: Vec<TableIdentifier>,
+    #[serde(rename = "next-page-token", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListTablesParams {
+    #[serde(rename = "pageToken")]
+    pub page_token: Option<String>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PurgeParams {
     #[serde(rename = "purgeRequested", default)]
     pub purge_requested: bool,
+}
+
+// ---- Policy ----
+
+#[derive(Debug, Deserialize)]
+pub struct SetPolicyRequest {
+    pub policy: String,
 }

@@ -225,8 +225,11 @@ async fn main() -> Result<()> {
     let scatter_gather = ScatterGatherEngine::new(osd_pool.clone(), signing_key.as_bytes());
 
     // Build Iceberg REST Catalog router (before AppState consumes meta_client)
-    let iceberg_router =
-        objectio_iceberg::router(meta_client.clone(), args.warehouse_location.clone());
+    let iceberg_router = objectio_iceberg::router(
+        meta_client.clone(),
+        args.warehouse_location.clone(),
+        PolicyEvaluator::new(),
+    );
     info!(
         "Iceberg REST Catalog enabled at /iceberg/v1/* (warehouse: {})",
         args.warehouse_location

@@ -3,7 +3,7 @@
 //! Intercepts all requests and records metrics based on HTTP method and path patterns.
 
 use axum::{body::Body, extract::Request, http::Method, middleware::Next, response::Response};
-use objectio_s3::{S3Operation, s3_metrics};
+use objectio_s3::{IcebergOperation, S3Operation, s3_metrics};
 use std::time::Instant;
 
 /// Extract S3 operation type from HTTP method and path
@@ -69,6 +69,63 @@ fn refine_operation(op: S3Operation, query: Option<&str>) -> S3Operation {
     }
 }
 
+/// Extract Iceberg operation type from HTTP method and path (without /iceberg prefix).
+fn extract_iceberg_operation(method: &Method, path: &str) -> Option<IcebergOperation> {
+    let path = path.split('?').next().unwrap_or(path);
+    let path = path.trim_start_matches('/');
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    match (method, segments.as_slice()) {
+        // GET /v1/config
+        (m, ["v1", "config"]) if m == Method::GET => Some(IcebergOperation::GetConfig),
+        // GET /v1/namespaces
+        (m, ["v1", "namespaces"]) if m == Method::GET => Some(IcebergOperation::ListNamespaces),
+        // POST /v1/namespaces
+        (m, ["v1", "namespaces"]) if m == Method::POST => Some(IcebergOperation::CreateNamespace),
+        // POST /v1/tables/rename
+        (m, ["v1", "tables", "rename"]) if m == Method::POST => Some(IcebergOperation::RenameTable),
+        // POST /v1/namespaces/{ns}/properties
+        (m, ["v1", "namespaces", _ns, "properties"]) if m == Method::POST => {
+            Some(IcebergOperation::UpdateNamespaceProperties)
+        }
+        // GET /v1/namespaces/{ns}/tables
+        (m, ["v1", "namespaces", _ns, "tables"]) if m == Method::GET => {
+            Some(IcebergOperation::ListTables)
+        }
+        // POST /v1/namespaces/{ns}/tables
+        (m, ["v1", "namespaces", _ns, "tables"]) if m == Method::POST => {
+            Some(IcebergOperation::CreateTable)
+        }
+        // GET /v1/namespaces/{ns}/tables/{table}
+        (m, ["v1", "namespaces", _ns, "tables", _table]) if m == Method::GET => {
+            Some(IcebergOperation::LoadTable)
+        }
+        // POST /v1/namespaces/{ns}/tables/{table}
+        (m, ["v1", "namespaces", _ns, "tables", _table]) if m == Method::POST => {
+            Some(IcebergOperation::UpdateTable)
+        }
+        // HEAD /v1/namespaces/{ns}/tables/{table}
+        (m, ["v1", "namespaces", _ns, "tables", _table]) if m == Method::HEAD => {
+            Some(IcebergOperation::TableExists)
+        }
+        // DELETE /v1/namespaces/{ns}/tables/{table}
+        (m, ["v1", "namespaces", _ns, "tables", _table]) if m == Method::DELETE => {
+            Some(IcebergOperation::DropTable)
+        }
+        // GET /v1/namespaces/{ns}
+        (m, ["v1", "namespaces", _ns]) if m == Method::GET => Some(IcebergOperation::LoadNamespace),
+        // HEAD /v1/namespaces/{ns}
+        (m, ["v1", "namespaces", _ns]) if m == Method::HEAD => {
+            Some(IcebergOperation::NamespaceExists)
+        }
+        // DELETE /v1/namespaces/{ns}
+        (m, ["v1", "namespaces", _ns]) if m == Method::DELETE => {
+            Some(IcebergOperation::DropNamespace)
+        }
+        _ => None,
+    }
+}
+
 /// Metrics middleware that records S3 operation metrics
 pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     let start = Instant::now();
@@ -85,7 +142,15 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     }
 
     // Determine S3 operation type
-    let operation = extract_operation(&method, path).map(|op| refine_operation(op, query));
+    let s3_operation = extract_operation(&method, path).map(|op| refine_operation(op, query));
+
+    // Try Iceberg operation if not an S3 operation
+    let iceberg_operation = if s3_operation.is_none() {
+        path.strip_prefix("/iceberg")
+            .and_then(|iceberg_path| extract_iceberg_operation(&method, iceberg_path))
+    } else {
+        None
+    };
 
     // Get request body size from Content-Length header
     let request_bytes = request
@@ -98,12 +163,11 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     // Run the handler
     let response = next.run(request).await;
 
-    // Record metrics if this is an S3 operation
-    if let Some(op) = operation {
-        let status_code = response.status().as_u16();
-        let latency_us = start.elapsed().as_micros() as u64;
+    let status_code = response.status().as_u16();
+    let latency_us = start.elapsed().as_micros() as u64;
 
-        // Get response body size from Content-Length header
+    // Record metrics for S3 or Iceberg operation
+    if let Some(op) = s3_operation {
         let response_bytes = response
             .headers()
             .get(axum::http::header::CONTENT_LENGTH)
@@ -112,6 +176,8 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
             .unwrap_or(0);
 
         s3_metrics().record_operation(op, status_code, request_bytes, response_bytes, latency_us);
+    } else if let Some(op) = iceberg_operation {
+        s3_metrics().record_iceberg_operation(op, status_code, latency_us);
     }
 
     response

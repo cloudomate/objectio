@@ -62,6 +62,10 @@ service MetadataService {
     rpc IcebergRenameTable(IcebergRenameTableRequest) returns (IcebergRenameTableResponse);
     rpc IcebergListTables(IcebergListTablesRequest) returns (IcebergListTablesResponse);
     rpc IcebergTableExists(IcebergTableExistsRequest) returns (IcebergTableExistsResponse);
+
+    // Iceberg table policy
+    rpc IcebergSetTablePolicy(IcebergSetTablePolicyRequest) returns (IcebergSetTablePolicyResponse);
+    rpc IcebergGetTablePolicy(IcebergGetTablePolicyRequest) returns (IcebergGetTablePolicyResponse);
 }
 
 // Bucket metadata
@@ -584,6 +588,8 @@ message IcebergTableEntry {
     string metadata_location = 1;   // S3 URL to metadata.json
     uint64 created_at = 2;
     uint64 updated_at = 3;
+    bytes metadata_json = 4;        // Full table metadata JSON
+    bytes policy_json = 5;          // Optional: IAM-style access policy JSON
 }
 
 // ---- Namespace RPCs ----
@@ -617,10 +623,13 @@ message IcebergDropNamespaceResponse {
 
 message IcebergListNamespacesRequest {
     repeated string parent_levels = 1;  // empty = list top-level
+    string page_token = 2;
+    uint32 page_size = 3;
 }
 
 message IcebergListNamespacesResponse {
     repeated IcebergNamespace namespaces = 1;
+    string next_page_token = 2;
 }
 
 message IcebergUpdateNamespacePropertiesRequest {
@@ -649,10 +658,12 @@ message IcebergCreateTableRequest {
     repeated string namespace_levels = 1;
     string table_name = 2;
     string metadata_location = 3;   // S3 URL to initial metadata.json
+    bytes metadata_json = 4;        // Full table metadata JSON
 }
 
 message IcebergCreateTableResponse {
     string metadata_location = 1;
+    bytes metadata_json = 2;        // Stored metadata JSON echoed back
 }
 
 message IcebergLoadTableRequest {
@@ -662,6 +673,7 @@ message IcebergLoadTableRequest {
 
 message IcebergLoadTableResponse {
     string metadata_location = 1;
+    bytes metadata_json = 2;        // Stored metadata JSON
 }
 
 message IcebergCommitTableRequest {
@@ -669,10 +681,12 @@ message IcebergCommitTableRequest {
     string table_name = 2;
     string current_metadata_location = 3;   // Expected (CAS)
     string new_metadata_location = 4;       // Desired
+    bytes new_metadata_json = 5;            // New metadata JSON to store
 }
 
 message IcebergCommitTableResponse {
     string metadata_location = 1;
+    bytes metadata_json = 2;                // Stored metadata JSON
 }
 
 message IcebergDropTableRequest {
@@ -696,10 +710,13 @@ message IcebergRenameTableResponse {
 
 message IcebergListTablesRequest {
     repeated string namespace_levels = 1;
+    string page_token = 2;
+    uint32 page_size = 3;
 }
 
 message IcebergListTablesResponse {
     repeated IcebergTableIdentifier identifiers = 1;
+    string next_page_token = 2;
 }
 
 message IcebergTableExistsRequest {
@@ -709,4 +726,25 @@ message IcebergTableExistsRequest {
 
 message IcebergTableExistsResponse {
     bool exists = 1;
+}
+
+// ---- Table policy RPCs ----
+
+message IcebergSetTablePolicyRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    bytes policy_json = 3;
+}
+
+message IcebergSetTablePolicyResponse {
+    bool success = 1;
+}
+
+message IcebergGetTablePolicyRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message IcebergGetTablePolicyResponse {
+    bytes policy_json = 1;
 }
