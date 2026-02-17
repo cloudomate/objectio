@@ -43,8 +43,8 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 ```
                 ┌───────────────────────────────────────────────┐
                 │                    Clients                    │
-                │  S3 (aws-cli, boto3)  Iceberg (Spark/Trino)  │
-                │  Block (iSCSI/NVMe-oF)                       │
+                │  S3 (aws-cli, boto3)  Iceberg (Spark/Trino)   │
+                │  Block (iSCSI/NVMe-oF)                        │
                 └───────────────────────┬───────────────────────┘
                                         │
                        ┌────────────────▼────────────────┐
@@ -56,8 +56,8 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
                                     │
                  ┌──────────────────┼──────────────────┐
                  │                  │                  │
-       ┌─────────▼─────────┐       │        ┌─────────▼─────────┐
-       │  Meta (:9100)     │◄──────┴───────►│  Meta (:9100)     │
+       ┌─────────▼─────────┐        │       ┌─────────▼─────────┐
+       │  Meta (:9100)     │◄────── ┴──────►│  Meta (:9100)     │
        │  Raft Consensus   │                │  Raft Consensus   │
        │  redb Persistence │                │  redb Persistence │
        │  CRUSH Placement  │                │  CRUSH Placement  │
