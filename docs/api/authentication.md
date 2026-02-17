@@ -286,18 +286,33 @@ Bucket policies control access to buckets and objects using IAM-style JSON polic
 
 ### Supported Actions
 
-**Object Actions:**
+**S3 Object Actions:**
 - `s3:GetObject`
 - `s3:PutObject`
 - `s3:DeleteObject`
 - `s3:GetObjectVersion`
 
-**Bucket Actions:**
+**S3 Bucket Actions:**
 - `s3:ListBucket`
 - `s3:GetBucketLocation`
 - `s3:GetBucketPolicy`
 - `s3:PutBucketPolicy`
 - `s3:DeleteBucketPolicy`
+
+**Iceberg Namespace Actions:**
+- `iceberg:ListNamespaces`
+- `iceberg:CreateNamespace`
+- `iceberg:LoadNamespace`
+- `iceberg:DropNamespace`
+- `iceberg:UpdateNamespaceProperties`
+
+**Iceberg Table Actions:**
+- `iceberg:ListTables`
+- `iceberg:CreateTable`
+- `iceberg:LoadTable`
+- `iceberg:UpdateTable`
+- `iceberg:DropTable`
+- `iceberg:RenameTable`
 
 ### Example Policies
 

@@ -52,6 +52,7 @@ The OSD auto-creates a 10GB sparse `disk.raw` on first start.
 ### Endpoints
 
 - **Gateway (S3)**: `http://192.168.4.102:9000`
+- **Iceberg REST Catalog**: `http://192.168.4.102:9000/iceberg/v1/`
 - **Meta (gRPC)**: `http://192.168.4.102:9100`
 - **OSDs**: ports 9200, 9202-9205
 
@@ -107,6 +108,39 @@ curl -r 0-1023 http://192.168.4.102:9000/test/bigfile -o /dev/null -w '%{http_co
 
 # List
 aws --endpoint-url http://192.168.4.102:9000 s3 ls s3://test/
+```
+
+### Test Iceberg REST Catalog
+
+```bash
+ENDPOINT=http://192.168.4.102:9000/iceberg/v1
+
+# Get config
+curl -s $ENDPOINT/config | jq .
+
+# Create namespace
+curl -s -X POST $ENDPOINT/namespaces \
+  -H 'Content-Type: application/json' \
+  -d '{"namespace":["analytics"],"properties":{"owner":"alice"}}' | jq .
+
+# List namespaces
+curl -s $ENDPOINT/namespaces | jq .
+
+# Create table
+curl -s -X POST $ENDPOINT/namespaces/analytics/tables \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"events","schema":{"type":"struct","fields":[{"id":1,"name":"id","type":"long","required":true}]}}' | jq .
+
+# List tables
+curl -s $ENDPOINT/namespaces/analytics/tables | jq .
+
+# Load table
+curl -s $ENDPOINT/namespaces/analytics/tables/events | jq .
+
+# Set namespace policy (admin only, requires SigV4 auth)
+curl -s -X PUT $ENDPOINT/namespaces/analytics/policy \
+  -H 'Content-Type: application/json' \
+  -d '{"policy":"{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"OBIO\":[\"*\"]},\"Action\":[\"iceberg:*\"],\"Resource\":[\"arn:obio:iceberg:::analytics/*\"]}]}"}'
 ```
 
 ### CLI against datacore

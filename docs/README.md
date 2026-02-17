@@ -11,7 +11,7 @@ ObjectIO is a software-defined storage (SDS) platform written in Rust that provi
 | [Block Storage](architecture/block-storage.md) | Volumes, snapshots, QoS |
 | [Storage Engine](storage/README.md) | Disk layout, caching, erasure coding |
 | [Deployment](deployment/README.md) | Installation and configuration |
-| [API Reference](api/README.md) | S3 API and authentication |
+| [API Reference](api/README.md) | S3 API, Iceberg REST Catalog, and authentication |
 | [Operations](operations/README.md) | Monitoring, recovery, maintenance |
 
 ## Documentation Structure
@@ -40,6 +40,7 @@ docs/
 ├── api/
 │   ├── README.md                # API overview
 │   ├── s3-operations.md         # S3 API reference
+│   ├── iceberg-api.md           # Iceberg REST Catalog API
 │   └── authentication.md        # SigV4 and security
 └── operations/
     ├── README.md                # Operations overview
@@ -50,6 +51,7 @@ docs/
 ## Key Features
 
 - **S3 API Compatibility**: Works with aws-cli, boto3, s3cmd, and any S3-compatible SDK
+- **Iceberg REST Catalog**: Apache Iceberg table catalog for Spark, Trino, and Flink
 - **Block Storage**: Distributed volumes with thin provisioning, snapshots, clones, and QoS
 - **Erasure Coding**: Storage-efficient data protection (4+2, 8+4, LRC)
 - **Raw Disk Access**: O_DIRECT/F_NOCACHE for maximum performance
@@ -60,7 +62,7 @@ docs/
 
 | Component | Binary | Purpose |
 |-----------|--------|---------|
-| S3 Gateway | `objectio-gateway` | S3 REST API, authentication, erasure encoding |
+| S3 Gateway | `objectio-gateway` | S3 REST API, Iceberg REST Catalog, authentication, erasure encoding |
 | Metadata Service | `objectio-meta` | Bucket/object/volume metadata (redb persistence) |
 | Storage Node (OSD) | `objectio-osd` | Raw disk storage, shard I/O, block storage gRPC |
 | Admin CLI | `objectio-cli` | Cluster, user, and volume management |
@@ -75,7 +77,8 @@ docs/
 | Metadata Persistence | Complete | redb-backed storage with in-memory cache |
 | CRUSH 2.0 Placement | Complete | HRW hashing, rack/node/disk-aware, integrated |
 | Erasure Coding | Complete | Reed-Solomon (rust-simd + ISA-L), LRC |
-| Authentication | Complete | SigV4, bucket policies, IAM users |
+| Authentication | Complete | SigV4, bucket policies, Iceberg policies, IAM users |
+| Iceberg REST Catalog | Complete | Namespace/table CRUD, access control, metrics |
 | Block Storage | Complete | Volumes, snapshots, clones, QoS, write cache/journal |
 | Raft Consensus | Placeholder | openraft dependency exists, state machine scaffolded |
 | External IAM | Planned | OIDC, OpenFGA integration |

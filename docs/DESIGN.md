@@ -1337,9 +1337,104 @@ impl PlacementPolicy {
 
 ---
 
-## 8. S3 API Gateway
+## 8. S3 API Gateway & Iceberg REST Catalog
 
-### Supported Operations
+### Iceberg REST Catalog
+
+The gateway hosts an Apache Iceberg REST Catalog API at `/iceberg/v1/*`, implemented in `crates/objectio-iceberg`. It enables query engines (Spark, Trino, Flink, etc.) to discover and manage Iceberg tables stored on ObjectIO.
+
+#### Iceberg Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Query Engine (Spark, Trino, etc.)                  │
+│                                                                       │
+│   catalog-impl = org.apache.iceberg.rest.RESTCatalog                 │
+│   uri          = http://gateway:9000/iceberg/v1                      │
+└───────────────────────────────┬───────────────────────────────────────┘
+                                │ HTTP REST API
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    ObjectIO Gateway (:9000)                           │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────────┐  │
+│  │ Auth Middleware │──│ Iceberg Router │──│ S3 Routes              │  │
+│  │ (SigV4)        │  │ /iceberg/v1/*  │  │ /{bucket}/{key}        │  │
+│  └────────────────┘  └───────┬────────┘  └────────────────────────┘  │
+│                              │                                        │
+│                    ┌─────────▼─────────┐                              │
+│                    │ IcebergCatalog    │                              │
+│                    │ (gRPC client)     │                              │
+│                    └─────────┬─────────┘                              │
+└──────────────────────────────┼────────────────────────────────────────┘
+                               │ gRPC
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Metadata Service (:9100)                           │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  redb tables: iceberg_namespaces, iceberg_tables                │ │
+│  │  Namespace → { properties: HashMap<String,String> }             │ │
+│  │  Table → { schema, location, metadata_location, policy_json }   │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+#### Iceberg Endpoints
+
+| Operation | Method | Path | Action |
+|-----------|--------|------|--------|
+| GetConfig | GET | `/iceberg/v1/config` | Catalog configuration |
+| ListNamespaces | GET | `/iceberg/v1/namespaces` | List namespaces |
+| CreateNamespace | POST | `/iceberg/v1/namespaces` | Create namespace |
+| LoadNamespace | GET | `/iceberg/v1/namespaces/{ns}` | Get namespace details |
+| NamespaceExists | HEAD | `/iceberg/v1/namespaces/{ns}` | Check namespace exists |
+| DropNamespace | DELETE | `/iceberg/v1/namespaces/{ns}` | Delete namespace |
+| UpdateProperties | POST | `/iceberg/v1/namespaces/{ns}/properties` | Update namespace properties |
+| ListTables | GET | `/iceberg/v1/namespaces/{ns}/tables` | List tables |
+| CreateTable | POST | `/iceberg/v1/namespaces/{ns}/tables` | Create table |
+| LoadTable | GET | `/iceberg/v1/namespaces/{ns}/tables/{t}` | Get table metadata |
+| TableExists | HEAD | `/iceberg/v1/namespaces/{ns}/tables/{t}` | Check table exists |
+| UpdateTable | POST | `/iceberg/v1/namespaces/{ns}/tables/{t}` | Update table |
+| DropTable | DELETE | `/iceberg/v1/namespaces/{ns}/tables/{t}` | Delete table |
+| RenameTable | POST | `/iceberg/v1/tables/rename` | Rename table |
+
+#### Iceberg Access Control
+
+Iceberg namespace and table operations are protected by IAM-style policies, reusing the `PolicyEvaluator`/`BucketPolicy` framework from `objectio-auth`.
+
+**Actions** use the `iceberg:` prefix:
+- `iceberg:CreateNamespace`, `iceberg:DropNamespace`, `iceberg:ListNamespaces`, `iceberg:LoadNamespace`, `iceberg:UpdateNamespaceProperties`
+- `iceberg:CreateTable`, `iceberg:LoadTable`, `iceberg:UpdateTable`, `iceberg:DropTable`, `iceberg:ListTables`, `iceberg:RenameTable`
+
+**Resource ARNs**:
+- Namespace: `arn:obio:iceberg:::{ns1/ns2}`
+- Table: `arn:obio:iceberg:::{ns1/ns2}/{table}`
+
+**Policy storage**:
+- Namespace policies: stored in namespace properties under the reserved `__policy` key
+- Table policies: stored in the `policy_json` field on `IcebergTableEntry` (proto)
+
+**Policy management** (admin only):
+- `PUT /iceberg/v1/namespaces/{ns}/policy`
+- `PUT /iceberg/v1/namespaces/{ns}/tables/{t}/policy`
+
+#### Iceberg Metrics
+
+The gateway's metrics middleware tracks all Iceberg operations:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `objectio_iceberg_requests_total` | Counter | `operation`, `status` | Total Iceberg API requests |
+| `objectio_iceberg_request_duration_seconds` | Histogram | `operation` | Request latency (11 buckets) |
+
+```promql
+# Iceberg request rate by operation
+rate(objectio_iceberg_requests_total[5m])
+
+# Iceberg P99 latency
+histogram_quantile(0.99, rate(objectio_iceberg_request_duration_seconds_bucket[5m]))
+```
+
+### Supported S3 Operations
 
 #### Bucket Operations
 | Operation | Method | Path | Status |
@@ -1587,7 +1682,7 @@ impl PhiAccrualDetector {
 - **Access Keys**: Access Key ID + Secret Access Key pairs
 - **Temporary Credentials**: Support for STS-style tokens (future)
 
-### Authorization (Bucket Policies)
+### Authorization (Bucket & Iceberg Policies)
 
 ```rust
 pub struct BucketPolicy {
@@ -1599,8 +1694,8 @@ pub struct PolicyStatement {
     pub sid: Option<String>,
     pub effect: Effect,           // Allow | Deny
     pub principal: Principal,     // "*" | { "OBIO": ["arn:..."] }
-    pub action: Vec<String>,      // ["s3:GetObject", "s3:PutObject", ...]
-    pub resource: Vec<String>,    // ["arn:obio:s3:::bucket/*", ...]
+    pub action: Vec<String>,      // ["s3:GetObject", "iceberg:LoadTable", ...]
+    pub resource: Vec<String>,    // ["arn:obio:s3:::bucket/*", "arn:obio:iceberg:::ns/*", ...]
     pub condition: Option<Conditions>,
 }
 
@@ -1708,6 +1803,15 @@ objectio/
 │   │       ├── store.rs             # redb-backed storage
 │   │       ├── bucket.rs            # Bucket operations
 │   │       └── object.rs            # Object metadata
+│   │
+│   ├── objectio-iceberg/            # Iceberg REST Catalog
+│   │   └── src/
+│   │       ├── lib.rs               # Router factory
+│   │       ├── handlers.rs          # Axum handlers + policy checks
+│   │       ├── catalog.rs           # gRPC catalog client
+│   │       ├── access.rs            # Policy evaluation helpers
+│   │       ├── types.rs             # Request/response types
+│   │       └── error.rs             # Iceberg error types
 │   │
 │   ├── objectio-s3/                 # S3 API layer
 │   │   └── src/
@@ -1860,6 +1964,22 @@ objectio/
 - [x] Credentials persist across gateway restarts
 
 **Deliverable**: Credentials managed centrally, survive restarts
+
+### Phase 9: Iceberg REST Catalog ✅
+
+**Goal**: Apache Iceberg table catalog for analytics workloads
+
+- [x] Iceberg REST Catalog API (`/iceberg/v1/*`)
+- [x] Namespace CRUD (create, load, list, drop, update properties)
+- [x] Table CRUD (create, load, list, drop, update, rename)
+- [x] Metadata persistence via Meta service (redb)
+- [x] Iceberg-specific Prometheus metrics (`objectio_iceberg_*`)
+- [x] Namespace and table access control (IAM-style policies)
+- [x] Policy management endpoints (admin-only)
+- [ ] Iceberg view support
+- [ ] Table snapshots and time travel
+
+**Deliverable**: Working Iceberg REST Catalog with auth and metrics
 
 ---
 

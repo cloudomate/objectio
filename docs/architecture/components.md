@@ -14,6 +14,8 @@ The S3 Gateway provides the S3-compatible REST API endpoint.
 - **Erasure Coding**: Encode data into shards for writes, decode for reads
 - **Streaming**: Handle large file uploads/downloads efficiently
 - **Multipart Upload**: Coordinate multipart upload sessions
+- **Iceberg REST Catalog**: Apache Iceberg namespace/table management at `/iceberg/v1/*`
+- **Iceberg Access Control**: IAM-style policies at namespace and table level
 
 ### Architecture
 
@@ -24,7 +26,7 @@ The S3 Gateway provides the S3-compatible REST API endpoint.
 │                                                                  │
 │   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
 │   │   Axum      │  │   Auth      │  │   Handlers  │              │
-│   │   Router    │──│   Middleware│──│   (S3 ops)  │              │
+│   │   Router    │──│   Middleware│──│  S3 + Iceberg│             │
 │   └─────────────┘  └─────────────┘  └─────────────┘              │
 │                                           │                      │
 │                              ┌────────────┴────────────┐         │
@@ -76,6 +78,7 @@ The Metadata Service manages all cluster metadata with redb persistence.
 - **Placement Decisions**: CRUSH 2.0 (HRW hashing) for shard placement
 - **IAM**: Users, access keys, bucket policies
 - **Bucket Policies**: JSON-based access control
+- **Iceberg Catalog**: Namespace/table metadata and policies
 
 ### Architecture
 
@@ -100,6 +103,10 @@ The Metadata Service manages all cluster metadata with redb persistence.
 │   │  │  volumes:     │  │  access_keys: │  │  policies:      │  ││
 │   │  │  HashMap      │  │  HashMap      │  │  HashMap        │  ││
 │   │  └───────────────┘  └───────────────┘  └─────────────────┘  ││
+│   │  ┌───────────────┐  ┌───────────────┐                       ││
+│   │  │  iceberg_ns:  │  │  iceberg_tbl: │                       ││
+│   │  │  HashMap      │  │  HashMap      │                       ││
+│   │  └───────────────┘  └───────────────┘                       ││
 │   └─────────────────────────────────────────────────────────────┘│
 │          │                                                       │
 │          ▼                                                       │
@@ -107,7 +114,8 @@ The Metadata Service manages all cluster metadata with redb persistence.
 │   │              redb (persistent KV store)                     ││
 │   │  Tables: buckets, bucket_policies, multipart_uploads,       ││
 │   │          osd_nodes, cluster_topology, users, access_keys,   ││
-│   │          volumes, snapshots, volume_chunks                  ││
+│   │          volumes, snapshots, volume_chunks,                 ││
+│   │          iceberg_namespaces, iceberg_tables                 ││
 │   └─────────────────────────────────────────────────────────────┘│
 │                                                                  │
 │   ✅ All writes persisted to redb                                │

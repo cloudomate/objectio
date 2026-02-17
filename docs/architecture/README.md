@@ -31,6 +31,7 @@ ObjectIO is a software-defined storage (SDS) platform with S3 object and block s
 │  • Reed-Solomon / LRC erasure coding                                    │
 │  • Streaming upload/download                                            │
 │  • Multipart upload coordination                                        │
+│  • Iceberg REST Catalog (/iceberg/v1/*)                                 │
 └─────────────────────────┬───────────────────────────────────────────────┘
                           │ gRPC
                           ▼
@@ -44,6 +45,7 @@ ObjectIO is a software-defined storage (SDS) platform with S3 object and block s
 │  │  • OSD topology (node_id, address, failure_domain)               │  │
 │  │  • Bucket policies (access control)                              │  │
 │  │  • IAM users and access keys                                     │  │
+│  │  • Iceberg namespaces and tables                                 │  │
 │  │  • Volume/snapshot metadata (block storage)                      │  │
 │  │  • CRUSH 2.0 placement algorithm                                 │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
@@ -333,7 +335,7 @@ No C/C++ dependencies for core functionality (ISA-L is optional for performance)
 
 | Component | Binary | Purpose | Status |
 |-----------|--------|---------|--------|
-| **S3 Gateway** | `objectio-gateway` | S3 REST API, auth, EC encode/decode | Complete |
+| **S3 Gateway** | `objectio-gateway` | S3 REST API, Iceberg REST Catalog, auth, EC encode/decode | Complete |
 | **Metadata Service** | `objectio-meta` | Buckets, topology, IAM, volumes, CRUSH placement (redb persistence) | Complete |
 | **Block Storage** | `objectio-block` | Volume manager, chunk mapper, write cache/journal, QoS | Complete |
 | **Storage Node (OSD)** | `objectio-osd` | Shard storage, object metadata, block I/O | Complete |
@@ -348,6 +350,8 @@ No C/C++ dependencies for core functionality (ISA-L is optional for performance)
 | **OSD topology** | Meta service | redb + in-memory cache | Updated on OSD join/leave |
 | **Bucket policies** | Meta service | redb + in-memory cache | Access control rules |
 | **IAM users/keys** | Meta service | redb + in-memory cache | Authentication credentials |
+| **Iceberg namespaces** | Meta service | redb + in-memory cache | Namespace properties + policies |
+| **Iceberg tables** | Meta service | redb + in-memory cache | Table schema, location, policies |
 | **Volume metadata** | Meta service | redb + in-memory cache | Block storage volumes/snapshots |
 | **CRUSH map** | Meta service | Computed from topology | Not stored, computed |
 | **Object metadata** | Primary OSD | WAL + B-tree | Persisted, crash-safe |

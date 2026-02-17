@@ -5,6 +5,7 @@ ObjectIO provides an S3-compatible REST API.
 ## Contents
 
 - [S3 Operations](s3-operations.md) - Supported S3 API operations
+- [Iceberg REST Catalog](iceberg-api.md) - Iceberg namespace and table API
 - [Authentication](authentication.md) - AWS SigV4 and security
 
 ## Quick Start
@@ -79,6 +80,8 @@ curl http://localhost:9000/my-bucket/hello.txt
 
 ## API Endpoints
 
+### S3 API
+
 | Operation | Method | Path |
 |-----------|--------|------|
 | List Buckets | GET | `/` |
@@ -92,6 +95,24 @@ curl http://localhost:9000/my-bucket/hello.txt
 | Head Object | HEAD | `/{bucket}/{key}` |
 
 See [S3 Operations](s3-operations.md) for the complete reference.
+
+### Iceberg REST Catalog API
+
+| Operation | Method | Path |
+|-----------|--------|------|
+| Get Config | GET | `/iceberg/v1/config` |
+| List Namespaces | GET | `/iceberg/v1/namespaces` |
+| Create Namespace | POST | `/iceberg/v1/namespaces` |
+| Load Namespace | GET | `/iceberg/v1/namespaces/{ns}` |
+| Drop Namespace | DELETE | `/iceberg/v1/namespaces/{ns}` |
+| List Tables | GET | `/iceberg/v1/namespaces/{ns}/tables` |
+| Create Table | POST | `/iceberg/v1/namespaces/{ns}/tables` |
+| Load Table | GET | `/iceberg/v1/namespaces/{ns}/tables/{table}` |
+| Update Table | POST | `/iceberg/v1/namespaces/{ns}/tables/{table}` |
+| Drop Table | DELETE | `/iceberg/v1/namespaces/{ns}/tables/{table}` |
+| Rename Table | POST | `/iceberg/v1/tables/rename` |
+
+See [Iceberg REST Catalog](iceberg-api.md) for the complete reference.
 
 ## Health Check
 

@@ -76,6 +76,27 @@ histogram_quantile(0.99, rate(objectio_gateway_request_duration_seconds_bucket[5
 rate(objectio_gateway_errors_total[5m]) / rate(objectio_gateway_requests_total[5m])
 ```
 
+### Iceberg Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `objectio_iceberg_requests_total` | Counter | Iceberg API requests by operation and status |
+| `objectio_iceberg_request_duration_seconds` | Histogram | Iceberg request latency |
+
+**Example queries:**
+
+```promql
+# Iceberg request rate by operation
+sum(rate(objectio_iceberg_requests_total[5m])) by (operation)
+
+# Iceberg error rate
+sum(rate(objectio_iceberg_requests_total{status=~"4..|5.."}[5m])) /
+sum(rate(objectio_iceberg_requests_total[5m]))
+
+# Iceberg P99 latency
+histogram_quantile(0.99, rate(objectio_iceberg_request_duration_seconds_bucket[5m]))
+```
+
 ### Metadata Service Metrics
 
 | Metric | Type | Description |

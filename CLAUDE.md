@@ -104,7 +104,7 @@ deploy/
 
 Three-service architecture: **Gateway** (:9000), **Meta** (:9100), **OSD** (:9200).
 
-**Gateway** (stateless, horizontally scalable): Receives S3 requests, authenticates via SigV4, queries Meta for placement, erasure-encodes data, writes shards to OSDs in parallel, returns S3 response.
+**Gateway** (stateless, horizontally scalable): Receives S3 requests, authenticates via SigV4, queries Meta for placement, erasure-encodes data, writes shards to OSDs in parallel, returns S3 response. Also hosts the Iceberg REST Catalog at `/iceberg/v1/*`.
 
 **Meta** (Raft cluster, 3+ nodes): Stores bucket/object metadata, makes placement decisions via CRUSH algorithm, manages IAM users/access keys. Uses OpenRaft + Redb.
 
@@ -123,14 +123,25 @@ The `objectio-block` crate provides block storage on top of the distributed obje
 
 The block gRPC service is defined in `crates/objectio-proto/proto/block.proto` (BlockService) and runs on the OSD.
 
+### Iceberg REST Catalog
+
+The gateway hosts an Apache Iceberg REST Catalog API at `/iceberg/v1/*`, implemented in `crates/objectio-iceberg`. It provides namespace and table management with metadata persisted via the Meta service (Redb).
+
+- **Endpoints**: `/iceberg/v1/config`, `/iceberg/v1/namespaces`, `/iceberg/v1/namespaces/{ns}`, `/iceberg/v1/namespaces/{ns}/tables`, `/iceberg/v1/namespaces/{ns}/tables/{table}`, `/iceberg/v1/tables/rename`
+- **Access control**: IAM-style policies at namespace and table level, reusing `PolicyEvaluator`/`BucketPolicy` from `objectio-auth`. Actions use `iceberg:` prefix (e.g., `iceberg:LoadTable`), resources use `arn:obio:iceberg:::` ARNs. Namespace policies stored in properties under `__policy` key; table policies in proto `policy_json` field.
+- **Policy management**: `PUT /iceberg/v1/namespaces/{ns}/policy` and `PUT /iceberg/v1/namespaces/{ns}/tables/{table}/policy` (admin only)
+- **Metrics**: `objectio_iceberg_requests_total{operation,status}` counter and `objectio_iceberg_request_duration_seconds{operation}` histogram exported at `/metrics`
+- **Gateway flag**: `--warehouse-location` sets the S3 URL prefix for table data (default: `s3://objectio-warehouse`)
+
 ### Crate Dependency Flow
 
 ```text
-Gateway → [objectio-s3, objectio-auth, objectio-erasure, objectio-client]
+Gateway → [objectio-s3, objectio-iceberg, objectio-auth, objectio-erasure, objectio-client]
 Meta    → [objectio-meta-store, objectio-placement, objectio-proto]
 OSD     → [objectio-storage, objectio-block, objectio-erasure, objectio-proto]
 
-objectio-block  → [objectio-client, objectio-proto] (gRPC to OSDs for chunk I/O)
+objectio-iceberg → [objectio-auth, objectio-proto] (Iceberg REST Catalog with policy evaluation)
+objectio-block   → [objectio-client, objectio-proto] (gRPC to OSDs for chunk I/O)
 objectio-client → objectio-proto (gRPC stubs)
 objectio-proto  → tonic/prost (generated from proto/{storage,metadata,cluster,block}.proto)
 All crates      → objectio-common (error types, shared types, config)
@@ -144,8 +155,9 @@ All crates      → objectio-common (error types, shared types, config)
 - **objectio-placement**: CRUSH and CRUSH2 placement algorithms for shard distribution across failure domains. CRUSH2 (HRW hashing) is recommended; pre-built templates in `crush2::templates`.
 - **objectio-storage**: Raw disk I/O engine with WAL, block allocation, ARC metadata cache, SMART monitoring. Uses `O_DIRECT`/`F_NOCACHE`. Key constants: 64KB block size, 4KB alignment, 1GB WAL, 1GB minimum disk.
 - **objectio-block**: Block storage layer — VolumeManager, ChunkMapper, WriteCache, WriteJournal, QoS rate limiter. **Uses its own `BlockError`/`BlockResult` types**, not `objectio_common::Error`. Do not mix the two error types.
-- **objectio-auth**: AWS SigV4 authentication. Feature flags: `builtin` (default), `oidc`, `openfga`, `full`.
-- **objectio-s3**: Axum-based S3 API handlers (bucket ops, object ops, multipart upload). Admin API at `/_admin/*` endpoints for user/key management.
+- **objectio-auth**: AWS SigV4 authentication. Feature flags: `builtin` (default), `oidc`, `openfga`, `full`. Also provides `PolicyEvaluator`/`BucketPolicy`/`RequestContext` used by both S3 bucket policies and Iceberg namespace/table policies.
+- **objectio-s3**: Axum-based S3 API handlers (bucket ops, object ops, multipart upload). Admin API at `/_admin/*` endpoints for user/key management. Also exports `IcebergOperation` enum and Prometheus metrics for Iceberg operations.
+- **objectio-iceberg**: Iceberg REST Catalog implementation — namespace/table CRUD, access control (`access.rs`), catalog client (`catalog.rs`), Axum handlers (`handlers.rs`). Uses `objectio-auth` for policy evaluation and `objectio-proto` for metadata persistence via gRPC.
 
 ### Key Constants
 
@@ -160,7 +172,7 @@ All crates      → objectio-common (error types, shared types, config)
 
 Binaries live in `bin/`, not `src/`:
 
-- `bin/objectio-gateway` — S3 API gateway (Axum router + auth middleware)
+- `bin/objectio-gateway` — S3 API gateway + Iceberg REST Catalog (Axum router + auth middleware)
 - `bin/objectio-meta` — Metadata/Raft service
 - `bin/objectio-osd` — Storage daemon (also hosts block storage gRPC)
 - `bin/objectio-cli` — Admin CLI for user/volume/cluster management
