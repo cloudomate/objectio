@@ -10,8 +10,10 @@ use objectio_proto::block::{
     ListVolumesRequest, ResizeVolumeRequest, block_service_client::BlockServiceClient,
 };
 use objectio_proto::metadata::{
-    CreateAccessKeyRequest, CreateUserRequest, DeleteAccessKeyRequest, DeleteUserRequest,
-    ListAccessKeysRequest, ListUsersRequest, metadata_service_client::MetadataServiceClient,
+    AddUserToGroupRequest, CreateAccessKeyRequest, CreateGroupRequest, CreateUserRequest,
+    DeleteAccessKeyRequest, DeleteGroupRequest, DeleteUserRequest, GetUserGroupsRequest,
+    ListAccessKeysRequest, ListGroupsRequest, ListUsersRequest, RemoveUserFromGroupRequest,
+    metadata_service_client::MetadataServiceClient,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -63,6 +65,11 @@ enum Commands {
     Key {
         #[command(subcommand)]
         action: KeyCommands,
+    },
+    /// Group operations (IAM)
+    Group {
+        #[command(subcommand)]
+        action: GroupCommands,
     },
     /// Block volume operations
     Volume {
@@ -157,6 +164,41 @@ enum KeyCommands {
     Delete {
         /// Access key ID to delete
         access_key_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GroupCommands {
+    /// List all groups
+    List,
+    /// Create a new group
+    Create {
+        /// Group name (e.g. "data-engineers")
+        group_name: String,
+    },
+    /// Delete a group
+    Delete {
+        /// Group ID to delete
+        group_id: String,
+    },
+    /// Add a user to a group
+    AddUser {
+        /// Group ID
+        group_id: String,
+        /// User ID to add
+        user_id: String,
+    },
+    /// Remove a user from a group
+    RemoveUser {
+        /// Group ID
+        group_id: String,
+        /// User ID to remove
+        user_id: String,
+    },
+    /// List groups a user belongs to
+    UserGroups {
+        /// User ID
+        user_id: String,
     },
 }
 
@@ -504,6 +546,110 @@ async fn main() -> Result<()> {
                         .await?;
 
                     println!("Access key '{}' deleted successfully", access_key_id);
+                }
+            }
+        }
+        Commands::Group { action } => {
+            let mut client = MetadataServiceClient::connect(args.endpoint.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to metadata service: {}", e))?;
+
+            match action {
+                GroupCommands::List => {
+                    let response = client
+                        .list_groups(ListGroupsRequest {
+                            max_results: 1000,
+                            marker: String::new(),
+                        })
+                        .await?;
+
+                    let resp = response.into_inner();
+                    println!("Groups");
+                    println!("======");
+                    if resp.groups.is_empty() {
+                        println!("No groups found");
+                    } else {
+                        println!(
+                            "{:<40} {:<25} {:<50} {:<8}",
+                            "GROUP ID", "NAME", "ARN", "MEMBERS"
+                        );
+                        println!("{}", "-".repeat(123));
+                        for group in resp.groups {
+                            println!(
+                                "{:<40} {:<25} {:<50} {:<8}",
+                                group.group_id,
+                                group.group_name,
+                                group.arn,
+                                group.member_user_ids.len(),
+                            );
+                        }
+                    }
+                }
+                GroupCommands::Create { group_name } => {
+                    let response = client
+                        .create_group(CreateGroupRequest {
+                            group_name: group_name.clone(),
+                        })
+                        .await?;
+
+                    let group = response.into_inner().group.unwrap();
+                    println!("Group created successfully!");
+                    println!();
+                    println!("Group ID: {}", group.group_id);
+                    println!("Name:     {}", group.group_name);
+                    println!("ARN:      {}", group.arn);
+                }
+                GroupCommands::Delete { group_id } => {
+                    client
+                        .delete_group(DeleteGroupRequest {
+                            group_id: group_id.clone(),
+                        })
+                        .await?;
+
+                    println!("Group '{}' deleted successfully", group_id);
+                }
+                GroupCommands::AddUser { group_id, user_id } => {
+                    client
+                        .add_user_to_group(AddUserToGroupRequest {
+                            group_id: group_id.clone(),
+                            user_id: user_id.clone(),
+                        })
+                        .await?;
+
+                    println!("User '{}' added to group '{}'", user_id, group_id);
+                }
+                GroupCommands::RemoveUser { group_id, user_id } => {
+                    client
+                        .remove_user_from_group(RemoveUserFromGroupRequest {
+                            group_id: group_id.clone(),
+                            user_id: user_id.clone(),
+                        })
+                        .await?;
+
+                    println!("User '{}' removed from group '{}'", user_id, group_id);
+                }
+                GroupCommands::UserGroups { user_id } => {
+                    let response = client
+                        .get_user_groups(GetUserGroupsRequest {
+                            user_id: user_id.clone(),
+                        })
+                        .await?;
+
+                    let resp = response.into_inner();
+                    println!("Groups for user: {}", user_id);
+                    println!("================");
+                    if resp.groups.is_empty() {
+                        println!("User is not a member of any groups");
+                    } else {
+                        println!("{:<40} {:<25} {:<50}", "GROUP ID", "NAME", "ARN");
+                        println!("{}", "-".repeat(115));
+                        for group in resp.groups {
+                            println!(
+                                "{:<40} {:<25} {:<50}",
+                                group.group_id, group.group_name, group.arn,
+                            );
+                        }
+                    }
                 }
             }
         }

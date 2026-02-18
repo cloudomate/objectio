@@ -2,7 +2,8 @@
 
 use objectio_common::{NodeId, NodeStatus};
 use objectio_meta_store::{
-    EcConfig, MetaStore, MultipartUploadState, OsdNode, PartState, StoredAccessKey, StoredUser,
+    EcConfig, MetaStore, MultipartUploadState, OsdNode, PartState, StoredAccessKey,
+    StoredDataFilter, StoredGroup, StoredUser,
 };
 use objectio_placement::{
     Crush2, PlacementTemplate, ShardRole,
@@ -13,6 +14,8 @@ use objectio_proto::metadata::{
     AbortMultipartUploadResponse,
     // IAM types
     AccessKeyMeta,
+    AddUserToGroupRequest,
+    AddUserToGroupResponse,
     BucketMeta,
     CompleteMultipartUploadRequest,
     CompleteMultipartUploadResponse,
@@ -20,6 +23,10 @@ use objectio_proto::metadata::{
     CreateAccessKeyResponse,
     CreateBucketRequest,
     CreateBucketResponse,
+    CreateDataFilterRequest,
+    CreateDataFilterResponse,
+    CreateGroupRequest,
+    CreateGroupResponse,
     CreateMultipartUploadRequest,
     CreateMultipartUploadResponse,
     CreateObjectRequest,
@@ -28,6 +35,10 @@ use objectio_proto::metadata::{
     CreateUserResponse,
     DeleteAccessKeyRequest,
     DeleteAccessKeyResponse,
+    DeleteGroupRequest,
+    DeleteGroupResponse,
+    DeleteDataFilterRequest,
+    DeleteDataFilterResponse,
     DeleteBucketPolicyRequest,
     DeleteBucketPolicyResponse,
     DeleteBucketRequest,
@@ -37,6 +48,10 @@ use objectio_proto::metadata::{
     DeleteUserRequest,
     DeleteUserResponse,
     ErasureType,
+    GetUserGroupsRequest,
+    GetUserGroupsResponse,
+    GroupMeta,
+    GetDataFiltersForPrincipalRequest,
     GetAccessKeyForAuthRequest,
     GetAccessKeyForAuthResponse,
     GetBucketPolicyRequest,
@@ -51,6 +66,7 @@ use objectio_proto::metadata::{
     GetPlacementResponse,
     GetUserRequest,
     GetUserResponse,
+    IcebergDataFilter,
     // Iceberg types
     IcebergCommitTableRequest,
     IcebergCommitTableResponse,
@@ -90,6 +106,10 @@ use objectio_proto::metadata::{
     ListAccessKeysResponse,
     ListBucketsRequest,
     ListBucketsResponse,
+    ListDataFiltersRequest,
+    ListDataFiltersResponse,
+    ListGroupsRequest,
+    ListGroupsResponse,
     ListMultipartUploadsRequest,
     ListMultipartUploadsResponse,
     ListObjectsRequest,
@@ -107,6 +127,8 @@ use objectio_proto::metadata::{
     RegisterOsdResponse,
     RegisterPartRequest,
     RegisterPartResponse,
+    RemoveUserFromGroupRequest,
+    RemoveUserFromGroupResponse,
     SetBucketPolicyRequest,
     SetBucketPolicyResponse,
     ShardType,
@@ -152,6 +174,10 @@ pub struct MetaService {
     access_keys: RwLock<HashMap<String, StoredAccessKey>>,
     /// IAM: Map from user_id to their access_key_ids
     user_keys: RwLock<HashMap<String, Vec<String>>>,
+    /// IAM: Groups indexed by group_id
+    groups: RwLock<HashMap<String, StoredGroup>>,
+    /// Iceberg: data filters indexed by filter_id
+    data_filters: RwLock<HashMap<String, StoredDataFilter>>,
     /// Iceberg: namespace key -> properties (prost-encoded bytes in store, HashMap in memory)
     iceberg_namespaces: RwLock<HashMap<String, HashMap<String, String>>>,
     /// Iceberg: table key ("ns\0table") -> IcebergTableEntry
@@ -219,6 +245,8 @@ impl MetaService {
             users: RwLock::new(HashMap::new()),
             access_keys: RwLock::new(HashMap::new()),
             user_keys: RwLock::new(HashMap::new()),
+            groups: RwLock::new(HashMap::new()),
+            data_filters: RwLock::new(HashMap::new()),
             iceberg_namespaces: RwLock::new(HashMap::new()),
             iceberg_tables: RwLock::new(HashMap::new()),
             store: None,
@@ -341,6 +369,30 @@ impl MetaService {
                 info!("Loaded {} access keys from store", key_map.len());
             }
             Err(e) => error!("Failed to load access keys: {}", e),
+        }
+
+        // Groups
+        match store.load_groups() {
+            Ok(groups) => {
+                let mut group_map = self.groups.write();
+                for (id, group) in groups {
+                    group_map.insert(id, group);
+                }
+                info!("Loaded {} groups from store", group_map.len());
+            }
+            Err(e) => error!("Failed to load groups: {}", e),
+        }
+
+        // Data filters
+        match store.load_data_filters() {
+            Ok(filters) => {
+                let mut filter_map = self.data_filters.write();
+                for (id, filter) in filters {
+                    filter_map.insert(id, filter);
+                }
+                info!("Loaded {} data filters from store", filter_map.len());
+            }
+            Err(e) => error!("Failed to load data filters: {}", e),
         }
 
         // Iceberg namespaces
@@ -2462,5 +2514,360 @@ impl MetadataService for MetaService {
         Ok(Response::new(IcebergGetTablePolicyResponse {
             policy_json: entry.policy_json,
         }))
+    }
+
+    // ---- Group management ----
+
+    async fn create_group(
+        &self,
+        request: Request<CreateGroupRequest>,
+    ) -> Result<Response<CreateGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        if req.group_name.is_empty() {
+            return Err(Status::invalid_argument("group_name is required"));
+        }
+
+        // Check uniqueness
+        if self
+            .groups
+            .read()
+            .values()
+            .any(|g| g.group_name == req.group_name)
+        {
+            return Err(Status::already_exists(
+                "group with this name already exists",
+            ));
+        }
+
+        let group_id = Uuid::new_v4().to_string();
+        let now = Self::current_timestamp();
+
+        let group = StoredGroup {
+            group_id: group_id.clone(),
+            group_name: req.group_name.clone(),
+            arn: format!("arn:obio:iam::objectio:group/{}", req.group_name),
+            member_user_ids: Vec::new(),
+            created_at: now,
+        };
+
+        self.groups.write().insert(group_id.clone(), group.clone());
+
+        if let Some(store) = &self.store {
+            store.put_group(&group_id, &group);
+        }
+
+        info!("Created group: {}", req.group_name);
+
+        Ok(Response::new(CreateGroupResponse {
+            group: Some(GroupMeta {
+                group_id: group.group_id,
+                group_name: group.group_name,
+                arn: group.arn,
+                member_user_ids: group.member_user_ids,
+                created_at: group.created_at,
+            }),
+        }))
+    }
+
+    async fn delete_group(
+        &self,
+        request: Request<DeleteGroupRequest>,
+    ) -> Result<Response<DeleteGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        let removed = self.groups.write().remove(&req.group_id);
+        if removed.is_none() {
+            return Err(Status::not_found("group not found"));
+        }
+
+        if let Some(store) = &self.store {
+            store.delete_group(&req.group_id);
+        }
+
+        info!("Deleted group: {}", req.group_id);
+
+        Ok(Response::new(DeleteGroupResponse { success: true }))
+    }
+
+    async fn list_groups(
+        &self,
+        request: Request<ListGroupsRequest>,
+    ) -> Result<Response<ListGroupsResponse>, Status> {
+        let req = request.into_inner();
+        let max_results = if req.max_results == 0 {
+            100
+        } else {
+            req.max_results.min(1000)
+        };
+
+        let groups: Vec<GroupMeta> = self
+            .groups
+            .read()
+            .values()
+            .filter(|g| req.marker.is_empty() || g.group_id > req.marker)
+            .take(max_results as usize + 1)
+            .map(|g| GroupMeta {
+                group_id: g.group_id.clone(),
+                group_name: g.group_name.clone(),
+                arn: g.arn.clone(),
+                member_user_ids: g.member_user_ids.clone(),
+                created_at: g.created_at,
+            })
+            .collect();
+
+        let is_truncated = groups.len() > max_results as usize;
+        let groups: Vec<GroupMeta> = groups.into_iter().take(max_results as usize).collect();
+        let next_marker = groups
+            .last()
+            .map(|g| g.group_id.clone())
+            .unwrap_or_default();
+
+        Ok(Response::new(ListGroupsResponse {
+            groups,
+            next_marker: if is_truncated {
+                next_marker
+            } else {
+                String::new()
+            },
+            is_truncated,
+        }))
+    }
+
+    async fn add_user_to_group(
+        &self,
+        request: Request<AddUserToGroupRequest>,
+    ) -> Result<Response<AddUserToGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate user exists
+        if !self.users.read().contains_key(&req.user_id) {
+            return Err(Status::not_found("user not found"));
+        }
+
+        let mut groups = self.groups.write();
+        let group = groups
+            .get_mut(&req.group_id)
+            .ok_or_else(|| Status::not_found("group not found"))?;
+
+        if group.member_user_ids.contains(&req.user_id) {
+            return Err(Status::already_exists("user already in group"));
+        }
+
+        group.member_user_ids.push(req.user_id.clone());
+        let group_snapshot = group.clone();
+
+        if let Some(store) = &self.store {
+            store.put_group(&req.group_id, &group_snapshot);
+        }
+
+        info!(
+            "Added user {} to group {}",
+            req.user_id, req.group_id
+        );
+
+        Ok(Response::new(AddUserToGroupResponse { success: true }))
+    }
+
+    async fn remove_user_from_group(
+        &self,
+        request: Request<RemoveUserFromGroupRequest>,
+    ) -> Result<Response<RemoveUserFromGroupResponse>, Status> {
+        let req = request.into_inner();
+
+        let mut groups = self.groups.write();
+        let group = groups
+            .get_mut(&req.group_id)
+            .ok_or_else(|| Status::not_found("group not found"))?;
+
+        let before_len = group.member_user_ids.len();
+        group.member_user_ids.retain(|id| id != &req.user_id);
+
+        if group.member_user_ids.len() == before_len {
+            return Err(Status::not_found("user not in group"));
+        }
+
+        let group_snapshot = group.clone();
+
+        if let Some(store) = &self.store {
+            store.put_group(&req.group_id, &group_snapshot);
+        }
+
+        info!(
+            "Removed user {} from group {}",
+            req.user_id, req.group_id
+        );
+
+        Ok(Response::new(RemoveUserFromGroupResponse {
+            success: true,
+        }))
+    }
+
+    async fn get_user_groups(
+        &self,
+        request: Request<GetUserGroupsRequest>,
+    ) -> Result<Response<GetUserGroupsResponse>, Status> {
+        let req = request.into_inner();
+
+        // Validate user exists
+        if !self.users.read().contains_key(&req.user_id) {
+            return Err(Status::not_found("user not found"));
+        }
+
+        let groups: Vec<GroupMeta> = self
+            .groups
+            .read()
+            .values()
+            .filter(|g| g.member_user_ids.contains(&req.user_id))
+            .map(|g| GroupMeta {
+                group_id: g.group_id.clone(),
+                group_name: g.group_name.clone(),
+                arn: g.arn.clone(),
+                member_user_ids: g.member_user_ids.clone(),
+                created_at: g.created_at,
+            })
+            .collect();
+
+        Ok(Response::new(GetUserGroupsResponse { groups }))
+    }
+
+    // ---- Data filter RPCs ----
+
+    async fn create_data_filter(
+        &self,
+        request: Request<CreateDataFilterRequest>,
+    ) -> Result<Response<CreateDataFilterResponse>, Status> {
+        let req = request.into_inner();
+        let filter_id = Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let filter = StoredDataFilter {
+            filter_id: filter_id.clone(),
+            filter_name: req.filter_name.clone(),
+            namespace_levels: req.namespace_levels.clone(),
+            table_name: req.table_name.clone(),
+            principal_arns: req.principal_arns.clone(),
+            allowed_columns: req.allowed_columns.clone(),
+            excluded_columns: req.excluded_columns.clone(),
+            row_filter_expression: req.row_filter_expression.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        if let Some(store) = &self.store {
+            store.put_data_filter(&filter_id, &filter);
+        }
+        self.data_filters.write().insert(filter_id, filter.clone());
+
+        info!(
+            filter_id = %filter.filter_id,
+            filter_name = %filter.filter_name,
+            table = %filter.table_name,
+            "data_filter.created"
+        );
+
+        Ok(Response::new(CreateDataFilterResponse {
+            filter: Some(IcebergDataFilter {
+                filter_id: filter.filter_id,
+                filter_name: filter.filter_name,
+                namespace_levels: filter.namespace_levels,
+                table_name: filter.table_name,
+                principal_arns: filter.principal_arns,
+                allowed_columns: filter.allowed_columns,
+                excluded_columns: filter.excluded_columns,
+                row_filter_expression: filter.row_filter_expression,
+                created_at: filter.created_at,
+                updated_at: filter.updated_at,
+            }),
+        }))
+    }
+
+    async fn list_data_filters(
+        &self,
+        request: Request<ListDataFiltersRequest>,
+    ) -> Result<Response<ListDataFiltersResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = req.namespace_levels.join("\x00");
+
+        let filters: Vec<IcebergDataFilter> = self
+            .data_filters
+            .read()
+            .values()
+            .filter(|f| {
+                f.namespace_levels.join("\x00") == ns_key && f.table_name == req.table_name
+            })
+            .map(|f| IcebergDataFilter {
+                filter_id: f.filter_id.clone(),
+                filter_name: f.filter_name.clone(),
+                namespace_levels: f.namespace_levels.clone(),
+                table_name: f.table_name.clone(),
+                principal_arns: f.principal_arns.clone(),
+                allowed_columns: f.allowed_columns.clone(),
+                excluded_columns: f.excluded_columns.clone(),
+                row_filter_expression: f.row_filter_expression.clone(),
+                created_at: f.created_at,
+                updated_at: f.updated_at,
+            })
+            .collect();
+
+        Ok(Response::new(ListDataFiltersResponse { filters }))
+    }
+
+    async fn delete_data_filter(
+        &self,
+        request: Request<DeleteDataFilterRequest>,
+    ) -> Result<Response<DeleteDataFilterResponse>, Status> {
+        let req = request.into_inner();
+
+        let removed = self.data_filters.write().remove(&req.filter_id).is_some();
+        if removed
+            && let Some(store) = &self.store
+        {
+            store.delete_data_filter(&req.filter_id);
+        }
+
+        Ok(Response::new(DeleteDataFilterResponse { success: removed }))
+    }
+
+    async fn get_data_filters_for_principal(
+        &self,
+        request: Request<GetDataFiltersForPrincipalRequest>,
+    ) -> Result<Response<ListDataFiltersResponse>, Status> {
+        let req = request.into_inner();
+        let ns_key = req.namespace_levels.join("\x00");
+
+        let all_arns: Vec<&str> = std::iter::once(req.principal_arn.as_str())
+            .chain(req.group_arns.iter().map(String::as_str))
+            .collect();
+
+        let filters: Vec<IcebergDataFilter> = self
+            .data_filters
+            .read()
+            .values()
+            .filter(|f| {
+                f.namespace_levels.join("\x00") == ns_key
+                    && f.table_name == req.table_name
+                    && f.principal_arns.iter().any(|p| {
+                        p == "*" || all_arns.iter().any(|a| a == p)
+                    })
+            })
+            .map(|f| IcebergDataFilter {
+                filter_id: f.filter_id.clone(),
+                filter_name: f.filter_name.clone(),
+                namespace_levels: f.namespace_levels.clone(),
+                table_name: f.table_name.clone(),
+                principal_arns: f.principal_arns.clone(),
+                allowed_columns: f.allowed_columns.clone(),
+                excluded_columns: f.excluded_columns.clone(),
+                row_filter_expression: f.row_filter_expression.clone(),
+                created_at: f.created_at,
+                updated_at: f.updated_at,
+            })
+            .collect();
+
+        Ok(Response::new(ListDataFiltersResponse { filters }))
     }
 }

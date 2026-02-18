@@ -142,6 +142,33 @@ pub struct StoredAccessKey {
     pub created_at: u64,
 }
 
+/// Internal group storage
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredGroup {
+    pub group_id: String,
+    pub group_name: String,
+    pub arn: String,
+    pub member_user_ids: Vec<String>,
+    pub created_at: u64,
+}
+
+// ---- Iceberg data filter types ----
+
+/// Stored data filter for column/row-level security
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredDataFilter {
+    pub filter_id: String,
+    pub filter_name: String,
+    pub namespace_levels: Vec<String>,
+    pub table_name: String,
+    pub principal_arns: Vec<String>,
+    pub allowed_columns: Vec<String>,
+    pub excluded_columns: Vec<String>,
+    pub row_filter_expression: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
 // ---- Block storage types ----
 
 /// Stored volume metadata

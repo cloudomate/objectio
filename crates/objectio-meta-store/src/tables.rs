@@ -15,6 +15,8 @@ pub const CLUSTER_TOPOLOGY: TableDefinition<&str, &[u8]> = TableDefinition::new(
 // IAM
 pub const USERS: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
 pub const ACCESS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("access_keys");
+pub const GROUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("groups");
+pub const GROUP_MEMBERS: TableDefinition<&str, &[u8]> = TableDefinition::new("group_members");
 
 // Block storage
 pub const VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("volumes");
@@ -27,3 +29,5 @@ pub const ICEBERG_NAMESPACES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("iceberg_namespaces");
 // Key: "ns1\x00ns2\x00table_name", Value: prost-encoded IcebergTableEntry
 pub const ICEBERG_TABLES: TableDefinition<&str, &[u8]> = TableDefinition::new("iceberg_tables");
+// Key: filter_id, Value: bincode-encoded StoredDataFilter
+pub const DATA_FILTERS: TableDefinition<&str, &[u8]> = TableDefinition::new("data_filters");

@@ -184,6 +184,13 @@ struct GatewayMetrics {
     scatter_gather_latency_us: AtomicU64,
 }
 
+/// Iceberg policy decision tracking key
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PolicyDecisionKey {
+    action: String,
+    decision: String,
+}
+
 /// S3 metrics collector
 #[derive(Debug)]
 pub struct S3Metrics {
@@ -191,6 +198,8 @@ pub struct S3Metrics {
     operations: RwLock<HashMap<S3Operation, OperationMetrics>>,
     /// Per-Iceberg-operation metrics
     iceberg_operations: RwLock<HashMap<IcebergOperation, OperationMetrics>>,
+    /// Iceberg policy decision counters
+    iceberg_policy_decisions: RwLock<HashMap<PolicyDecisionKey, AtomicU64>>,
     /// Gateway metrics
     gateway: GatewayMetrics,
     /// Start time for uptime calculation
@@ -205,6 +214,7 @@ impl S3Metrics {
         Self {
             operations: RwLock::new(HashMap::new()),
             iceberg_operations: RwLock::new(HashMap::new()),
+            iceberg_policy_decisions: RwLock::new(HashMap::new()),
             gateway: GatewayMetrics::default(),
             start_time: Instant::now(),
             protection: RwLock::new(None),
@@ -233,6 +243,19 @@ impl S3Metrics {
     /// Record a simple operation (no body sizes)
     pub fn record_simple(&self, op: S3Operation, status_code: u16, latency_us: u64) {
         self.record_operation(op, status_code, 0, 0, latency_us);
+    }
+
+    /// Record an Iceberg policy decision
+    pub fn record_iceberg_policy_decision(&self, action: &str, decision: &str) {
+        let key = PolicyDecisionKey {
+            action: action.to_string(),
+            decision: decision.to_string(),
+        };
+        let mut decisions = self.iceberg_policy_decisions.write().unwrap();
+        decisions
+            .entry(key)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record an Iceberg operation
@@ -679,6 +702,31 @@ impl S3Metrics {
                     output,
                     "objectio_iceberg_request_duration_seconds_count{{operation=\"{}\"}} {}",
                     op_name, total
+                )
+                .unwrap();
+            }
+        }
+
+        // Iceberg policy decision metrics
+        let policy_decisions = self.iceberg_policy_decisions.read().unwrap();
+        if !policy_decisions.is_empty() {
+            writeln!(
+                output,
+                "# HELP objectio_iceberg_policy_decisions_total Total Iceberg policy decisions by action and decision"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "# TYPE objectio_iceberg_policy_decisions_total counter"
+            )
+            .unwrap();
+            for (key, count) in policy_decisions.iter() {
+                writeln!(
+                    output,
+                    "objectio_iceberg_policy_decisions_total{{action=\"{}\",decision=\"{}\"}} {}",
+                    key.action,
+                    key.decision,
+                    count.load(Ordering::Relaxed)
                 )
                 .unwrap();
             }

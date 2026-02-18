@@ -250,9 +250,141 @@ pub struct PurgeParams {
     pub purge_requested: bool,
 }
 
+// ---- Simulate Policy ----
+
+#[derive(Debug, Deserialize)]
+pub struct SimulatePolicyRequest {
+    pub user_arn: String,
+    pub action: String,
+    pub resource: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimulatePolicyResponse {
+    pub decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_statement: Option<SimulateMatchedStatement>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimulateMatchedStatement {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
+    pub effect: String,
+    pub source: String,
+}
+
+// ---- Effective Policy ----
+
+#[derive(Debug, Deserialize)]
+pub struct EffectivePolicyParams {
+    pub user: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EffectivePolicyResponse {
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_policy: Option<serde_json::Value>,
+    pub namespace_policies: Vec<EffectivePolicyEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EffectivePolicyEntry {
+    pub namespace: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<serde_json::Value>,
+}
+
+// ---- Data Filters ----
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDataFilterRequest {
+    pub filter_name: String,
+    pub principal_arns: Vec<String>,
+    #[serde(default)]
+    pub allowed_columns: Vec<String>,
+    #[serde(default)]
+    pub excluded_columns: Vec<String>,
+    #[serde(default)]
+    pub row_filter_expression: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DataFilterResponse {
+    pub filter_id: String,
+    pub filter_name: String,
+    pub namespace: Vec<String>,
+    pub table_name: String,
+    pub principal_arns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allowed_columns: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub excluded_columns: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub row_filter_expression: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListDataFiltersResponse {
+    pub filters: Vec<DataFilterResponse>,
+}
+
+// ---- Tags ----
+
+#[derive(Debug, Deserialize)]
+pub struct SetTagsRequest {
+    pub tags: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetTagsResponse {
+    pub tags: HashMap<String, String>,
+}
+
+// ---- Quotas ----
+
+#[derive(Debug, Deserialize)]
+pub struct SetQuotaRequest {
+    pub max_tables: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetQuotaResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<u32>,
+    pub current_tables: u32,
+}
+
+// ---- Encryption Policy ----
+
+#[derive(Debug, Deserialize)]
+pub struct SetEncryptionPolicyRequest {
+    /// Required location prefix for table data (e.g., `s3://encrypted-bucket/`).
+    pub required_location_prefix: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetEncryptionPolicyResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_location_prefix: Option<String>,
+}
+
 // ---- Policy ----
 
 #[derive(Debug, Deserialize)]
 pub struct SetPolicyRequest {
     pub policy: String,
+}
+
+// ---- Role Binding ----
+
+#[derive(Debug, Deserialize)]
+pub struct SetRoleBindingRequest {
+    /// Role name: `CatalogAdmin`, `NamespaceOwner`, `TableWriter`, `TableReader`
+    pub role: String,
+    /// Principal ARNs (users or groups)
+    pub principals: Vec<String>,
 }

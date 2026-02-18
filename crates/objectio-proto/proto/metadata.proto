@@ -66,6 +66,20 @@ service MetadataService {
     // Iceberg table policy
     rpc IcebergSetTablePolicy(IcebergSetTablePolicyRequest) returns (IcebergSetTablePolicyResponse);
     rpc IcebergGetTablePolicy(IcebergGetTablePolicyRequest) returns (IcebergGetTablePolicyResponse);
+
+    // Group management
+    rpc CreateGroup(CreateGroupRequest) returns (CreateGroupResponse);
+    rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse);
+    rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+    rpc AddUserToGroup(AddUserToGroupRequest) returns (AddUserToGroupResponse);
+    rpc RemoveUserFromGroup(RemoveUserFromGroupRequest) returns (RemoveUserFromGroupResponse);
+    rpc GetUserGroups(GetUserGroupsRequest) returns (GetUserGroupsResponse);
+
+    // Data filter management (column/row security)
+    rpc CreateDataFilter(CreateDataFilterRequest) returns (CreateDataFilterResponse);
+    rpc ListDataFilters(ListDataFiltersRequest) returns (ListDataFiltersResponse);
+    rpc DeleteDataFilter(DeleteDataFilterRequest) returns (DeleteDataFilterResponse);
+    rpc GetDataFiltersForPrincipal(GetDataFiltersForPrincipalRequest) returns (ListDataFiltersResponse);
 }
 
 // Bucket metadata
@@ -747,4 +761,120 @@ message IcebergGetTablePolicyRequest {
 
 message IcebergGetTablePolicyResponse {
     bytes policy_json = 1;
+}
+
+// ============ Group Messages ============
+
+message GroupMeta {
+    string group_id = 1;
+    string group_name = 2;
+    string arn = 3;
+    repeated string member_user_ids = 4;
+    uint64 created_at = 5;
+}
+
+message CreateGroupRequest {
+    string group_name = 1;
+}
+
+message CreateGroupResponse {
+    GroupMeta group = 1;
+}
+
+message DeleteGroupRequest {
+    string group_id = 1;
+}
+
+message DeleteGroupResponse {
+    bool success = 1;
+}
+
+message ListGroupsRequest {
+    uint32 max_results = 1;
+    string marker = 2;
+}
+
+message ListGroupsResponse {
+    repeated GroupMeta groups = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+message AddUserToGroupRequest {
+    string group_id = 1;
+    string user_id = 2;
+}
+
+message AddUserToGroupResponse {
+    bool success = 1;
+}
+
+message RemoveUserFromGroupRequest {
+    string group_id = 1;
+    string user_id = 2;
+}
+
+message RemoveUserFromGroupResponse {
+    bool success = 1;
+}
+
+message GetUserGroupsRequest {
+    string user_id = 1;
+}
+
+message GetUserGroupsResponse {
+    repeated GroupMeta groups = 1;
+}
+
+// ============ Iceberg Data Filter Messages ============
+
+message IcebergDataFilter {
+    string filter_id = 1;
+    string filter_name = 2;
+    repeated string namespace_levels = 3;
+    string table_name = 4;
+    repeated string principal_arns = 5;
+    repeated string allowed_columns = 6;
+    repeated string excluded_columns = 7;
+    string row_filter_expression = 8;
+    uint64 created_at = 9;
+    uint64 updated_at = 10;
+}
+
+message CreateDataFilterRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string filter_name = 3;
+    repeated string principal_arns = 4;
+    repeated string allowed_columns = 5;
+    repeated string excluded_columns = 6;
+    string row_filter_expression = 7;
+}
+
+message CreateDataFilterResponse {
+    IcebergDataFilter filter = 1;
+}
+
+message ListDataFiltersRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message ListDataFiltersResponse {
+    repeated IcebergDataFilter filters = 1;
+}
+
+message DeleteDataFilterRequest {
+    string filter_id = 1;
+}
+
+message DeleteDataFilterResponse {
+    bool success = 1;
+}
+
+message GetDataFiltersForPrincipalRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string principal_arn = 3;
+    repeated string group_arns = 4;
 }

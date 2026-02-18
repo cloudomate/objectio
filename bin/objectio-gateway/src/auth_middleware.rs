@@ -279,6 +279,7 @@ fn verify_request_v4<B>(
         user_id: cred.user_id.clone(),
         user_arn: cred.user_arn.clone(),
         access_key_id: cred.access_key_id.clone(),
+        group_arns: Vec::new(),
     })
 }
 
@@ -348,6 +349,7 @@ fn verify_request_v2<B>(
         user_id: cred.user_id.clone(),
         user_arn: cred.user_arn.clone(),
         access_key_id: cred.access_key_id.clone(),
+        group_arns: Vec::new(),
     })
 }
 

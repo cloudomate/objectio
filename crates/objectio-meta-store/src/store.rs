@@ -6,8 +6,8 @@
 
 use crate::tables;
 use crate::types::{
-    MultipartUploadState, OsdNode, StoredAccessKey, StoredChunkRef, StoredSnapshot, StoredUser,
-    StoredVolume,
+    MultipartUploadState, OsdNode, StoredAccessKey, StoredChunkRef, StoredDataFilter,
+    StoredGroup, StoredSnapshot, StoredUser, StoredVolume,
 };
 use objectio_proto::metadata::BucketMeta;
 use prost::Message;
@@ -73,6 +73,9 @@ impl MetaStore {
             let _t = write_txn.open_table(tables::VOLUME_CHUNKS)?;
             let _t = write_txn.open_table(tables::ICEBERG_NAMESPACES)?;
             let _t = write_txn.open_table(tables::ICEBERG_TABLES)?;
+            let _t = write_txn.open_table(tables::GROUPS)?;
+            let _t = write_txn.open_table(tables::GROUP_MEMBERS)?;
+            let _t = write_txn.open_table(tables::DATA_FILTERS)?;
         }
         write_txn.commit()?;
 
@@ -254,6 +257,24 @@ impl MetaStore {
 
     pub fn load_access_keys(&self) -> MetaStoreResult<Vec<(String, StoredAccessKey)>> {
         self.load_bincode_table(tables::ACCESS_KEYS)
+    }
+
+    // ---- Groups (bincode) ----
+
+    pub fn put_group(&self, group_id: &str, group: &StoredGroup) {
+        if let Err(e) = self.put_bincode(tables::GROUPS, group_id, group) {
+            error!("Failed to persist group '{}': {}", group_id, e);
+        }
+    }
+
+    pub fn delete_group(&self, group_id: &str) {
+        if let Err(e) = self.delete_key(tables::GROUPS, group_id) {
+            error!("Failed to delete group '{}': {}", group_id, e);
+        }
+    }
+
+    pub fn load_groups(&self) -> MetaStoreResult<Vec<(String, StoredGroup)>> {
+        self.load_bincode_table(tables::GROUPS)
     }
 
     // ---- Ensure admin (batch user + key write) ----
@@ -465,6 +486,24 @@ impl MetaStore {
             write_txn.commit()?;
         }
         Ok(swapped)
+    }
+
+    // ---- Data Filters (bincode) ----
+
+    pub fn put_data_filter(&self, filter_id: &str, filter: &StoredDataFilter) {
+        if let Err(e) = self.put_bincode(tables::DATA_FILTERS, filter_id, filter) {
+            error!("Failed to persist data filter '{}': {}", filter_id, e);
+        }
+    }
+
+    pub fn delete_data_filter(&self, filter_id: &str) {
+        if let Err(e) = self.delete_key(tables::DATA_FILTERS, filter_id) {
+            error!("Failed to delete data filter '{}': {}", filter_id, e);
+        }
+    }
+
+    pub fn load_data_filters(&self) -> MetaStoreResult<Vec<(String, StoredDataFilter)>> {
+        self.load_bincode_table(tables::DATA_FILTERS)
     }
 
     // ---- Generic helpers ----

@@ -8,5 +8,5 @@ pub mod types;
 pub use store::{MetaStore, MetaStoreError, MetaStoreResult};
 pub use types::{
     EcConfig, MultipartUploadState, OsdNode, PartState, StoredAccessKey, StoredAttachment,
-    StoredChunkRef, StoredSnapshot, StoredUser, StoredVolume,
+    StoredChunkRef, StoredDataFilter, StoredGroup, StoredSnapshot, StoredUser, StoredVolume,
 };

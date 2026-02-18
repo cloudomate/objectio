@@ -406,6 +406,12 @@ pub struct Conditions {
     /// Not IP address conditions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub not_ip_address: Option<HashMap<String, StringOrList>>,
+    /// Date greater than conditions (ISO 8601)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_greater_than: Option<HashMap<String, StringOrList>>,
+    /// Date less than conditions (ISO 8601)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_less_than: Option<HashMap<String, StringOrList>>,
 }
 
 /// String or list of strings (for conditions)
@@ -436,6 +442,26 @@ pub enum PolicyDecision {
     ImplicitDeny,
 }
 
+/// Detailed policy evaluation result with explanation.
+#[derive(Debug, Clone)]
+pub struct PolicyExplanation {
+    /// The decision: Allow, Deny, or ImplicitDeny
+    pub decision: PolicyDecision,
+    /// The statement that caused the decision (None for ImplicitDeny)
+    pub matched_statement: Option<MatchedStatement>,
+}
+
+/// Information about the statement that matched.
+#[derive(Debug, Clone)]
+pub struct MatchedStatement {
+    /// Statement ID (if present in the policy)
+    pub sid: Option<String>,
+    /// Effect of the matched statement
+    pub effect: Effect,
+    /// The policy source (e.g., "catalog", "namespace:prod", "table:events")
+    pub source: String,
+}
+
 /// Context for policy evaluation
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -447,8 +473,10 @@ pub struct RequestContext {
     pub resource: String,
     /// Source IP address
     pub source_ip: Option<IpAddr>,
-    /// Additional context variables
+    /// Additional context variables (single-valued)
     pub variables: HashMap<String, String>,
+    /// Multi-valued context variables (e.g., `obio:PrincipalGroup`)
+    pub multi_variables: HashMap<String, Vec<String>>,
 }
 
 impl RequestContext {
@@ -464,6 +492,7 @@ impl RequestContext {
             resource: resource.into(),
             source_ip: None,
             variables: HashMap::new(),
+            multi_variables: HashMap::new(),
         }
     }
 
@@ -476,6 +505,12 @@ impl RequestContext {
     /// Add a context variable
     pub fn with_variable(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.variables.insert(key.into(), value.into());
+        self
+    }
+
+    /// Add a multi-valued context variable (e.g., `obio:PrincipalGroup`)
+    pub fn with_multi_variable(mut self, key: impl Into<String>, values: Vec<String>) -> Self {
+        self.multi_variables.insert(key.into(), values);
         self
     }
 }
@@ -532,6 +567,72 @@ impl PolicyEvaluator {
         }
     }
 
+    /// Evaluate a policy against a request context with detailed explanation.
+    ///
+    /// Returns the decision and the statement that caused it.
+    pub fn evaluate_with_explanation(
+        &self,
+        policy: &BucketPolicy,
+        context: &RequestContext,
+        source: &str,
+    ) -> PolicyExplanation {
+        let mut deny_stmt: Option<&PolicyStatement> = None;
+        let mut allow_stmt: Option<&PolicyStatement> = None;
+
+        for statement in &policy.statements {
+            if !self.matches_principal(&statement.principal, &context.user_arn) {
+                continue;
+            }
+            if !self.matches_action(&statement.action, &context.action) {
+                continue;
+            }
+            if !self.matches_resource(&statement.resource, &context.resource) {
+                continue;
+            }
+            if !self.matches_conditions(&statement.condition, context) {
+                continue;
+            }
+
+            match statement.effect {
+                Effect::Deny => {
+                    if deny_stmt.is_none() {
+                        deny_stmt = Some(statement);
+                    }
+                }
+                Effect::Allow => {
+                    if allow_stmt.is_none() {
+                        allow_stmt = Some(statement);
+                    }
+                }
+            }
+        }
+
+        if let Some(stmt) = deny_stmt {
+            PolicyExplanation {
+                decision: PolicyDecision::Deny,
+                matched_statement: Some(MatchedStatement {
+                    sid: stmt.sid.clone(),
+                    effect: Effect::Deny,
+                    source: source.to_string(),
+                }),
+            }
+        } else if let Some(stmt) = allow_stmt {
+            PolicyExplanation {
+                decision: PolicyDecision::Allow,
+                matched_statement: Some(MatchedStatement {
+                    sid: stmt.sid.clone(),
+                    effect: Effect::Allow,
+                    source: source.to_string(),
+                }),
+            }
+        } else {
+            PolicyExplanation {
+                decision: PolicyDecision::ImplicitDeny,
+                matched_statement: None,
+            }
+        }
+    }
+
     /// Check if principal matches
     fn matches_principal(&self, principal: &Principal, user_arn: &str) -> bool {
         match principal {
@@ -549,7 +650,7 @@ impl PolicyEvaluator {
     /// Check if action matches
     fn matches_action(&self, actions: &ActionList, request_action: &str) -> bool {
         actions.0.iter().any(|action| {
-            if action == "*" || action == "s3:*" {
+            if action == "*" || action == "s3:*" || action == "iceberg:*" {
                 true
             } else {
                 self.matches_pattern(action, request_action)
@@ -579,11 +680,12 @@ impl PolicyEvaluator {
         // Check StringEquals
         if let Some(ref string_equals) = conditions.string_equals {
             for (key, expected) in string_equals {
-                let actual = self.get_condition_value(key, context);
-                if !expected
-                    .as_vec()
-                    .iter()
-                    .any(|e| Some(*e) == actual.as_deref())
+                let actuals = self.get_condition_values(key, context);
+                if actuals.is_empty()
+                    || !expected
+                        .as_vec()
+                        .iter()
+                        .any(|e| actuals.iter().any(|a| a == e))
                 {
                     return false;
                 }
@@ -593,11 +695,11 @@ impl PolicyEvaluator {
         // Check StringNotEquals
         if let Some(ref string_not_equals) = conditions.string_not_equals {
             for (key, not_expected) in string_not_equals {
-                let actual = self.get_condition_value(key, context);
+                let actuals = self.get_condition_values(key, context);
                 if not_expected
                     .as_vec()
                     .iter()
-                    .any(|e| Some(*e) == actual.as_deref())
+                    .any(|e| actuals.iter().any(|a| a == e))
                 {
                     return false;
                 }
@@ -607,14 +709,14 @@ impl PolicyEvaluator {
         // Check StringLike (with wildcards)
         if let Some(ref string_like) = conditions.string_like {
             for (key, patterns) in string_like {
-                let actual = match self.get_condition_value(key, context) {
-                    Some(v) => v,
-                    None => return false,
-                };
+                let actuals = self.get_condition_values(key, context);
+                if actuals.is_empty() {
+                    return false;
+                }
                 if !patterns
                     .as_vec()
                     .iter()
-                    .any(|p| self.matches_pattern(p, &actual))
+                    .any(|p| actuals.iter().any(|a| self.matches_pattern(p, a)))
                 {
                     return false;
                 }
@@ -650,17 +752,76 @@ impl PolicyEvaluator {
             }
         }
 
+        // Check DateGreaterThan
+        if let Some(ref date_gt) = conditions.date_greater_than {
+            for (key, thresholds) in date_gt {
+                let actual = match self.get_condition_value(key, context) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let actual_dt = match chrono::DateTime::parse_from_rfc3339(&actual) {
+                    Ok(dt) => dt,
+                    Err(_) => return false,
+                };
+                // All threshold values must be less than actual (actual > threshold)
+                if !thresholds.as_vec().iter().any(|t| {
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .is_ok_and(|threshold_dt| actual_dt > threshold_dt)
+                }) {
+                    return false;
+                }
+            }
+        }
+
+        // Check DateLessThan
+        if let Some(ref date_lt) = conditions.date_less_than {
+            for (key, thresholds) in date_lt {
+                let actual = match self.get_condition_value(key, context) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let actual_dt = match chrono::DateTime::parse_from_rfc3339(&actual) {
+                    Ok(dt) => dt,
+                    Err(_) => return false,
+                };
+                // All threshold values must be greater than actual (actual < threshold)
+                if !thresholds.as_vec().iter().any(|t| {
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .is_ok_and(|threshold_dt| actual_dt < threshold_dt)
+                }) {
+                    return false;
+                }
+            }
+        }
+
         true
     }
 
-    /// Get condition value from context
+    /// Get condition value from context (single-valued).
     fn get_condition_value(&self, key: &str, context: &RequestContext) -> Option<String> {
         match key {
             "aws:SourceIp" => context.source_ip.map(|ip| ip.to_string()),
             "aws:username" => Some(context.user_arn.clone()),
             "s3:prefix" => context.variables.get("prefix").cloned(),
+            "obio:CurrentTime" => Some(chrono::Utc::now().to_rfc3339()),
             _ => context.variables.get(key).cloned(),
         }
+    }
+
+    /// Get condition values from context (multi-valued).
+    ///
+    /// For keys like `obio:PrincipalGroup`, returns all values from
+    /// `context.multi_variables`. For single-valued keys, wraps the
+    /// result of `get_condition_value` in a `Vec`.
+    fn get_condition_values(&self, key: &str, context: &RequestContext) -> Vec<String> {
+        // Check multi_variables first (e.g., obio:PrincipalGroup)
+        if let Some(values) = context.multi_variables.get(key) {
+            return values.clone();
+        }
+        // Fall back to single-valued lookup
+        self.get_condition_value(key, context)
+            .into_iter()
+            .collect()
     }
 
     /// Match a pattern with wildcards (* and ?)
@@ -679,27 +840,42 @@ impl PolicyEvaluator {
         }
     }
 
-    /// Check if IP matches CIDR range
+    /// Check if IP matches a CIDR range (e.g., `10.0.0.0/8`, `192.168.1.0/24`).
+    ///
+    /// Supports both IPv4 and IPv6 CIDR notation. Falls back to exact IP match
+    /// if no prefix length is specified.
     fn ip_matches_cidr(&self, ip: &IpAddr, cidr: &str) -> bool {
-        // Simple implementation - just check exact match or /0 (any)
-        // In production, use a proper CIDR library
-        if cidr == "0.0.0.0/0" || cidr == "::/0" {
-            return true;
-        }
-
-        if let Some((network, _prefix)) = cidr.split_once('/')
-            && let Ok(network_ip) = network.parse::<IpAddr>()
+        if let Some((network_str, prefix_str)) = cidr.split_once('/')
+            && let Ok(prefix_len) = prefix_str.parse::<u32>()
+            && let Ok(network_ip) = network_str.parse::<IpAddr>()
         {
-            // Simple check - in production use proper CIDR matching
-            return ip == &network_ip;
+            return match (ip, &network_ip) {
+                (IpAddr::V4(addr), IpAddr::V4(net)) => {
+                    if prefix_len == 0 {
+                        return true;
+                    }
+                    if prefix_len > 32 {
+                        return false;
+                    }
+                    let mask = u32::MAX.checked_shl(32 - prefix_len).unwrap_or(0);
+                    u32::from(*addr) & mask == u32::from(*net) & mask
+                }
+                (IpAddr::V6(addr), IpAddr::V6(net)) => {
+                    if prefix_len == 0 {
+                        return true;
+                    }
+                    if prefix_len > 128 {
+                        return false;
+                    }
+                    let mask = u128::MAX.checked_shl(128 - prefix_len).unwrap_or(0);
+                    u128::from(*addr) & mask == u128::from(*net) & mask
+                }
+                _ => false, // IPv4 vs IPv6 mismatch
+            };
         }
 
-        // Try exact IP match
-        if let Ok(cidr_ip) = cidr.parse::<IpAddr>() {
-            return ip == &cidr_ip;
-        }
-
-        false
+        // No prefix — try exact IP match
+        cidr.parse::<IpAddr>().is_ok_and(|cidr_ip| ip == &cidr_ip)
     }
 }
 
@@ -818,5 +994,489 @@ mod tests {
         assert_eq!(statement.sid, Some("TestStatement".to_string()));
         assert_eq!(statement.effect, Effect::Allow);
         assert_eq!(statement.action.0.len(), 2);
+    }
+
+    #[test]
+    fn test_date_greater_than_condition() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Allow only after 2020-01-01
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "DateGreaterThan": {
+                        "obio:CurrentTime": "2020-01-01T00:00:00+00:00"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        // Current time is after 2020, so this should match
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_date_less_than_condition() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Allow only before 2020-01-01 (this will be expired)
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "DateLessThan": {
+                        "obio:CurrentTime": "2020-01-01T00:00:00+00:00"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        // Current time is after 2020, so DateLessThan won't match -> implicit deny
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn test_date_range_condition() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Allow between 2020-01-01 and 2030-01-01
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "DateGreaterThan": {
+                        "obio:CurrentTime": "2020-01-01T00:00:00+00:00"
+                    },
+                    "DateLessThan": {
+                        "obio:CurrentTime": "2030-01-01T00:00:00+00:00"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        // Current time should be between 2020 and 2030
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_principal_group_string_equals() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Allow only members of data-engineers group
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "StringEquals": {
+                        "obio:PrincipalGroup": "arn:obio:iam::objectio:group/data-engineers"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // User in the data-engineers group — should match
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec![
+                "arn:obio:iam::objectio:group/data-engineers".to_string(),
+                "arn:obio:iam::objectio:group/analysts".to_string(),
+            ],
+        );
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Allow);
+
+        // User NOT in the data-engineers group — should not match
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/bob",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec!["arn:obio:iam::objectio:group/marketing".to_string()],
+        );
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+
+        // User with no groups — should not match
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/carol",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn test_principal_group_string_like() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Deny users in any group matching "data-*"
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": ["iceberg:DropTable"],
+                "Resource": ["*"],
+                "Condition": {
+                    "StringLike": {
+                        "obio:PrincipalGroup": "arn:obio:iam::objectio:group/data-*"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // User in data-engineers group — should match the deny
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:DropTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec!["arn:obio:iam::objectio:group/data-engineers".to_string()],
+        );
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Deny);
+
+        // User in marketing group — should not match the deny
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/bob",
+            "iceberg:DropTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec!["arn:obio:iam::objectio:group/marketing".to_string()],
+        );
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn test_principal_group_string_not_equals() {
+        let evaluator = PolicyEvaluator::new();
+
+        // Policy: Allow only if user is NOT in the interns group
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "StringNotEquals": {
+                        "obio:PrincipalGroup": "arn:obio:iam::objectio:group/interns"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // User in interns group — StringNotEquals fails, no allow
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/intern1",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec!["arn:obio:iam::objectio:group/interns".to_string()],
+        );
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+
+        // User NOT in interns group — StringNotEquals passes, allow
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        )
+        .with_multi_variable(
+            "obio:PrincipalGroup",
+            vec!["arn:obio:iam::objectio:group/engineers".to_string()],
+        );
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Allow);
+    }
+
+    #[test]
+    fn test_custom_variable_conditions() {
+        let evaluator = PolicyEvaluator::new();
+
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": ["iceberg:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "StringEquals": {
+                        "iceberg:namespace": "production"
+                    }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // With production namespace variable — should deny
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::production/events",
+        )
+        .with_variable("iceberg:namespace", "production");
+
+        assert_eq!(evaluator.evaluate(&policy, &context), PolicyDecision::Deny);
+
+        // With staging namespace variable — should not match the deny
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::staging/events",
+        )
+        .with_variable("iceberg:namespace", "staging");
+
+        assert_eq!(
+            evaluator.evaluate(&policy, &context),
+            PolicyDecision::ImplicitDeny
+        );
+    }
+
+    #[test]
+    fn test_evaluate_with_explanation_deny() {
+        let evaluator = PolicyEvaluator::new();
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "DenyDrops",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": ["iceberg:DropTable"],
+                "Resource": ["arn:obio:iceberg:::*"]
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:DropTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        let result = evaluator.evaluate_with_explanation(&policy, &context, "namespace:db1");
+        assert_eq!(result.decision, PolicyDecision::Deny);
+        let ms = result.matched_statement.unwrap();
+        assert_eq!(ms.sid, Some("DenyDrops".to_string()));
+        assert_eq!(ms.effect, Effect::Deny);
+        assert_eq!(ms.source, "namespace:db1");
+    }
+
+    #[test]
+    fn test_evaluate_with_explanation_allow() {
+        let evaluator = PolicyEvaluator::new();
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Sid": "AllowReads",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["iceberg:LoadTable"],
+                "Resource": ["*"]
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        let result = evaluator.evaluate_with_explanation(&policy, &context, "catalog");
+        assert_eq!(result.decision, PolicyDecision::Allow);
+        let ms = result.matched_statement.unwrap();
+        assert_eq!(ms.sid, Some("AllowReads".to_string()));
+        assert_eq!(ms.effect, Effect::Allow);
+        assert_eq!(ms.source, "catalog");
+    }
+
+    #[test]
+    fn test_evaluate_with_explanation_implicit_deny() {
+        let evaluator = PolicyEvaluator::new();
+        let policy = BucketPolicy::new(); // Empty policy
+        let context = RequestContext::new(
+            "arn:obio:iam::objectio:user/alice",
+            "iceberg:LoadTable",
+            "arn:obio:iceberg:::db1/events",
+        );
+
+        let result = evaluator.evaluate_with_explanation(&policy, &context, "catalog");
+        assert_eq!(result.decision, PolicyDecision::ImplicitDeny);
+        assert!(result.matched_statement.is_none());
+    }
+
+    #[test]
+    fn test_cidr_ipv4_matching() {
+        let evaluator = PolicyEvaluator::new();
+
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "IpAddress": { "aws:SourceIp": "10.0.0.0/8" }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // IP inside 10.0.0.0/8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("10.1.2.3".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
+
+        // IP outside 10.0.0.0/8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("192.168.1.1".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+
+        // Exact boundary: 10.255.255.255 is in /8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("10.255.255.255".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
+
+        // 11.0.0.0 is NOT in 10.0.0.0/8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("11.0.0.0".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+    }
+
+    #[test]
+    fn test_cidr_ipv4_slash24() {
+        let evaluator = PolicyEvaluator::new();
+
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": ["s3:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "NotIpAddress": { "aws:SourceIp": "192.168.1.0/24" }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // IP inside 192.168.1.0/24 — NotIpAddress does NOT match → no deny
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("192.168.1.50".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+
+        // IP outside 192.168.1.0/24 — NotIpAddress matches → deny
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("192.168.2.1".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn test_cidr_ipv6_matching() {
+        let evaluator = PolicyEvaluator::new();
+
+        let json = r#"{
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": ["s3:*"],
+                "Resource": ["*"],
+                "Condition": {
+                    "IpAddress": { "aws:SourceIp": "fd00::/8" }
+                }
+            }]
+        }"#;
+        let policy = BucketPolicy::from_json(json).unwrap();
+
+        // fd12::1 is in fd00::/8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("fd12::1".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
+
+        // fe80::1 is NOT in fd00::/8
+        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
+            .with_source_ip("fe80::1".parse().unwrap());
+        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+    }
+
+    #[test]
+    fn test_cidr_wildcard_ranges() {
+        let evaluator = PolicyEvaluator::new();
+        // 0.0.0.0/0 matches any IPv4
+        assert!(evaluator.ip_matches_cidr(&"1.2.3.4".parse().unwrap(), "0.0.0.0/0"));
+        // ::/0 matches any IPv6
+        assert!(evaluator.ip_matches_cidr(&"::1".parse().unwrap(), "::/0"));
+        // Exact IP match (no prefix)
+        assert!(evaluator.ip_matches_cidr(&"10.0.0.1".parse().unwrap(), "10.0.0.1"));
+        assert!(!evaluator.ip_matches_cidr(&"10.0.0.2".parse().unwrap(), "10.0.0.1"));
     }
 }

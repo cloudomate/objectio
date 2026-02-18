@@ -3,16 +3,29 @@
 use crate::error::IcebergError;
 use crate::types;
 use objectio_proto::metadata::{
+    CreateDataFilterRequest, DeleteDataFilterRequest, GetDataFiltersForPrincipalRequest,
     IcebergCommitTableRequest, IcebergCreateNamespaceRequest, IcebergCreateTableRequest,
-    IcebergDropNamespaceRequest, IcebergDropTableRequest, IcebergGetTablePolicyRequest,
-    IcebergListNamespacesRequest, IcebergListTablesRequest, IcebergLoadNamespaceRequest,
-    IcebergLoadTableRequest, IcebergNamespaceExistsRequest, IcebergRenameTableRequest,
-    IcebergSetTablePolicyRequest, IcebergTableExistsRequest, IcebergTableIdentifier,
-    IcebergUpdateNamespacePropertiesRequest, metadata_service_client::MetadataServiceClient,
+    IcebergDataFilter, IcebergDropNamespaceRequest, IcebergDropTableRequest,
+    IcebergGetTablePolicyRequest, IcebergListNamespacesRequest, IcebergListTablesRequest,
+    IcebergLoadNamespaceRequest, IcebergLoadTableRequest, IcebergNamespaceExistsRequest,
+    IcebergRenameTableRequest, IcebergSetTablePolicyRequest, IcebergTableExistsRequest,
+    IcebergTableIdentifier, IcebergUpdateNamespacePropertiesRequest,
+    ListDataFiltersRequest, metadata_service_client::MetadataServiceClient,
 };
 use tonic::transport::Channel;
 
 type Result<T> = std::result::Result<T, IcebergError>;
+
+/// Parameters for creating a new data filter.
+pub struct NewDataFilter<'a> {
+    pub ns_levels: Vec<String>,
+    pub table_name: &'a str,
+    pub filter_name: &'a str,
+    pub principal_arns: Vec<String>,
+    pub allowed_columns: Vec<String>,
+    pub excluded_columns: Vec<String>,
+    pub row_filter_expression: &'a str,
+}
 
 /// Thin catalog layer that delegates to the Meta gRPC service.
 #[derive(Clone)]
@@ -393,5 +406,99 @@ impl IcebergCatalog {
             })
             .await?;
         Ok(())
+    }
+
+    // ---- Data filter operations ----
+
+    /// Create a data filter for a table.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` on gRPC failure.
+    pub async fn create_data_filter(
+        &self,
+        params: NewDataFilter<'_>,
+    ) -> Result<IcebergDataFilter> {
+        let resp = self
+            .meta_client
+            .clone()
+            .create_data_filter(CreateDataFilterRequest {
+                namespace_levels: params.ns_levels,
+                table_name: params.table_name.to_string(),
+                filter_name: params.filter_name.to_string(),
+                principal_arns: params.principal_arns,
+                allowed_columns: params.allowed_columns,
+                excluded_columns: params.excluded_columns,
+                row_filter_expression: params.row_filter_expression.to_string(),
+            })
+            .await?
+            .into_inner();
+
+        resp.filter
+            .ok_or_else(|| IcebergError::internal("missing filter in response"))
+    }
+
+    /// List data filters for a table.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` on gRPC failure.
+    pub async fn list_data_filters(
+        &self,
+        ns_levels: Vec<String>,
+        table_name: &str,
+    ) -> Result<Vec<IcebergDataFilter>> {
+        let resp = self
+            .meta_client
+            .clone()
+            .list_data_filters(ListDataFiltersRequest {
+                namespace_levels: ns_levels,
+                table_name: table_name.to_string(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.filters)
+    }
+
+    /// Delete a data filter by ID.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` on gRPC failure.
+    pub async fn delete_data_filter(&self, filter_id: &str) -> Result<bool> {
+        let resp = self
+            .meta_client
+            .clone()
+            .delete_data_filter(DeleteDataFilterRequest {
+                filter_id: filter_id.to_string(),
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.success)
+    }
+
+    /// Get data filters applicable to a principal for a given table.
+    ///
+    /// # Errors
+    /// Returns `IcebergError` on gRPC failure.
+    pub async fn get_data_filters_for_principal(
+        &self,
+        ns_levels: Vec<String>,
+        table_name: &str,
+        principal_arn: &str,
+        group_arns: Vec<String>,
+    ) -> Result<Vec<IcebergDataFilter>> {
+        let resp = self
+            .meta_client
+            .clone()
+            .get_data_filters_for_principal(GetDataFiltersForPrincipalRequest {
+                namespace_levels: ns_levels,
+                table_name: table_name.to_string(),
+                principal_arn: principal_arn.to_string(),
+                group_arns,
+            })
+            .await?
+            .into_inner();
+
+        Ok(resp.filters)
     }
 }

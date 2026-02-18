@@ -163,6 +163,8 @@ pub struct AuthResult {
     pub user_arn: String,
     /// Access key ID used
     pub access_key_id: String,
+    /// Group ARNs the user belongs to (populated by gateway)
+    pub group_arns: Vec<String>,
 }
 
 impl AuthResult {

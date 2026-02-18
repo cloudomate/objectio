@@ -99,6 +99,7 @@ impl SigV4Verifier {
             user_id: user.user_id,
             user_arn: user.arn,
             access_key_id: access_key.access_key_id,
+            group_arns: Vec::new(),
         })
     }
 

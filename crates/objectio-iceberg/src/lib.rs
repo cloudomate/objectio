@@ -7,8 +7,10 @@
 pub mod access;
 pub mod catalog;
 pub mod error;
+pub mod filters;
 pub mod handlers;
 pub mod metadata;
+pub mod roles;
 pub mod types;
 
 use axum::Router;
@@ -24,6 +26,7 @@ use tonic::transport::Channel;
 ///
 /// The returned router should be nested at `/iceberg` by the gateway.
 /// Routes follow the Iceberg REST Catalog `OpenAPI` spec (v1 prefix).
+#[allow(clippy::too_many_lines)]
 pub fn router(
     meta_client: MetadataServiceClient<Channel>,
     warehouse_location: String,
@@ -90,6 +93,68 @@ pub fn router(
             "/v1/namespaces/{namespace}/tables/{table}/policy",
             put(handlers::set_table_policy),
         )
+        // Tag management
+        .route(
+            "/v1/namespaces/{namespace}/tags",
+            put(handlers::set_namespace_tags),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/tags",
+            get(handlers::get_namespace_tags),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/tags",
+            put(handlers::set_table_tags),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/tags",
+            get(handlers::get_table_tags),
+        )
+        // Quota management
+        .route(
+            "/v1/namespaces/{namespace}/quota",
+            put(handlers::set_namespace_quota),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/quota",
+            get(handlers::get_namespace_quota),
+        )
+        // Encryption policy management
+        .route(
+            "/v1/namespaces/{namespace}/encryption-policy",
+            put(handlers::set_encryption_policy),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/encryption-policy",
+            get(handlers::get_encryption_policy),
+        )
+        // Data filter management (admin only)
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/data-filters",
+            put(handlers::create_data_filter),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/data-filters",
+            get(handlers::list_data_filters),
+        )
+        .route(
+            "/v1/namespaces/{namespace}/tables/{table}/data-filters/{filter_id}",
+            delete(handlers::delete_data_filter),
+        )
+        // Role binding
+        .route(
+            "/v1/namespaces/{namespace}/role-binding",
+            put(handlers::set_role_binding),
+        )
+        // Catalog-level policy management
+        .route("/v1/catalog/policy", put(handlers::set_catalog_policy))
+        // Effective policy (admin)
+        .route(
+            "/v1/namespaces/{namespace}/effective-policy",
+            get(handlers::get_effective_policy),
+        )
+        // Policy simulation (admin)
+        .route("/v1/simulate-policy", post(handlers::simulate_policy))
         // Rename table
         .route("/v1/tables/rename", post(handlers::rename_table))
         .with_state(state)
