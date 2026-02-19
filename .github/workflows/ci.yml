@@ -9,7 +9,6 @@ on:
 
 env:
   REGISTRY: ghcr.io/${{ github.repository_owner }}
-  IMAGES: gateway:objectio-gateway meta:objectio-meta osd:objectio-osd cli:objectio-cli all:objectio
 
 jobs:
   ci:
@@ -50,7 +49,7 @@ jobs:
           docker rmi objectio-ci:${{ github.run_id }} || true
 
   build:
-    name: Build (${{ matrix.arch }})
+    name: ${{ matrix.image }} (${{ matrix.arch }})
     needs: ci
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ matrix.runner }}
@@ -58,14 +57,19 @@ jobs:
       contents: read
       packages: write
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - arch: amd64
-            runner: ubuntu-latest
-            platform: linux/amd64
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            platform: linux/arm64
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: gateway, image: objectio-gateway }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: meta,    image: objectio-meta    }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: osd,     image: objectio-osd     }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: cli,     image: objectio-cli     }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: all,     image: objectio         }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: gateway, image: objectio-gateway }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: meta,    image: objectio-meta    }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: osd,     image: objectio-osd     }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: cli,     image: objectio-cli     }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: all,     image: objectio         }
 
     steps:
       - uses: actions/checkout@v4
@@ -80,22 +84,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push per-arch images
+      - name: Build and push
         run: |
           SHA_SHORT=$(git rev-parse --short HEAD)
-
-          for PAIR in ${{ env.IMAGES }}; do
-            TARGET="${PAIR%%:*}"
-            IMAGE="${PAIR##*:}"
-            echo "::group::Building $IMAGE (target: $TARGET, arch: ${{ matrix.arch }})"
-            docker buildx build \
-              --platform ${{ matrix.platform }} \
-              --target "$TARGET" \
-              -t "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-${{ matrix.arch }}" \
-              --push \
-              .
-            echo "::endgroup::"
-          done
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --target ${{ matrix.target }} \
+            --cache-from type=registry,ref=${{ env.REGISTRY }}/${{ matrix.image }}:buildcache-${{ matrix.arch }} \
+            --cache-to   type=registry,ref=${{ env.REGISTRY }}/${{ matrix.image }}:buildcache-${{ matrix.arch }},mode=max \
+            -t "${{ env.REGISTRY }}/${{ matrix.image }}:${SHA_SHORT}-${{ matrix.arch }}" \
+            --push \
+            .
 
       - name: Cleanup
         if: always()
@@ -128,17 +127,15 @@ jobs:
             TAGS="$TAGS ${GITHUB_REF#refs/tags/}"
           fi
 
-          for PAIR in ${{ env.IMAGES }}; do
-            IMAGE="${PAIR##*:}"
+          IMAGES="objectio-gateway objectio-meta objectio-osd objectio-cli objectio"
+          for IMAGE in $IMAGES; do
             echo "::group::Manifest $IMAGE"
-
             for TAG in $TAGS; do
               docker buildx imagetools create \
                 -t "${{ env.REGISTRY }}/$IMAGE:$TAG" \
                 "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-amd64" \
                 "${{ env.REGISTRY }}/$IMAGE:$SHA_SHORT-arm64"
             done
-
             echo "::endgroup::"
           done
 

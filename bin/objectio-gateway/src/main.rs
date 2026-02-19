@@ -21,6 +21,7 @@ use axum::{
 };
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
+use objectio_delta_sharing::{DeltaSharingConfig, admin_router as delta_admin_router, router as delta_router};
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
 use objectio_s3::{ProtectionConfig, s3_metrics};
 use osd_pool::OsdPool;
@@ -102,6 +103,21 @@ struct Args {
     /// Iceberg REST Catalog warehouse location (S3 URL prefix for table data)
     #[arg(long, default_value = "s3://objectio-warehouse")]
     warehouse_location: String,
+
+    /// Public endpoint URL for presigned URLs (e.g. https://objectio.example.com).
+    /// Used by Delta Sharing to generate presigned S3 URLs for Parquet files.
+    /// Defaults to http://<listen> if not set.
+    #[arg(long, default_value = "")]
+    external_endpoint: String,
+
+    /// Admin access key ID for Delta Sharing presigned URL generation.
+    /// Leave empty to disable Delta Sharing presigned URL support.
+    #[arg(long, default_value = "")]
+    delta_access_key_id: String,
+
+    /// Admin secret access key for Delta Sharing presigned URL generation.
+    #[arg(long, default_value = "")]
+    delta_secret_key: String,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -235,6 +251,29 @@ async fn main() -> Result<()> {
         args.warehouse_location
     );
 
+    // Build Delta Sharing router — served outside the SigV4 auth middleware
+    let external_endpoint = if args.external_endpoint.is_empty() {
+        format!("http://{}", args.listen)
+    } else {
+        args.external_endpoint.clone()
+    };
+    let delta_config = DeltaSharingConfig {
+        endpoint: external_endpoint.clone(),
+        region: args.region.clone(),
+        access_key_id: args.delta_access_key_id.clone(),
+        secret_access_key: args.delta_secret_key.clone(),
+    };
+    let delta_admin_config = DeltaSharingConfig {
+        endpoint: external_endpoint,
+        region: args.region.clone(),
+        access_key_id: args.delta_access_key_id.clone(),
+        secret_access_key: args.delta_secret_key.clone(),
+    };
+    let delta_sharing_router = delta_router(meta_client.clone(), delta_config);
+    let delta_sharing_admin_router = delta_admin_router(meta_client.clone(), delta_admin_config);
+    info!("Delta Sharing protocol enabled at /delta-sharing/v1/*");
+    info!("Delta Sharing admin API enabled at /_admin/delta-sharing/*");
+
     // Create application state
     let state = Arc::new(AppState {
         meta_client,
@@ -300,16 +339,22 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     // Merge S3 (Router<()>) + Iceberg (Router<()>), then apply shared layers.
-    // This ensures auth covers both S3 and Iceberg endpoints.
+    // Delta Sharing is nested OUTSIDE the SigV4 auth layer (uses bearer tokens).
     let app = if !args.no_auth {
         info!("Authentication is ENABLED (credentials from metadata service)");
         info!("Admin API is ENABLED (requires 'admin' user credentials)");
         info!("Metrics endpoint: /metrics (no auth)");
-        Router::new()
+        // Protected routes (SigV4 auth applied)
+        let protected = Router::new()
             .merge(s3_routes)
             .nest("/iceberg", iceberg_router)
             .layer(body_limit)
-            .layer(middleware::from_fn_with_state(auth_state, auth_layer))
+            .layer(middleware::from_fn_with_state(auth_state, auth_layer));
+        // Unprotected: Delta Sharing uses its own bearer token auth
+        Router::new()
+            .merge(protected)
+            .nest("/delta-sharing", delta_sharing_router)
+            .nest("/_admin/delta-sharing", delta_sharing_admin_router)
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())
     } else {
@@ -319,6 +364,8 @@ async fn main() -> Result<()> {
         Router::new()
             .merge(s3_routes)
             .nest("/iceberg", iceberg_router)
+            .nest("/delta-sharing", delta_sharing_router)
+            .nest("/_admin/delta-sharing", delta_sharing_admin_router)
             .layer(body_limit)
             .layer(middleware::from_fn(metrics_middleware::metrics_layer))
             .layer(TraceLayer::new_for_http())

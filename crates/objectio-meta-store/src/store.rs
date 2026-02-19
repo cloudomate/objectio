@@ -76,6 +76,9 @@ impl MetaStore {
             let _t = write_txn.open_table(tables::GROUPS)?;
             let _t = write_txn.open_table(tables::GROUP_MEMBERS)?;
             let _t = write_txn.open_table(tables::DATA_FILTERS)?;
+            let _t = write_txn.open_table(tables::DELTA_SHARES)?;
+            let _t = write_txn.open_table(tables::DELTA_TABLES)?;
+            let _t = write_txn.open_table(tables::DELTA_RECIPIENTS)?;
         }
         write_txn.commit()?;
 
@@ -504,6 +507,84 @@ impl MetaStore {
 
     pub fn load_data_filters(&self) -> MetaStoreResult<Vec<(String, StoredDataFilter)>> {
         self.load_bincode_table(tables::DATA_FILTERS)
+    }
+
+    // ---- Delta Sharing (raw bytes, prost-encoded) ----
+
+    pub fn put_delta_share(&self, name: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::DELTA_SHARES, name, data) {
+            error!("Failed to persist delta share '{}': {}", name, e);
+        }
+    }
+
+    pub fn delete_delta_share(&self, name: &str) {
+        if let Err(e) = self.delete_key(tables::DELTA_SHARES, name) {
+            error!("Failed to delete delta share '{}': {}", name, e);
+        }
+    }
+
+    pub fn load_delta_shares(&self) -> MetaStoreResult<Vec<(String, Vec<u8>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::DELTA_SHARES)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            result.push((entry.0.value().to_string(), entry.1.value().to_vec()));
+        }
+        Ok(result)
+    }
+
+    pub fn put_delta_table(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::DELTA_TABLES, key, data) {
+            error!("Failed to persist delta table '{}': {}", key, e);
+        }
+    }
+
+    pub fn delete_delta_table(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::DELTA_TABLES, key) {
+            error!("Failed to delete delta table '{}': {}", key, e);
+        }
+    }
+
+    pub fn delete_delta_tables_for_share(&self, share: &str) {
+        let prefix = format!("{share}\x00");
+        if let Err(e) = self.delete_keys_with_prefix(tables::DELTA_TABLES, &prefix) {
+            error!("Failed to delete delta tables for share '{}': {}", share, e);
+        }
+    }
+
+    pub fn load_delta_tables(&self) -> MetaStoreResult<Vec<(String, Vec<u8>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::DELTA_TABLES)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            result.push((entry.0.value().to_string(), entry.1.value().to_vec()));
+        }
+        Ok(result)
+    }
+
+    pub fn put_delta_recipient(&self, name: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::DELTA_RECIPIENTS, name, data) {
+            error!("Failed to persist delta recipient '{}': {}", name, e);
+        }
+    }
+
+    pub fn delete_delta_recipient(&self, name: &str) {
+        if let Err(e) = self.delete_key(tables::DELTA_RECIPIENTS, name) {
+            error!("Failed to delete delta recipient '{}': {}", name, e);
+        }
+    }
+
+    pub fn load_delta_recipients(&self) -> MetaStoreResult<Vec<(String, Vec<u8>)>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(tables::DELTA_RECIPIENTS)?;
+        let mut result = Vec::new();
+        for entry in table.iter()? {
+            let entry = entry?;
+            result.push((entry.0.value().to_string(), entry.1.value().to_vec()));
+        }
+        Ok(result)
     }
 
     // ---- Generic helpers ----

@@ -32,6 +32,7 @@
 // Core modules (always available)
 pub mod error;
 pub mod policy;
+pub mod presign;
 pub mod sigv2;
 pub mod sigv4;
 pub mod store;

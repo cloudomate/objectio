@@ -12,6 +12,13 @@ gateway:
     port: 9000
   noAuth: true
   logLevel: info
+  warehouseLocation: s3://objectio-warehouse
+  region: us-east-1
+  # Delta Sharing presigned URL config. Set externalEndpoint + credentials to enable.
+  deltaSharing:
+    externalEndpoint: ""
+    accessKeyId: ""
+    secretKey: ""
   resources:
     requests:
       cpu: 250m

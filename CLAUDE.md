@@ -188,8 +188,16 @@ Binaries live in `bin/`, not `src/`:
 - **gRPC**: Tonic 0.12 / Prost 0.13
 - **Config pattern**: TOML config files + clap CLI args (CLI overrides config). Services use `--config` flag pointing to TOML.
 - **Auth bypass**: `--no-auth` flag on gateway for development/testing
-- **Testing**: All tests are colocated (`#[cfg(test)] mod tests`) within source files. No separate `tests/` integration test directory.
+- **Testing**: All tests are colocated (`#[cfg(test)] mod tests`) within source files. Sync tests use `#[test]`; async tests use `#[tokio::test]`. No separate `tests/` integration test directory.
 - **Type wrappers**: Newtypes use `derive_more` (e.g., `ObjectId(Uuid)` with `From`/`Into`). Types like `BucketName` validate on construction via `::new()` and offer `::new_unchecked()` for internal use.
+
+## Handler Patterns
+
+**Auth integration**: Axum handlers receive `Extension<AuthResult>` injected by the auth middleware. When `--no-auth` is active, no extension is present — handlers that need conditional auth checking take `Option<Extension<AuthResult>>` and skip policy evaluation when it is `None`. New routes that must be publicly accessible (health checks, etc.) must be registered on the router *before* the auth middleware layer, not after.
+
+**State**: Shared service state is passed as `State<Arc<ServiceState>>`. gRPC clients to OSDs are wrapped in a connection pool (`OsdPool`) that lazily opens connections on first use, deduplicates by address, and sets `max_decoding_message_size`/`max_encoding_message_size` to 100 MB to accommodate large shard transfers.
+
+**Iceberg policy hierarchy**: `access.rs` checks policies from the catalog root down through ancestor namespaces to the target namespace/table in order. Deny at any level wins; all levels must allow.
 
 ## Ports
 

@@ -1,0 +1,24 @@
+[package]
+name = "objectio-delta-sharing"
+description = "Delta Sharing protocol server for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objectio-auth = { workspace = true }
+objectio-common = { workspace = true }
+objectio-proto = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+prost = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = "0.4"
+
+[lints]
+workspace = true

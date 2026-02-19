@@ -5,8 +5,8 @@
 const MAX_SHARD_SIZE: usize = 4 * 1024 * 1024 - 4096; // ~4MB per shard
 
 use crate::osd_pool::{
-    OsdPool, delete_object_meta_from_osd, get_object_meta_from_osd, put_object_meta_to_osd,
-    read_shard_from_osd, write_shard_to_osd,
+    OsdPool, copy_object_meta_on_osd, delete_object_meta_from_osd, get_object_meta_from_osd,
+    put_object_meta_to_osd, read_shard_from_osd, write_shard_to_osd,
 };
 use crate::scatter_gather::ScatterGatherEngine;
 use axum::{
@@ -1120,8 +1120,10 @@ pub async fn put_object(
             decoded.trim_start_matches('/').to_string()
         });
 
-    // If this is a copy operation, read the source object first
-    let (body, is_copy) = if let Some(ref source) = copy_source {
+    // Fast-path CopyObject: metadata-only copy — no shard data moved.
+    // Shards are shared between source and destination until the source ObjectMeta
+    // is deleted by a subsequent DeleteObject call from the client.
+    if let Some(ref source) = copy_source {
         // Parse source bucket/key (format: "bucket/key" or "/bucket/key")
         let parts: Vec<&str> = source.splitn(2, '/').collect();
         if parts.len() != 2 {
@@ -1134,16 +1136,31 @@ pub async fn put_object(
         let source_bucket = parts[0];
         let source_key = parts[1];
 
+        // Auth check (PutObject on destination)
+        if let Some(Extension(auth_result)) = &auth {
+            let resource = build_s3_arn(&bucket, Some(&key));
+            if let Some(deny_response) = check_bucket_policy(
+                &state,
+                &bucket,
+                &auth_result.user_arn,
+                "s3:PutObject",
+                &resource,
+            )
+            .await
+            {
+                return deny_response;
+            }
+        }
+
         debug!(
-            "CopyObject: {}/{} -> {}/{}",
+            "CopyObject fast-path: {}/{} -> {}/{}",
             source_bucket, source_key, bucket, key
         );
 
-        // Read the source object using internal get
         let mut meta_client = state.meta_client.clone();
 
-        // Get placement for source
-        let placement = match meta_client
+        // Get source OSD via CRUSH placement
+        let src_placement = match meta_client
             .get_placement(GetPlacementRequest {
                 bucket: source_bucket.to_string(),
                 key: source_key.to_string(),
@@ -1154,7 +1171,7 @@ pub async fn put_object(
         {
             Ok(resp) => resp.into_inner(),
             Err(e) => {
-                error!("Failed to get placement for copy source: {}", e);
+                error!("CopyObject: failed to get source placement: {}", e);
                 return S3Error::xml_response(
                     "NoSuchKey",
                     "The specified key does not exist",
@@ -1163,21 +1180,79 @@ pub async fn put_object(
             }
         };
 
-        if placement.nodes.is_empty() {
+        if src_placement.nodes.is_empty() {
             return S3Error::xml_response(
                 "InternalError",
-                "No storage nodes available",
+                "No storage nodes available for source",
                 StatusCode::SERVICE_UNAVAILABLE,
             );
         }
+        let src_osd = &src_placement.nodes[0];
 
-        // Get source object metadata
-        let primary_osd = &placement.nodes[0];
-        let source_obj =
-            match get_object_meta_from_osd(&state.osd_pool, primary_osd, source_bucket, source_key)
-                .await
+        // Get dest OSD via CRUSH placement
+        let dst_placement = match meta_client
+            .get_placement(GetPlacementRequest {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                size: 0,
+                storage_class: "STANDARD".to_string(),
+            })
+            .await
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                error!("CopyObject: failed to get dest placement: {}", e);
+                return S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                );
+            }
+        };
+
+        if dst_placement.nodes.is_empty() {
+            return S3Error::xml_response(
+                "InternalError",
+                "No storage nodes available for destination",
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+        let dst_osd = &dst_placement.nodes[0];
+
+        // Fast-path: copy ObjectMeta without touching shard data
+        let dest_meta = if src_osd.node_id == dst_osd.node_id {
+            // Same OSD: single atomic RPC
+            match copy_object_meta_on_osd(
+                &state.osd_pool,
+                src_osd,
+                source_bucket,
+                source_key,
+                &bucket,
+                &key,
+            )
+            .await
             {
-                Ok(Some(obj)) => obj,
+                Ok(m) => m,
+                Err(e) => {
+                    error!("CopyObject: copy_object_meta failed: {}", e);
+                    return S3Error::xml_response(
+                        "NoSuchKey",
+                        "The specified key does not exist",
+                        StatusCode::NOT_FOUND,
+                    );
+                }
+            }
+        } else {
+            // Different OSDs: read meta from source, write to dest
+            let source_meta = match get_object_meta_from_osd(
+                &state.osd_pool,
+                src_osd,
+                source_bucket,
+                source_key,
+            )
+            .await
+            {
+                Ok(Some(m)) => m,
                 Ok(None) => {
                     return S3Error::xml_response(
                         "NoSuchKey",
@@ -1186,7 +1261,7 @@ pub async fn put_object(
                     );
                 }
                 Err(e) => {
-                    error!("Failed to get source object metadata: {}", e);
+                    error!("CopyObject: failed to read source meta: {}", e);
                     return S3Error::xml_response(
                         "InternalError",
                         &e.to_string(),
@@ -1195,158 +1270,62 @@ pub async fn put_object(
                 }
             };
 
-        // Read source object data from stripes
-        let mut source_data = Vec::with_capacity(source_obj.size as usize);
-        for stripe in &source_obj.stripes {
-            let ec_k = stripe.ec_k as usize;
-            let ec_m = stripe.ec_m as usize;
-            let stripe_ec_type =
-                ErasureType::try_from(stripe.ec_type).unwrap_or(ErasureType::ErasureMds);
-            let stripe_data_size = if stripe.data_size > 0 {
-                stripe.data_size as usize
-            } else {
-                source_obj.size as usize
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let new_etag = format!("{:x}", Uuid::new_v4().as_u128());
+            let dest_meta = ObjectMeta {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                etag: new_etag,
+                created_at: now,
+                modified_at: now,
+                ..source_meta
             };
 
-            // Replication mode: read from first available replica
-            if stripe_ec_type == ErasureType::ErasureReplication {
-                let mut data_read = false;
-                for shard_loc in &stripe.shards {
-                    let node_placement = objectio_proto::metadata::NodePlacement {
-                        position: shard_loc.position,
-                        node_id: shard_loc.node_id.clone(),
-                        node_address: String::new(),
-                        disk_id: shard_loc.disk_id.clone(),
-                        shard_type: shard_loc.shard_type,
-                        local_group: shard_loc.local_group,
-                    };
-
-                    let ec_obj_id = if !stripe.object_id.is_empty() {
-                        &stripe.object_id
-                    } else {
-                        &source_obj.object_id
-                    };
-
-                    match read_shard_from_osd(
-                        &state.osd_pool,
-                        &node_placement,
-                        ec_obj_id,
-                        stripe.stripe_id,
-                        shard_loc.position,
-                    )
+            if let Err(e) =
+                put_object_meta_to_osd(&state.osd_pool, dst_osd, &bucket, &key, dest_meta.clone())
                     .await
-                    {
-                        Ok(data) => {
-                            let actual_data = if data.len() > stripe_data_size {
-                                data[..stripe_data_size].to_vec()
-                            } else {
-                                data
-                            };
-                            source_data.extend(actual_data);
-                            data_read = true;
-                            break;
-                        }
-                        Err(e) => {
-                            warn!("Failed to read replica: {}", e);
-                        }
-                    }
-                }
-                if !data_read {
-                    return S3Error::xml_response(
-                        "InternalError",
-                        "Failed to read source object",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    );
-                }
-            } else {
-                // EC mode: decode
-                let total_shards = ec_k + ec_m;
-                let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards];
-                let mut read_count = 0;
-
-                let shard_map: std::collections::HashMap<u32, &ShardLocation> =
-                    stripe.shards.iter().map(|s| (s.position, s)).collect();
-
-                let ec_obj_id = if !stripe.object_id.is_empty() {
-                    &stripe.object_id
-                } else {
-                    &source_obj.object_id
-                };
-
-                for (pos, shard) in shards.iter_mut().enumerate() {
-                    if read_count >= ec_k {
-                        break;
-                    }
-                    if let Some(shard_loc) = shard_map.get(&(pos as u32)) {
-                        let node_placement = objectio_proto::metadata::NodePlacement {
-                            position: shard_loc.position,
-                            node_id: shard_loc.node_id.clone(),
-                            node_address: String::new(),
-                            disk_id: shard_loc.disk_id.clone(),
-                            shard_type: shard_loc.shard_type,
-                            local_group: shard_loc.local_group,
-                        };
-
-                        if let Ok(data) = read_shard_from_osd(
-                            &state.osd_pool,
-                            &node_placement,
-                            ec_obj_id,
-                            stripe.stripe_id,
-                            pos as u32,
-                        )
-                        .await
-                        {
-                            *shard = Some(data);
-                            read_count += 1;
-                        }
-                    }
-                }
-
-                if read_count < ec_k {
-                    return S3Error::xml_response(
-                        "InternalError",
-                        "Insufficient shards to read source object",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    );
-                }
-
-                let codec = match ErasureCodec::new(ErasureConfig::new(ec_k as u8, ec_m as u8)) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return S3Error::xml_response(
-                            "InternalError",
-                            &format!("Codec error: {}", e),
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                        );
-                    }
-                };
-
-                match codec.decode(&mut shards, stripe_data_size) {
-                    Ok(data) => source_data.extend(data),
-                    Err(e) => {
-                        return S3Error::xml_response(
-                            "InternalError",
-                            &format!("Decode error: {}", e),
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                        );
-                    }
-                }
+            {
+                error!("CopyObject: failed to write dest meta: {}", e);
+                return S3Error::xml_response(
+                    "InternalError",
+                    &e.to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                );
             }
-        }
+            dest_meta
+        };
 
-        (Bytes::from(source_data), true)
-    } else {
-        (body, false)
-    };
+        info!(
+            "CopyObject fast-path: {}/{} -> {}/{} ({} bytes, no data I/O)",
+            source_bucket, source_key, bucket, key, dest_meta.size
+        );
+
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
+            to_xml(&CopyObjectResult {
+                etag: dest_meta.etag.clone(),
+                last_modified: timestamp_to_iso(dest_meta.modified_at),
+            })
+            .unwrap_or_default()
+        );
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/xml")
+            .header("ETag", dest_meta.etag)
+            .body(Body::from(xml))
+            .unwrap();
+    }
 
     debug!(
-        "PUT object: {}/{}, size={}, ec={}+{}, is_copy={}",
+        "PUT object: {}/{}, size={}, ec={}+{}",
         bucket,
         key,
         body.len(),
         state.ec_k,
         state.ec_m,
-        is_copy
     );
 
     // Check bucket policy if user is authenticated
@@ -1576,33 +1555,15 @@ pub async fn put_object(
         }
 
         info!(
-            "Created object (replication): {}/{}, size={}, stripes={}, replicas_written={}, is_copy={}",
-            bucket, key, original_size, num_stripes, total_success, is_copy
+            "Created object (replication): {}/{}, size={}, stripes={}, replicas_written={}",
+            bucket, key, original_size, num_stripes, total_success,
         );
 
-        // Return CopyObjectResult XML for copy operations, empty body for regular PUT
-        return if is_copy {
-            let copy_result = CopyObjectResult {
-                etag: etag.clone(),
-                last_modified: timestamp_to_iso(timestamp),
-            };
-            let xml = format!(
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
-                to_xml(&copy_result).unwrap_or_default()
-            );
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/xml")
-                .header("ETag", etag)
-                .body(Body::from(xml))
-                .unwrap()
-        } else {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("ETag", etag)
-                .body(Body::empty())
-                .unwrap()
-        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("ETag", etag)
+            .body(Body::empty())
+            .unwrap();
     }
 
     // EC mode: encode data with erasure coding
@@ -1882,39 +1843,20 @@ pub async fn put_object(
     // ListObjects uses scatter-gather to query all OSDs directly
 
     info!(
-        "Created object: {}/{}, size={}, stripes={}, shards_written={}, primary_osd={}, is_copy={}",
+        "Created object: {}/{}, size={}, stripes={}, shards_written={}, primary_osd={}",
         bucket,
         key,
         original_size,
         num_stripes,
         total_shards_written,
         primary_osd.node_address,
-        is_copy
     );
 
-    // Return CopyObjectResult XML for copy operations, empty body for regular PUT
-    if is_copy {
-        let copy_result = CopyObjectResult {
-            etag: etag.clone(),
-            last_modified: timestamp_to_iso(timestamp),
-        };
-        let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
-            to_xml(&copy_result).unwrap_or_default()
-        );
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/xml")
-            .header("ETag", etag)
-            .body(Body::from(xml))
-            .unwrap()
-    } else {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("ETag", etag)
-            .body(Body::empty())
-            .unwrap()
-    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("ETag", etag)
+        .body(Body::empty())
+        .unwrap()
 }
 
 /// Get object (GET /{bucket}/{key})

@@ -4,6 +4,8 @@ use objectio_proto::metadata::ObjectMeta;
 use objectio_proto::storage::{
     BlockLocation,
     Checksum,
+    CopyObjectMetaRequest,
+    CopyObjectMetaResponse,
     DeleteObjectMetaRequest,
     DeleteObjectMetaResponse,
     DeleteShardRequest,
@@ -17,6 +19,7 @@ use objectio_proto::storage::{
     GetStatusResponse,
     HealthCheckRequest,
     HealthCheckResponse,
+    ListObjectsMetaChunk,
     ListObjectsMetaRequest,
     ListObjectsMetaResponse,
     ListShardsRequest,
@@ -31,6 +34,8 @@ use objectio_proto::storage::{
     health_check_response::Status as HealthStatus,
     storage_service_server::StorageService,
 };
+use futures::stream::Stream;
+use std::pin::Pin;
 use objectio_storage::DiskManager;
 use objectio_storage::metadata::{MetadataKey, MetadataStore, MetadataStoreConfig};
 use parking_lot::RwLock;
@@ -72,6 +77,7 @@ impl GrpcMethodMetrics {
 
 /// gRPC metrics collector for OSD
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct GrpcMetrics {
     pub write_shard: GrpcMethodMetrics,
     pub read_shard: GrpcMethodMetrics,
@@ -82,6 +88,8 @@ pub struct GrpcMetrics {
     pub get_object_meta: GrpcMethodMetrics,
     pub delete_object_meta: GrpcMethodMetrics,
     pub list_objects_meta: GrpcMethodMetrics,
+    pub copy_object_meta: GrpcMethodMetrics,
+    pub stream_list_objects_meta: GrpcMethodMetrics,
     pub health_check: GrpcMethodMetrics,
     pub get_status: GrpcMethodMetrics,
 }
@@ -934,5 +942,104 @@ impl StorageService for OsdService {
             is_truncated,
             key_count: count as u32,
         }))
+    }
+
+    async fn copy_object_meta(
+        &self,
+        request: Request<CopyObjectMetaRequest>,
+    ) -> Result<Response<CopyObjectMetaResponse>, Status> {
+        let req = request.into_inner();
+
+        // Read source ObjectMeta from local store
+        let src_key = MetadataKey::object_meta(&req.source_bucket, &req.source_key);
+        let value = self
+            .meta_store
+            .get(&src_key)
+            .ok_or_else(|| Status::not_found("source object not found on this OSD"))?;
+
+        let mut object = ObjectMeta::decode(&value[..]).map_err(|e| {
+            Status::internal(format!("failed to decode source object metadata: {e}"))
+        })?;
+
+        // Update metadata fields for the destination key
+        let now = Self::current_timestamp();
+        object.bucket = req.dest_bucket.clone();
+        object.key = req.dest_key.clone();
+        object.created_at = now;
+        object.modified_at = now;
+        // Generate a new ETag based on object_id + timestamp so dest has its own identity
+        object.etag = format!("{:x}", Uuid::new_v4().as_u128());
+
+        // Write dest ObjectMeta
+        let dst_key = MetadataKey::object_meta(&req.dest_bucket, &req.dest_key);
+        let dest_bytes = object.encode_to_vec();
+        self.meta_store
+            .put(dst_key, dest_bytes)
+            .map_err(|e| Status::internal(format!("failed to store dest object metadata: {e}")))?;
+
+        info!(
+            "Copied object metadata: {}/{} -> {}/{}",
+            req.source_bucket, req.source_key, req.dest_bucket, req.dest_key
+        );
+
+        Ok(Response::new(CopyObjectMetaResponse {
+            object: Some(object),
+        }))
+    }
+
+    type StreamListObjectsMetaStream =
+        Pin<Box<dyn Stream<Item = Result<ListObjectsMetaChunk, Status>> + Send + 'static>>;
+
+    async fn stream_list_objects_meta(
+        &self,
+        request: Request<ListObjectsMetaRequest>,
+    ) -> Result<Response<Self::StreamListObjectsMetaStream>, Status> {
+        const CHUNK_SIZE: usize = 500;
+
+        let req = request.into_inner();
+        let prefix = MetadataKey::object_meta_prefix(&req.bucket);
+        let entries = self.meta_store.scan_prefix(&prefix);
+
+        let mut chunks: Vec<ListObjectsMetaChunk> = Vec::new();
+        let mut batch: Vec<ObjectMeta> = Vec::with_capacity(CHUNK_SIZE);
+
+        for (meta_key, value) in entries {
+            if let Some((_bucket, key)) = meta_key.parse_object_meta() {
+                // Apply start_after / continuation_token cursor
+                if !req.start_after.is_empty() && key <= req.start_after {
+                    continue;
+                }
+                if !req.continuation_token.is_empty() && key <= req.continuation_token {
+                    continue;
+                }
+                // Apply prefix filter
+                if !req.prefix.is_empty() && !key.starts_with(&req.prefix) {
+                    continue;
+                }
+
+                if let Ok(object) = ObjectMeta::decode(&value[..]) {
+                    batch.push(object);
+
+                    if batch.len() >= CHUNK_SIZE {
+                        let cursor = key.clone();
+                        chunks.push(ListObjectsMetaChunk {
+                            objects: std::mem::take(&mut batch),
+                            next_start_after: cursor,
+                            is_last: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Emit the final (possibly partial) batch
+        chunks.push(ListObjectsMetaChunk {
+            objects: batch,
+            next_start_after: String::new(),
+            is_last: true,
+        });
+
+        let stream = futures::stream::iter(chunks.into_iter().map(Ok));
+        Ok(Response::new(Box::pin(stream)))
     }
 }

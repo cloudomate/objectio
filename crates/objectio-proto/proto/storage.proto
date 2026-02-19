@@ -39,6 +39,12 @@ service StorageService {
 
     // List objects by prefix (for ListObjects operation)
     rpc ListObjectsMeta(ListObjectsMetaRequest) returns (ListObjectsMetaResponse);
+
+    // Copy object metadata to a new key (fast-path; does not move shard data)
+    rpc CopyObjectMeta(CopyObjectMetaRequest) returns (CopyObjectMetaResponse);
+
+    // Stream object metadata by prefix (for large-scale listing)
+    rpc StreamListObjectsMeta(ListObjectsMetaRequest) returns (stream ListObjectsMetaChunk);
 }
 
 // Shard identifier
@@ -214,4 +220,24 @@ message ListObjectsMetaResponse {
     string next_continuation_token = 2;
     bool is_truncated = 3;
     uint32 key_count = 4;
+}
+
+// Copy object metadata request (fast-path rename; shard data stays in place)
+message CopyObjectMetaRequest {
+    string source_bucket = 1;
+    string source_key    = 2;
+    string dest_bucket   = 3;
+    string dest_key      = 4;
+}
+
+message CopyObjectMetaResponse {
+    objectio.metadata.ObjectMeta object = 1;
+}
+
+// Streaming list chunk (one message per batch of objects)
+message ListObjectsMetaChunk {
+    repeated objectio.metadata.ObjectMeta objects = 1;
+    // Cursor for the next chunk; empty on the last chunk
+    string next_start_after = 2;
+    bool   is_last          = 3;
 }

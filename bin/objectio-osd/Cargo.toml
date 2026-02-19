@@ -29,4 +29,5 @@ parking_lot = { workspace = true }
 crc32c = { workspace = true }
 serde = { workspace = true }
 prost = { workspace = true }
+futures = { workspace = true }
 toml = "0.8"

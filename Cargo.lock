@@ -1812,6 +1812,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectio-delta-sharing"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "chrono",
+ "hex",
+ "objectio-auth",
+ "objectio-common",
+ "objectio-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tonic",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "objectio-erasure"
 version = "0.1.0"
 dependencies = [
@@ -1844,6 +1863,7 @@ dependencies = [
  "objectio-auth",
  "objectio-client",
  "objectio-common",
+ "objectio-delta-sharing",
  "objectio-erasure",
  "objectio-iceberg",
  "objectio-proto",
@@ -1921,6 +1941,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tonic",
  "tracing",
@@ -1957,6 +1978,7 @@ dependencies = [
  "clap",
  "config",
  "crc32c",
+ "futures",
  "hex",
  "objectio-block",
  "objectio-common",

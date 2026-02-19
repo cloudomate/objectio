@@ -450,3 +450,39 @@ pub async fn delete_object_meta_from_osd(
 
     Ok(())
 }
+
+/// Fast-path metadata-only copy: copies ObjectMeta on the same OSD without moving shard data.
+///
+/// The source and destination must resolve to the same OSD (verified by caller). The shards
+/// referenced by the ObjectMeta are not touched; both source and destination will reference the
+/// same physical shards until the source ObjectMeta is deleted by a subsequent DeleteObject.
+pub async fn copy_object_meta_on_osd(
+    pool: &OsdPool,
+    osd_placement: &NodePlacement,
+    source_bucket: &str,
+    source_key: &str,
+    dest_bucket: &str,
+    dest_key: &str,
+) -> Result<objectio_proto::metadata::ObjectMeta, OsdPoolError> {
+    use objectio_proto::storage::CopyObjectMetaRequest;
+
+    let mut client = pool.get_client_for_placement(osd_placement).await?;
+
+    let request = CopyObjectMetaRequest {
+        source_bucket: source_bucket.to_string(),
+        source_key: source_key.to_string(),
+        dest_bucket: dest_bucket.to_string(),
+        dest_key: dest_key.to_string(),
+    };
+
+    let future = client.copy_object_meta(request);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), future)
+        .await
+        .map_err(|_| OsdPoolError::ConnectionFailed("copy_object_meta timeout".to_string()))?
+        .map_err(|e| OsdPoolError::ConnectionFailed(e.to_string()))?;
+
+    response
+        .into_inner()
+        .object
+        .ok_or_else(|| OsdPoolError::ConnectionFailed("missing object in CopyObjectMetaResponse".to_string()))
+}

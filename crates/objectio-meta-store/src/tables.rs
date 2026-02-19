@@ -31,3 +31,11 @@ pub const ICEBERG_NAMESPACES: TableDefinition<&str, &[u8]> =
 pub const ICEBERG_TABLES: TableDefinition<&str, &[u8]> = TableDefinition::new("iceberg_tables");
 // Key: filter_id, Value: bincode-encoded StoredDataFilter
 pub const DATA_FILTERS: TableDefinition<&str, &[u8]> = TableDefinition::new("data_filters");
+
+// Delta Sharing
+// Key: share name, Value: prost-encoded DeltaShareEntry
+pub const DELTA_SHARES: TableDefinition<&str, &[u8]> = TableDefinition::new("delta_shares");
+// Key: "{share}\x00{schema}\x00{table_name}", Value: prost-encoded DeltaShareTableEntry
+pub const DELTA_TABLES: TableDefinition<&str, &[u8]> = TableDefinition::new("delta_tables");
+// Key: recipient name, Value: prost-encoded DeltaRecipientEntry
+pub const DELTA_RECIPIENTS: TableDefinition<&str, &[u8]> = TableDefinition::new("delta_recipients");

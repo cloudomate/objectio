@@ -80,6 +80,19 @@ service MetadataService {
     rpc ListDataFilters(ListDataFiltersRequest) returns (ListDataFiltersResponse);
     rpc DeleteDataFilter(DeleteDataFilterRequest) returns (DeleteDataFilterResponse);
     rpc GetDataFiltersForPrincipal(GetDataFiltersForPrincipalRequest) returns (ListDataFiltersResponse);
+
+    // Delta Sharing protocol — share, schema (namespace), table, and recipient management
+    rpc DeltaCreateShare(DeltaCreateShareRequest)         returns (DeltaCreateShareResponse);
+    rpc DeltaGetShare(DeltaGetShareRequest)               returns (DeltaGetShareResponse);
+    rpc DeltaListShares(DeltaListSharesRequest)           returns (DeltaListSharesResponse);
+    rpc DeltaDropShare(DeltaDropShareRequest)             returns (DeltaDropShareResponse);
+    rpc DeltaAddTable(DeltaAddTableRequest)               returns (DeltaAddTableResponse);
+    rpc DeltaRemoveTable(DeltaRemoveTableRequest)         returns (DeltaRemoveTableResponse);
+    rpc DeltaListTables(DeltaListTablesRequest)           returns (DeltaListTablesResponse);
+    rpc DeltaCreateRecipient(DeltaCreateRecipientRequest) returns (DeltaCreateRecipientResponse);
+    rpc DeltaGetRecipientByToken(DeltaGetRecipientByTokenRequest) returns (DeltaGetRecipientByTokenResponse);
+    rpc DeltaListRecipients(DeltaListRecipientsRequest)   returns (DeltaListRecipientsResponse);
+    rpc DeltaDropRecipient(DeltaDropRecipientRequest)     returns (DeltaDropRecipientResponse);
 }
 
 // Bucket metadata
@@ -877,4 +890,133 @@ message GetDataFiltersForPrincipalRequest {
     string table_name = 2;
     string principal_arn = 3;
     repeated string group_arns = 4;
+}
+
+// ============================================================
+// Delta Sharing Protocol Messages
+// ============================================================
+
+// A Share is a named collection of Iceberg namespace+table pairs shared with recipients.
+message DeltaShareEntry {
+    string name    = 1;
+    string comment = 2;
+    int64  created_at = 3;
+}
+
+// A table inside a share. Schema maps to an Iceberg namespace; name maps to an Iceberg table.
+message DeltaShareTableEntry {
+    string share              = 1;
+    string schema             = 2;   // Iceberg namespace (first-level)
+    string table_name         = 3;   // Iceberg table name
+    string share_id           = 4;   // stable UUID for delta-sharing responses
+}
+
+// A recipient identified by a bearer token (stored as bcrypt hash).
+message DeltaRecipientEntry {
+    string name          = 1;
+    // bcrypt hash of the bearer token; the raw token is returned only once at creation time
+    string token_hash    = 2;
+    repeated string shares = 3;
+    int64  created_at    = 4;
+}
+
+// ---- Share RPCs ----
+
+message DeltaCreateShareRequest {
+    string name    = 1;
+    string comment = 2;
+}
+message DeltaCreateShareResponse {
+    DeltaShareEntry share = 1;
+}
+
+message DeltaGetShareRequest {
+    string name = 1;
+}
+message DeltaGetShareResponse {
+    DeltaShareEntry share = 1;
+}
+
+message DeltaListSharesRequest {
+    uint32 max_results       = 1;
+    string page_token        = 2;
+}
+message DeltaListSharesResponse {
+    repeated DeltaShareEntry shares = 1;
+    string next_page_token          = 2;
+}
+
+message DeltaDropShareRequest {
+    string name = 1;
+}
+message DeltaDropShareResponse {
+    bool success = 1;
+}
+
+// ---- Table RPCs ----
+
+message DeltaAddTableRequest {
+    string share      = 1;
+    string schema     = 2;
+    string table_name = 3;
+}
+message DeltaAddTableResponse {
+    DeltaShareTableEntry table = 1;
+}
+
+message DeltaRemoveTableRequest {
+    string share      = 1;
+    string schema     = 2;
+    string table_name = 3;
+}
+message DeltaRemoveTableResponse {
+    bool success = 1;
+}
+
+message DeltaListTablesRequest {
+    string share        = 1;
+    string schema       = 2;   // optional: filter by schema
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message DeltaListTablesResponse {
+    repeated DeltaShareTableEntry tables = 1;
+    string next_page_token               = 2;
+}
+
+// ---- Recipient RPCs ----
+
+message DeltaCreateRecipientRequest {
+    string name             = 1;
+    repeated string shares  = 2;
+}
+message DeltaCreateRecipientResponse {
+    DeltaRecipientEntry recipient  = 1;
+    // Raw bearer token (returned once; not stored in plain text)
+    string              raw_token  = 2;
+}
+
+message DeltaGetRecipientByTokenRequest {
+    // Raw bearer token presented in the Authorization header
+    string raw_token = 1;
+}
+message DeltaGetRecipientByTokenResponse {
+    DeltaRecipientEntry recipient = 1;
+    bool                found     = 2;
+}
+
+message DeltaListRecipientsRequest {
+    uint32 max_results = 1;
+    string page_token  = 2;
+}
+message DeltaListRecipientsResponse {
+    repeated DeltaRecipientEntry recipients = 1;
+    string next_page_token                  = 2;
+}
+
+message DeltaDropRecipientRequest {
+    string name = 1;
+}
+message DeltaDropRecipientResponse {
+    bool success = 1;
 }

@@ -9,6 +9,8 @@ use objectio_placement::{
     Crush2, PlacementTemplate, ShardRole,
     topology::{ClusterTopology, DiskInfo, FailureDomainInfo, NodeInfo},
 };
+use sha2::{Digest, Sha256};
+
 use objectio_proto::metadata::{
     AbortMultipartUploadRequest,
     AbortMultipartUploadResponse,
@@ -135,6 +137,32 @@ use objectio_proto::metadata::{
     UserMeta,
     UserStatus,
     VersioningState,
+    // Delta Sharing types
+    DeltaAddTableRequest,
+    DeltaAddTableResponse,
+    DeltaCreateRecipientRequest,
+    DeltaCreateRecipientResponse,
+    DeltaCreateShareRequest,
+    DeltaCreateShareResponse,
+    DeltaDropRecipientRequest,
+    DeltaDropRecipientResponse,
+    DeltaDropShareRequest,
+    DeltaDropShareResponse,
+    DeltaGetRecipientByTokenRequest,
+    DeltaGetRecipientByTokenResponse,
+    DeltaGetShareRequest,
+    DeltaGetShareResponse,
+    DeltaListRecipientsRequest,
+    DeltaListRecipientsResponse,
+    DeltaListSharesRequest,
+    DeltaListSharesResponse,
+    DeltaListTablesRequest,
+    DeltaListTablesResponse,
+    DeltaRecipientEntry,
+    DeltaRemoveTableRequest,
+    DeltaRemoveTableResponse,
+    DeltaShareEntry,
+    DeltaShareTableEntry,
     metadata_service_server::MetadataService,
 };
 use parking_lot::RwLock;
@@ -182,6 +210,14 @@ pub struct MetaService {
     iceberg_namespaces: RwLock<HashMap<String, HashMap<String, String>>>,
     /// Iceberg: table key ("ns\0table") -> IcebergTableEntry
     iceberg_tables: RwLock<HashMap<String, IcebergTableEntry>>,
+    /// Delta Sharing: share name -> DeltaShareEntry
+    delta_shares: RwLock<HashMap<String, DeltaShareEntry>>,
+    /// Delta Sharing: "{share}\x00{schema}\x00{table}" -> DeltaShareTableEntry
+    delta_tables: RwLock<HashMap<String, DeltaShareTableEntry>>,
+    /// Delta Sharing: recipient name -> DeltaRecipientEntry
+    delta_recipients: RwLock<HashMap<String, DeltaRecipientEntry>>,
+    /// Delta Sharing: token_hash -> recipient name (reverse index for auth lookups)
+    delta_token_index: RwLock<HashMap<String, String>>,
     /// Persistent store (None = in-memory only)
     store: Option<Arc<MetaStore>>,
 }
@@ -249,6 +285,10 @@ impl MetaService {
             data_filters: RwLock::new(HashMap::new()),
             iceberg_namespaces: RwLock::new(HashMap::new()),
             iceberg_tables: RwLock::new(HashMap::new()),
+            delta_shares: RwLock::new(HashMap::new()),
+            delta_tables: RwLock::new(HashMap::new()),
+            delta_recipients: RwLock::new(HashMap::new()),
+            delta_token_index: RwLock::new(HashMap::new()),
             store: None,
         }
     }
@@ -435,6 +475,59 @@ impl MetaService {
                 info!("Loaded {} iceberg tables from store", tbl_map.len());
             }
             Err(e) => error!("Failed to load iceberg tables: {}", e),
+        }
+
+        // Delta Sharing: shares
+        match store.load_delta_shares() {
+            Ok(entries) => {
+                let mut map = self.delta_shares.write();
+                for (key, bytes) in entries {
+                    match DeltaShareEntry::decode(bytes.as_slice()) {
+                        Ok(entry) => {
+                            map.insert(key, entry);
+                        }
+                        Err(e) => error!("Failed to decode delta share '{}': {}", key, e),
+                    }
+                }
+                info!("Loaded {} delta shares from store", map.len());
+            }
+            Err(e) => error!("Failed to load delta shares: {}", e),
+        }
+
+        // Delta Sharing: tables
+        match store.load_delta_tables() {
+            Ok(entries) => {
+                let mut map = self.delta_tables.write();
+                for (key, bytes) in entries {
+                    match DeltaShareTableEntry::decode(bytes.as_slice()) {
+                        Ok(entry) => {
+                            map.insert(key, entry);
+                        }
+                        Err(e) => error!("Failed to decode delta table '{}': {}", key, e),
+                    }
+                }
+                info!("Loaded {} delta tables from store", map.len());
+            }
+            Err(e) => error!("Failed to load delta tables: {}", e),
+        }
+
+        // Delta Sharing: recipients (rebuild token index)
+        match store.load_delta_recipients() {
+            Ok(entries) => {
+                let mut map = self.delta_recipients.write();
+                let mut token_index = self.delta_token_index.write();
+                for (key, bytes) in entries {
+                    match DeltaRecipientEntry::decode(bytes.as_slice()) {
+                        Ok(entry) => {
+                            token_index.insert(entry.token_hash.clone(), key.clone());
+                            map.insert(key, entry);
+                        }
+                        Err(e) => error!("Failed to decode delta recipient '{}': {}", key, e),
+                    }
+                }
+                info!("Loaded {} delta recipients from store", map.len());
+            }
+            Err(e) => error!("Failed to load delta recipients: {}", e),
         }
     }
 
@@ -2857,5 +2950,241 @@ impl MetadataService for MetaService {
             .collect();
 
         Ok(Response::new(ListDataFiltersResponse { filters }))
+    }
+
+    // ============================================================
+    // Delta Sharing Protocol
+    // ============================================================
+
+    async fn delta_create_share(
+        &self,
+        request: Request<DeltaCreateShareRequest>,
+    ) -> Result<Response<DeltaCreateShareResponse>, Status> {
+        let req = request.into_inner();
+        if req.name.is_empty() {
+            return Err(Status::invalid_argument("share name is required"));
+        }
+        let now = Self::current_timestamp();
+        let entry = DeltaShareEntry {
+            name: req.name.clone(),
+            comment: req.comment,
+            created_at: now as i64,
+        };
+        {
+            let mut shares = self.delta_shares.write();
+            if shares.contains_key(&req.name) {
+                return Err(Status::already_exists("share already exists"));
+            }
+            shares.insert(req.name.clone(), entry.clone());
+        }
+        if let Some(store) = &self.store {
+            store.put_delta_share(&req.name, &entry.encode_to_vec());
+        }
+        info!("Created Delta share: {}", req.name);
+        Ok(Response::new(DeltaCreateShareResponse { share: Some(entry) }))
+    }
+
+    async fn delta_get_share(
+        &self,
+        request: Request<DeltaGetShareRequest>,
+    ) -> Result<Response<DeltaGetShareResponse>, Status> {
+        let req = request.into_inner();
+        let entry = self
+            .delta_shares
+            .read()
+            .get(&req.name)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("share '{}' not found", req.name)))?;
+        Ok(Response::new(DeltaGetShareResponse { share: Some(entry) }))
+    }
+
+    async fn delta_list_shares(
+        &self,
+        _request: Request<DeltaListSharesRequest>,
+    ) -> Result<Response<DeltaListSharesResponse>, Status> {
+        let shares: Vec<DeltaShareEntry> = self.delta_shares.read().values().cloned().collect();
+        Ok(Response::new(DeltaListSharesResponse {
+            shares,
+            next_page_token: String::new(),
+        }))
+    }
+
+    async fn delta_drop_share(
+        &self,
+        request: Request<DeltaDropShareRequest>,
+    ) -> Result<Response<DeltaDropShareResponse>, Status> {
+        let req = request.into_inner();
+        let removed = self.delta_shares.write().remove(&req.name).is_some();
+        if removed {
+            if let Some(store) = &self.store {
+                store.delete_delta_share(&req.name);
+            }
+            // Remove all tables in this share
+            self.delta_tables
+                .write()
+                .retain(|k, _| !k.starts_with(&format!("{}\x00", req.name)));
+            info!("Dropped Delta share: {}", req.name);
+        }
+        Ok(Response::new(DeltaDropShareResponse { success: removed }))
+    }
+
+    async fn delta_add_table(
+        &self,
+        request: Request<DeltaAddTableRequest>,
+    ) -> Result<Response<DeltaAddTableResponse>, Status> {
+        let req = request.into_inner();
+        if !self.delta_shares.read().contains_key(&req.share) {
+            return Err(Status::not_found(format!("share '{}' not found", req.share)));
+        }
+        let table_key = format!("{}\x00{}\x00{}", req.share, req.schema, req.table_name);
+        let share_id = Uuid::new_v4().to_string();
+        let entry = DeltaShareTableEntry {
+            share: req.share.clone(),
+            schema: req.schema.clone(),
+            table_name: req.table_name.clone(),
+            share_id: share_id.clone(),
+        };
+        self.delta_tables.write().insert(table_key.clone(), entry.clone());
+        if let Some(store) = &self.store {
+            store.put_delta_table(&table_key, &entry.encode_to_vec());
+        }
+        info!("Added table {}.{} to Delta share {}", req.schema, req.table_name, req.share);
+        Ok(Response::new(DeltaAddTableResponse { table: Some(entry) }))
+    }
+
+    async fn delta_remove_table(
+        &self,
+        request: Request<DeltaRemoveTableRequest>,
+    ) -> Result<Response<DeltaRemoveTableResponse>, Status> {
+        let req = request.into_inner();
+        let table_key = format!("{}\x00{}\x00{}", req.share, req.schema, req.table_name);
+        let removed = self.delta_tables.write().remove(&table_key).is_some();
+        if removed {
+            if let Some(store) = &self.store {
+                store.delete_delta_table(&table_key);
+            }
+        }
+        Ok(Response::new(DeltaRemoveTableResponse { success: removed }))
+    }
+
+    async fn delta_list_tables(
+        &self,
+        request: Request<DeltaListTablesRequest>,
+    ) -> Result<Response<DeltaListTablesResponse>, Status> {
+        let req = request.into_inner();
+        let tables: Vec<DeltaShareTableEntry> = self
+            .delta_tables
+            .read()
+            .iter()
+            .filter(|(k, _)| {
+                k.starts_with(&format!("{}\x00", req.share))
+                    && (req.schema.is_empty()
+                        || k.starts_with(&format!("{}\x00{}\x00", req.share, req.schema)))
+            })
+            .map(|(_, v)| v.clone())
+            .collect();
+        Ok(Response::new(DeltaListTablesResponse {
+            tables,
+            next_page_token: String::new(),
+        }))
+    }
+
+    async fn delta_create_recipient(
+        &self,
+        request: Request<DeltaCreateRecipientRequest>,
+    ) -> Result<Response<DeltaCreateRecipientResponse>, Status> {
+        let req = request.into_inner();
+        if req.name.is_empty() {
+            return Err(Status::invalid_argument("recipient name is required"));
+        }
+        // Generate a cryptographically random bearer token (32 bytes → 64 hex chars)
+        let raw_token = {
+            use rand::RngCore;
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            hex::encode(bytes)
+        };
+        // Store SHA-256 hash of the token (never store raw)
+        let token_hash = hex::encode(Sha256::digest(raw_token.as_bytes()));
+
+        let now = Self::current_timestamp();
+        let entry = DeltaRecipientEntry {
+            name: req.name.clone(),
+            token_hash: token_hash.clone(),
+            shares: req.shares,
+            created_at: now as i64,
+        };
+
+        {
+            let mut recipients = self.delta_recipients.write();
+            if recipients.contains_key(&req.name) {
+                return Err(Status::already_exists("recipient already exists"));
+            }
+            recipients.insert(req.name.clone(), entry.clone());
+        }
+        self.delta_token_index
+            .write()
+            .insert(token_hash.clone(), req.name.clone());
+
+        if let Some(store) = &self.store {
+            store.put_delta_recipient(&req.name, &entry.encode_to_vec());
+        }
+        info!("Created Delta recipient: {}", req.name);
+        Ok(Response::new(DeltaCreateRecipientResponse {
+            recipient: Some(entry),
+            raw_token,
+        }))
+    }
+
+    async fn delta_get_recipient_by_token(
+        &self,
+        request: Request<DeltaGetRecipientByTokenRequest>,
+    ) -> Result<Response<DeltaGetRecipientByTokenResponse>, Status> {
+        let req = request.into_inner();
+        let token_hash = hex::encode(Sha256::digest(req.raw_token.as_bytes()));
+        let recipient_name = self.delta_token_index.read().get(&token_hash).cloned();
+        match recipient_name {
+            Some(name) => {
+                let entry = self.delta_recipients.read().get(&name).cloned();
+                Ok(Response::new(DeltaGetRecipientByTokenResponse {
+                    recipient: entry,
+                    found: true,
+                }))
+            }
+            None => Ok(Response::new(DeltaGetRecipientByTokenResponse {
+                recipient: None,
+                found: false,
+            })),
+        }
+    }
+
+    async fn delta_list_recipients(
+        &self,
+        _request: Request<DeltaListRecipientsRequest>,
+    ) -> Result<Response<DeltaListRecipientsResponse>, Status> {
+        let recipients: Vec<DeltaRecipientEntry> =
+            self.delta_recipients.read().values().cloned().collect();
+        Ok(Response::new(DeltaListRecipientsResponse {
+            recipients,
+            next_page_token: String::new(),
+        }))
+    }
+
+    async fn delta_drop_recipient(
+        &self,
+        request: Request<DeltaDropRecipientRequest>,
+    ) -> Result<Response<DeltaDropRecipientResponse>, Status> {
+        let req = request.into_inner();
+        let entry = self.delta_recipients.write().remove(&req.name);
+        let removed = entry.is_some();
+        if let Some(e) = entry {
+            // Remove from token index
+            self.delta_token_index.write().remove(&e.token_hash);
+            if let Some(store) = &self.store {
+                store.delete_delta_recipient(&req.name);
+            }
+            info!("Dropped Delta recipient: {}", req.name);
+        }
+        Ok(Response::new(DeltaDropRecipientResponse { success: removed }))
     }
 }

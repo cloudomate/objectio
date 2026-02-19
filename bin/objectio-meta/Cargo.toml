@@ -31,3 +31,4 @@ xxhash-rust = { workspace = true }
 md5 = "0.7"
 prost = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }

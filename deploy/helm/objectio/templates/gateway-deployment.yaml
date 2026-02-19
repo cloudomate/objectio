@@ -30,9 +30,19 @@ spec:
             - {{ .Values.ec.k | quote }}
             - "--ec-m"
             - {{ .Values.ec.m | quote }}
+            - "--warehouse-location"
+            - {{ .Values.gateway.warehouseLocation | quote }}
+            - "--region"
+            - {{ .Values.gateway.region | quote }}
             {{- if .Values.gateway.noAuth }}
             - "--no-auth"
             {{- end }}
+            - "--external-endpoint"
+            - {{ .Values.gateway.deltaSharing.externalEndpoint | quote }}
+            - "--delta-access-key-id"
+            - {{ .Values.gateway.deltaSharing.accessKeyId | quote }}
+            - "--delta-secret-key"
+            - {{ .Values.gateway.deltaSharing.secretKey | quote }}
             - "--log-level"
             - {{ .Values.gateway.logLevel | quote }}
           ports:

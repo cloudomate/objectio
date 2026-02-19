@@ -346,6 +346,200 @@ impl ScatterGatherEngine {
         })
     }
 
+    /// Execute a streaming scatter-gather list operation.
+    ///
+    /// Opens `StreamListObjectsMeta` streams on all listing nodes in parallel and k-way merges
+    /// the resulting chunks, yielding merged `ObjectMeta` items via the returned channel.
+    /// The caller receives a `tokio::sync::mpsc::Receiver<Result<Vec<ObjectMeta>, ScatterGatherError>>`.
+    /// Each message is a sorted batch of objects. The channel is closed when all OSDs are exhausted.
+    #[allow(dead_code)]
+    pub async fn stream_list_objects(
+        &self,
+        meta_client: &mut MetadataServiceClient<Channel>,
+        bucket: &str,
+        prefix: &str,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<ObjectMeta>, ScatterGatherError>>, ScatterGatherError>
+    {
+        let nodes_resp = meta_client
+            .get_listing_nodes(GetListingNodesRequest {
+                bucket: bucket.to_string(),
+            })
+            .await?;
+        let nodes = nodes_resp.into_inner().nodes;
+
+        if nodes.is_empty() {
+            return Err(ScatterGatherError::NoNodesAvailable);
+        }
+
+        debug!(
+            "Streaming scatter-gather: {} nodes, bucket={}, prefix={}",
+            nodes.len(),
+            bucket,
+            prefix
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<ObjectMeta>, ScatterGatherError>>(8);
+
+        let osd_pool = self.osd_pool.clone();
+        let bucket = bucket.to_string();
+        let prefix = prefix.to_string();
+
+        tokio::spawn(async move {
+            // Open a StreamListObjectsMeta stream on each OSD node
+            let stream_futs: Vec<_> = nodes
+                .into_iter()
+                .map(|node| {
+                    let osd_pool = osd_pool.clone();
+                    let bucket = bucket.clone();
+                    let prefix = prefix.clone();
+                    async move {
+                        let client_result =
+                            osd_pool.get_or_connect(&node.node_id, &node.address).await;
+                        let mut client = match client_result {
+                            Ok(c) => c,
+                            Err(e) => {
+                                return Err((node.shard_id, format!("Connection failed: {e}")));
+                            }
+                        };
+                        let req = ListObjectsMetaRequest {
+                            bucket,
+                            prefix,
+                            start_after: String::new(),
+                            max_keys: 0,
+                            continuation_token: String::new(),
+                        };
+                        match client.stream_list_objects_meta(req).await {
+                            Ok(resp) => Ok((node.shard_id, resp.into_inner())),
+                            Err(e) => Err((node.shard_id, e.to_string())),
+                        }
+                    }
+                })
+                .collect();
+
+            // Collect all open streams; skip failed nodes (partial results)
+            let results = futures::future::join_all(stream_futs).await;
+            let mut shard_streams: Vec<_> = results
+                .into_iter()
+                .filter_map(|r| match r {
+                    Ok(s) => Some(s),
+                    Err((shard_id, msg)) => {
+                        warn!("Streaming: shard {} unavailable: {}", shard_id, msg);
+                        None
+                    }
+                })
+                .collect();
+
+            if shard_streams.is_empty() {
+                let _ = tx.send(Err(ScatterGatherError::AllShardsFailed)).await;
+                return;
+            }
+
+            // Drain and merge: repeatedly take the next chunk from each stream
+            // and merge sort the objects, sending batches to the caller.
+            //
+            // Per-shard buffer of objects waiting to be merged.
+            let mut buffers: Vec<(u32, Vec<ObjectMeta>)> = shard_streams
+                .iter()
+                .map(|(id, _)| (*id, Vec::new()))
+                .collect();
+            let mut streams_done = vec![false; shard_streams.len()];
+
+            // Fill all buffers with the first chunk from each stream
+            for (i, (_, stream)) in shard_streams.iter_mut().enumerate() {
+                match stream.next().await {
+                    Some(Ok(chunk)) => buffers[i].1 = chunk.objects,
+                    Some(Err(e)) => {
+                        warn!("Stream error on shard {}: {}", buffers[i].0, e);
+                        streams_done[i] = true;
+                    }
+                    None => streams_done[i] = true,
+                }
+            }
+
+            const MERGE_BATCH: usize = 1000;
+            let mut merged: Vec<ObjectMeta> = Vec::with_capacity(MERGE_BATCH);
+            let mut positions: Vec<usize> = vec![0; buffers.len()];
+
+            loop {
+                // Find the shard with the smallest next key (k-way merge)
+                let mut min_key: Option<&str> = None;
+                let mut min_idx = usize::MAX;
+
+                for (i, (_, buf)) in buffers.iter().enumerate() {
+                    if let Some(obj) = buf.get(positions[i]) {
+                        match min_key {
+                            None => {
+                                min_key = Some(&obj.key);
+                                min_idx = i;
+                            }
+                            Some(k) if obj.key.as_str() < k => {
+                                min_key = Some(&obj.key);
+                                min_idx = i;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                if min_idx == usize::MAX {
+                    // All buffers empty: refill from streams
+                    let mut any_refilled = false;
+                    for (i, (_, stream)) in shard_streams.iter_mut().enumerate() {
+                        if streams_done[i] {
+                            continue;
+                        }
+                        if buffers[i].1.is_empty() || positions[i] >= buffers[i].1.len() {
+                            match stream.next().await {
+                                Some(Ok(chunk)) => {
+                                    buffers[i].1 = chunk.objects;
+                                    positions[i] = 0;
+                                    if !buffers[i].1.is_empty() {
+                                        any_refilled = true;
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    warn!("Stream error on shard {}: {}", buffers[i].0, e);
+                                    streams_done[i] = true;
+                                }
+                                None => {
+                                    streams_done[i] = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if !any_refilled {
+                        break; // All streams exhausted
+                    }
+                    continue; // Retry merge with refilled buffers
+                }
+
+                // Consume the minimum object
+                let obj = buffers[min_idx].1[positions[min_idx]].clone();
+                positions[min_idx] += 1;
+
+                // Deduplicate (same key can appear on multiple shards)
+                if merged.last().map(|o: &ObjectMeta| &o.key) != Some(&obj.key) {
+                    merged.push(obj);
+                }
+
+                if merged.len() >= MERGE_BATCH {
+                    if tx.send(Ok(std::mem::take(&mut merged))).await.is_err() {
+                        return; // Receiver dropped
+                    }
+                    merged = Vec::with_capacity(MERGE_BATCH);
+                }
+            }
+
+            // Flush remainder
+            if !merged.is_empty() {
+                let _ = tx.send(Ok(merged)).await;
+            }
+        });
+
+        Ok(rx)
+    }
+
     /// Query all shards in parallel
     async fn query_shards(
         &self,
