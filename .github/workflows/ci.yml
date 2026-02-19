@@ -174,4 +174,8 @@ jobs:
           helm package deploy/helm/objectio \
             --version "$VERSION" \
             --app-version "$APP_VERSION"
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
           helm push objectio-*.tgz oci://${{ env.REGISTRY }}
