@@ -358,8 +358,10 @@ impl ScatterGatherEngine {
         meta_client: &mut MetadataServiceClient<Channel>,
         bucket: &str,
         prefix: &str,
-    ) -> Result<tokio::sync::mpsc::Receiver<Result<Vec<ObjectMeta>, ScatterGatherError>>, ScatterGatherError>
-    {
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<Result<Vec<ObjectMeta>, ScatterGatherError>>,
+        ScatterGatherError,
+    > {
         let nodes_resp = meta_client
             .get_listing_nodes(GetListingNodesRequest {
                 bucket: bucket.to_string(),

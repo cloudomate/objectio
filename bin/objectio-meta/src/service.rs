@@ -49,6 +49,32 @@ use objectio_proto::metadata::{
     DeleteObjectResponse,
     DeleteUserRequest,
     DeleteUserResponse,
+    // Delta Sharing types
+    DeltaAddTableRequest,
+    DeltaAddTableResponse,
+    DeltaCreateRecipientRequest,
+    DeltaCreateRecipientResponse,
+    DeltaCreateShareRequest,
+    DeltaCreateShareResponse,
+    DeltaDropRecipientRequest,
+    DeltaDropRecipientResponse,
+    DeltaDropShareRequest,
+    DeltaDropShareResponse,
+    DeltaGetRecipientByTokenRequest,
+    DeltaGetRecipientByTokenResponse,
+    DeltaGetShareRequest,
+    DeltaGetShareResponse,
+    DeltaListRecipientsRequest,
+    DeltaListRecipientsResponse,
+    DeltaListSharesRequest,
+    DeltaListSharesResponse,
+    DeltaListTablesRequest,
+    DeltaListTablesResponse,
+    DeltaRecipientEntry,
+    DeltaRemoveTableRequest,
+    DeltaRemoveTableResponse,
+    DeltaShareEntry,
+    DeltaShareTableEntry,
     ErasureType,
     GetAccessKeyForAuthRequest,
     GetAccessKeyForAuthResponse,
@@ -137,32 +163,6 @@ use objectio_proto::metadata::{
     UserMeta,
     UserStatus,
     VersioningState,
-    // Delta Sharing types
-    DeltaAddTableRequest,
-    DeltaAddTableResponse,
-    DeltaCreateRecipientRequest,
-    DeltaCreateRecipientResponse,
-    DeltaCreateShareRequest,
-    DeltaCreateShareResponse,
-    DeltaDropRecipientRequest,
-    DeltaDropRecipientResponse,
-    DeltaDropShareRequest,
-    DeltaDropShareResponse,
-    DeltaGetRecipientByTokenRequest,
-    DeltaGetRecipientByTokenResponse,
-    DeltaGetShareRequest,
-    DeltaGetShareResponse,
-    DeltaListRecipientsRequest,
-    DeltaListRecipientsResponse,
-    DeltaListSharesRequest,
-    DeltaListSharesResponse,
-    DeltaListTablesRequest,
-    DeltaListTablesResponse,
-    DeltaRecipientEntry,
-    DeltaRemoveTableRequest,
-    DeltaRemoveTableResponse,
-    DeltaShareEntry,
-    DeltaShareTableEntry,
     metadata_service_server::MetadataService,
 };
 use parking_lot::RwLock;
@@ -2981,7 +2981,9 @@ impl MetadataService for MetaService {
             store.put_delta_share(&req.name, &entry.encode_to_vec());
         }
         info!("Created Delta share: {}", req.name);
-        Ok(Response::new(DeltaCreateShareResponse { share: Some(entry) }))
+        Ok(Response::new(DeltaCreateShareResponse {
+            share: Some(entry),
+        }))
     }
 
     async fn delta_get_share(
@@ -3034,7 +3036,10 @@ impl MetadataService for MetaService {
     ) -> Result<Response<DeltaAddTableResponse>, Status> {
         let req = request.into_inner();
         if !self.delta_shares.read().contains_key(&req.share) {
-            return Err(Status::not_found(format!("share '{}' not found", req.share)));
+            return Err(Status::not_found(format!(
+                "share '{}' not found",
+                req.share
+            )));
         }
         let table_key = format!("{}\x00{}\x00{}", req.share, req.schema, req.table_name);
         let share_id = Uuid::new_v4().to_string();
@@ -3044,11 +3049,16 @@ impl MetadataService for MetaService {
             table_name: req.table_name.clone(),
             share_id: share_id.clone(),
         };
-        self.delta_tables.write().insert(table_key.clone(), entry.clone());
+        self.delta_tables
+            .write()
+            .insert(table_key.clone(), entry.clone());
         if let Some(store) = &self.store {
             store.put_delta_table(&table_key, &entry.encode_to_vec());
         }
-        info!("Added table {}.{} to Delta share {}", req.schema, req.table_name, req.share);
+        info!(
+            "Added table {}.{} to Delta share {}",
+            req.schema, req.table_name, req.share
+        );
         Ok(Response::new(DeltaAddTableResponse { table: Some(entry) }))
     }
 
@@ -3185,6 +3195,8 @@ impl MetadataService for MetaService {
             }
             info!("Dropped Delta recipient: {}", req.name);
         }
-        Ok(Response::new(DeltaDropRecipientResponse { success: removed }))
+        Ok(Response::new(DeltaDropRecipientResponse {
+            success: removed,
+        }))
     }
 }

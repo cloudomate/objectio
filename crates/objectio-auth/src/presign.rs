@@ -23,8 +23,16 @@ fn uri_encode(s: &str) -> String {
             }
             _ => {
                 out.push('%');
-                out.push(char::from_digit(u32::from(b >> 4), 16).unwrap().to_ascii_uppercase());
-                out.push(char::from_digit(u32::from(b & 0xf), 16).unwrap().to_ascii_uppercase());
+                out.push(
+                    char::from_digit(u32::from(b >> 4), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit(u32::from(b & 0xf), 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
             }
         }
     }
@@ -82,10 +90,7 @@ pub fn presign_get(
     let canonical_uri = format!(
         "/{}/{}",
         uri_encode(bucket),
-        key.split('/')
-            .map(uri_encode)
-            .collect::<Vec<_>>()
-            .join("/")
+        key.split('/').map(uri_encode).collect::<Vec<_>>().join("/")
     );
 
     // Canonical headers and signed headers

@@ -101,10 +101,16 @@ pub async fn list_shares(
     let items: Vec<Share> = all_shares
         .into_iter()
         .filter(|s| ctx.has_share(&s.name))
-        .map(|s| Share { name: s.name.clone(), id: Some(s.name) })
+        .map(|s| Share {
+            name: s.name.clone(),
+            id: Some(s.name),
+        })
         .collect();
 
-    Ok(Json(ListSharesResponse { items, next_page_token: None }))
+    Ok(Json(ListSharesResponse {
+        items,
+        next_page_token: None,
+    }))
 }
 
 /// GET /delta-sharing/v1/shares/{share}/schemas
@@ -125,10 +131,16 @@ pub async fn list_schemas(
     let items: Vec<Schema> = tables
         .into_iter()
         .filter(|t| seen.insert(t.schema.clone()))
-        .map(|t| Schema { name: t.schema, share: share.clone() })
+        .map(|t| Schema {
+            name: t.schema,
+            share: share.clone(),
+        })
         .collect();
 
-    Ok(Json(ListSchemasResponse { items, next_page_token: None }))
+    Ok(Json(ListSchemasResponse {
+        items,
+        next_page_token: None,
+    }))
 }
 
 /// GET /delta-sharing/v1/shares/{share}/schemas/{schema}/tables
@@ -149,12 +161,19 @@ pub async fn list_tables(
             name: t.table_name.clone(),
             schema: t.schema,
             share: t.share,
-            share_id: if t.share_id.is_empty() { None } else { Some(t.share_id) },
+            share_id: if t.share_id.is_empty() {
+                None
+            } else {
+                Some(t.share_id)
+            },
             id: Some(t.table_name),
         })
         .collect();
 
-    Ok(Json(ListTablesResponse { items, next_page_token: None }))
+    Ok(Json(ListTablesResponse {
+        items,
+        next_page_token: None,
+    }))
 }
 
 /// GET /delta-sharing/v1/shares/{share}/all-tables
@@ -175,12 +194,19 @@ pub async fn list_all_tables(
             name: t.table_name.clone(),
             schema: t.schema,
             share: t.share,
-            share_id: if t.share_id.is_empty() { None } else { Some(t.share_id) },
+            share_id: if t.share_id.is_empty() {
+                None
+            } else {
+                Some(t.share_id)
+            },
             id: Some(t.table_name),
         })
         .collect();
 
-    Ok(Json(ListTablesResponse { items, next_page_token: None }))
+    Ok(Json(ListTablesResponse {
+        items,
+        next_page_token: None,
+    }))
 }
 
 /// GET /delta-sharing/v1/shares/{share}/schemas/{schema}/tables/{table}/version
@@ -198,7 +224,9 @@ pub async fn get_table_version(
     validate_table_in_share(&state, &share, &schema, &table).await?;
 
     let version = get_snapshot_id(&state, &schema, &table).await?;
-    Ok(Json(TableVersionResponse { delta_table_version: version }))
+    Ok(Json(TableVersionResponse {
+        delta_table_version: version,
+    }))
 }
 
 /// GET /delta-sharing/v1/shares/{share}/schemas/{schema}/tables/{table}/metadata
@@ -213,7 +241,9 @@ pub async fn get_table_metadata(
     authenticate_request(&headers, &state.catalog, Some(&share)).await?;
     validate_table_in_share(&state, &share, &schema, &table).await?;
 
-    let meta = state.load_iceberg_table_meta(&schema, &table).await?
+    let meta = state
+        .load_iceberg_table_meta(&schema, &table)
+        .await?
         .ok_or_else(|| DeltaError::not_found(format!("table {schema}.{table} has no metadata")))?;
 
     let (protocol_line, metadata_line) = build_metadata_lines(&table, &meta);
@@ -244,7 +274,9 @@ pub async fn query_table(
     authenticate_request(&headers, &state.catalog, Some(&share)).await?;
     validate_table_in_share(&state, &share, &schema, &table).await?;
 
-    let meta = state.load_iceberg_table_meta(&schema, &table).await?
+    let meta = state
+        .load_iceberg_table_meta(&schema, &table)
+        .await?
         .ok_or_else(|| DeltaError::not_found(format!("table {schema}.{table} has no metadata")))?;
 
     let (protocol_line, metadata_line) = build_metadata_lines(&table, &meta);
@@ -279,9 +311,15 @@ pub async fn admin_create_share(
     State(state): State<Arc<DeltaState>>,
     Json(body): Json<CreateShareRequest>,
 ) -> Result<impl IntoResponse> {
-    let share = state.catalog.create_share(&body.name, &body.comment).await?;
+    let share = state
+        .catalog
+        .create_share(&body.name, &body.comment)
+        .await?;
     info!("Created delta share '{}'", share.name);
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "name": share.name, "comment": share.comment }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "name": share.name, "comment": share.comment })),
+    ))
 }
 
 /// POST /_admin/delta-sharing/shares/{share}/tables
@@ -293,13 +331,22 @@ pub async fn admin_add_table(
     Path(share): Path<String>,
     Json(body): Json<AddTableRequest>,
 ) -> Result<impl IntoResponse> {
-    let table = state.catalog.add_table(&share, &body.schema, &body.name).await?;
-    info!("Added table '{}.{}' to delta share '{}'", table.schema, table.table_name, share);
-    Ok((StatusCode::CREATED, Json(serde_json::json!({
-        "share": table.share,
-        "schema": table.schema,
-        "name": table.table_name,
-    }))))
+    let table = state
+        .catalog
+        .add_table(&share, &body.schema, &body.name)
+        .await?;
+    info!(
+        "Added table '{}.{}' to delta share '{}'",
+        table.schema, table.table_name, share
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "share": table.share,
+            "schema": table.schema,
+            "name": table.table_name,
+        })),
+    ))
 }
 
 /// DELETE /_admin/delta-sharing/shares/{share}/schemas/{schema}/tables/{table}
@@ -339,11 +386,14 @@ pub async fn admin_create_recipient(
         .create_recipient(&body.name, body.shares.clone())
         .await?;
     info!("Created delta recipient '{}'", recipient.name);
-    Ok((StatusCode::CREATED, Json(CreateRecipientResponse {
-        name: recipient.name,
-        shares: recipient.shares,
-        bearer_token: raw_token,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateRecipientResponse {
+            name: recipient.name,
+            shares: recipient.shares,
+            bearer_token: raw_token,
+        }),
+    ))
 }
 
 /// DELETE /_admin/delta-sharing/recipients/{name}
@@ -368,7 +418,9 @@ async fn validate_table_in_share(
     table: &str,
 ) -> Result<()> {
     let tables = state.catalog.list_tables(share, schema).await?;
-    let found = tables.iter().any(|t| t.table_name == table && t.schema == schema);
+    let found = tables
+        .iter()
+        .any(|t| t.table_name == table && t.schema == schema);
     if found {
         Ok(())
     } else {
@@ -380,7 +432,9 @@ async fn validate_table_in_share(
 
 /// Get the current snapshot ID from Iceberg table metadata.
 async fn get_snapshot_id(state: &DeltaState, schema: &str, table: &str) -> Result<i64> {
-    let meta = state.load_iceberg_table_meta(schema, table).await?
+    let meta = state
+        .load_iceberg_table_meta(schema, table)
+        .await?
         .ok_or_else(|| DeltaError::not_found(format!("table {schema}.{table} has no metadata")))?;
 
     Ok(meta
@@ -394,16 +448,19 @@ fn build_metadata_lines(
     table_name: &str,
     meta: &serde_json::Value,
 ) -> (ProtocolLine, MetadataLine) {
-    let schema_string = meta
-        .get("schema")
-        .or_else(|| {
-            // Iceberg v2: schemas array + current-schema-id
-            let schema_id = meta.get("current-schema-id")?.as_i64()?;
-            meta.get("schemas")?.as_array()?.iter().find(|s| {
-                s.get("schema-id").and_then(serde_json::Value::as_i64) == Some(schema_id)
+    let schema_string =
+        meta.get("schema")
+            .or_else(|| {
+                // Iceberg v2: schemas array + current-schema-id
+                let schema_id = meta.get("current-schema-id")?.as_i64()?;
+                meta.get("schemas")?.as_array()?.iter().find(|s| {
+                    s.get("schema-id").and_then(serde_json::Value::as_i64) == Some(schema_id)
+                })
             })
-        })
-        .map_or_else(|| "{}".to_string(), |s| serde_json::to_string(s).unwrap_or_default());
+            .map_or_else(
+                || "{}".to_string(),
+                |s| serde_json::to_string(s).unwrap_or_default(),
+            );
 
     let partition_columns: Vec<String> = meta
         .get("partition-specs")
@@ -414,7 +471,11 @@ fn build_metadata_lines(
         .map(|fields| {
             fields
                 .iter()
-                .filter_map(|f| f.get("name").and_then(serde_json::Value::as_str).map(std::string::ToString::to_string))
+                .filter_map(|f| {
+                    f.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(std::string::ToString::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -429,11 +490,17 @@ fn build_metadata_lines(
         .get("last-updated-ms")
         .and_then(serde_json::Value::as_i64);
 
-    let protocol = ProtocolLine { protocol: Protocol { min_reader_version: 1 } };
+    let protocol = ProtocolLine {
+        protocol: Protocol {
+            min_reader_version: 1,
+        },
+    };
     let metadata = MetadataLine {
         metadata: TableMetadata {
             id: table_id,
-            format: Format { provider: "parquet".to_string() },
+            format: Format {
+                provider: "parquet".to_string(),
+            },
             schema_string,
             partition_columns,
             configuration: None,
@@ -460,7 +527,10 @@ fn extract_file_lines(
     meta: &serde_json::Value,
 ) -> Vec<FileLine> {
     // Get current snapshot
-    let current_snapshot_id = match meta.get("current-snapshot-id").and_then(serde_json::Value::as_i64) {
+    let current_snapshot_id = match meta
+        .get("current-snapshot-id")
+        .and_then(serde_json::Value::as_i64)
+    {
         Some(id) if id > 0 => id,
         _ => return vec![],
     };
@@ -469,10 +539,9 @@ fn extract_file_lines(
         return vec![];
     };
 
-    let Some(snapshot) = snapshots
-        .iter()
-        .find(|s| s.get("snapshot-id").and_then(serde_json::Value::as_i64) == Some(current_snapshot_id))
-    else {
+    let Some(snapshot) = snapshots.iter().find(|s| {
+        s.get("snapshot-id").and_then(serde_json::Value::as_i64) == Some(current_snapshot_id)
+    }) else {
         return vec![];
     };
 

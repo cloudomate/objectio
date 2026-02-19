@@ -21,7 +21,9 @@ use axum::{
 };
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
-use objectio_delta_sharing::{DeltaSharingConfig, admin_router as delta_admin_router, router as delta_router};
+use objectio_delta_sharing::{
+    DeltaSharingConfig, admin_router as delta_admin_router, router as delta_router,
+};
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
 use objectio_s3::{ProtectionConfig, s3_metrics};
 use osd_pool::OsdPool;

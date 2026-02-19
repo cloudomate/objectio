@@ -42,10 +42,7 @@ pub struct DeltaSharingConfig {
 ///
 /// Admin management endpoints are nested under `/_admin/delta-sharing/` in the
 /// main gateway router (not this router).
-pub fn router(
-    meta_client: MetadataServiceClient<Channel>,
-    config: DeltaSharingConfig,
-) -> Router {
+pub fn router(meta_client: MetadataServiceClient<Channel>, config: DeltaSharingConfig) -> Router {
     let catalog = DeltaCatalog::new(meta_client.clone());
     let state = Arc::new(DeltaState {
         catalog,

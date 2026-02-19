@@ -49,9 +49,8 @@ pub async fn authenticate_request(
     catalog: &DeltaCatalog,
     required_share: Option<&str>,
 ) -> Result<RecipientContext, DeltaError> {
-    let raw_token = extract_bearer(headers).ok_or_else(|| {
-        DeltaError::forbidden("Missing Authorization: Bearer <token> header")
-    })?;
+    let raw_token = extract_bearer(headers)
+        .ok_or_else(|| DeltaError::forbidden("Missing Authorization: Bearer <token> header"))?;
 
     let recipient = catalog
         .get_recipient_by_token(&raw_token)

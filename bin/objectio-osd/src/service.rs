@@ -1,5 +1,6 @@
 //! OSD gRPC service implementation
 
+use futures::stream::Stream;
 use objectio_proto::metadata::ObjectMeta;
 use objectio_proto::storage::{
     BlockLocation,
@@ -34,8 +35,6 @@ use objectio_proto::storage::{
     health_check_response::Status as HealthStatus,
     storage_service_server::StorageService,
 };
-use futures::stream::Stream;
-use std::pin::Pin;
 use objectio_storage::DiskManager;
 use objectio_storage::metadata::{MetadataKey, MetadataStore, MetadataStoreConfig};
 use parking_lot::RwLock;
@@ -43,6 +42,7 @@ use prost::Message;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;

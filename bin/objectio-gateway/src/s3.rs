@@ -1244,31 +1244,27 @@ pub async fn put_object(
             }
         } else {
             // Different OSDs: read meta from source, write to dest
-            let source_meta = match get_object_meta_from_osd(
-                &state.osd_pool,
-                src_osd,
-                source_bucket,
-                source_key,
-            )
-            .await
-            {
-                Ok(Some(m)) => m,
-                Ok(None) => {
-                    return S3Error::xml_response(
-                        "NoSuchKey",
-                        "The specified key does not exist",
-                        StatusCode::NOT_FOUND,
-                    );
-                }
-                Err(e) => {
-                    error!("CopyObject: failed to read source meta: {}", e);
-                    return S3Error::xml_response(
-                        "InternalError",
-                        &e.to_string(),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    );
-                }
-            };
+            let source_meta =
+                match get_object_meta_from_osd(&state.osd_pool, src_osd, source_bucket, source_key)
+                    .await
+                {
+                    Ok(Some(m)) => m,
+                    Ok(None) => {
+                        return S3Error::xml_response(
+                            "NoSuchKey",
+                            "The specified key does not exist",
+                            StatusCode::NOT_FOUND,
+                        );
+                    }
+                    Err(e) => {
+                        error!("CopyObject: failed to read source meta: {}", e);
+                        return S3Error::xml_response(
+                            "InternalError",
+                            &e.to_string(),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        );
+                    }
+                };
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1844,12 +1840,7 @@ pub async fn put_object(
 
     info!(
         "Created object: {}/{}, size={}, stripes={}, shards_written={}, primary_osd={}",
-        bucket,
-        key,
-        original_size,
-        num_stripes,
-        total_shards_written,
-        primary_osd.node_address,
+        bucket, key, original_size, num_stripes, total_shards_written, primary_osd.node_address,
     );
 
     Response::builder()

@@ -481,8 +481,7 @@ pub async fn copy_object_meta_on_osd(
         .map_err(|_| OsdPoolError::ConnectionFailed("copy_object_meta timeout".to_string()))?
         .map_err(|e| OsdPoolError::ConnectionFailed(e.to_string()))?;
 
-    response
-        .into_inner()
-        .object
-        .ok_or_else(|| OsdPoolError::ConnectionFailed("missing object in CopyObjectMetaResponse".to_string()))
+    response.into_inner().object.ok_or_else(|| {
+        OsdPoolError::ConnectionFailed("missing object in CopyObjectMetaResponse".to_string())
+    })
 }

@@ -23,7 +23,11 @@ impl DeltaCatalog {
 
     /// # Errors
     /// Returns `DeltaError` if the gRPC call fails or the response contains no share.
-    pub async fn create_share(&self, name: &str, comment: &str) -> Result<DeltaShareEntry, DeltaError> {
+    pub async fn create_share(
+        &self,
+        name: &str,
+        comment: &str,
+    ) -> Result<DeltaShareEntry, DeltaError> {
         let resp = self
             .client
             .clone()
@@ -32,7 +36,9 @@ impl DeltaCatalog {
                 comment: comment.to_string(),
             })
             .await?;
-        resp.into_inner().share.ok_or_else(|| DeltaError::internal("no share in response"))
+        resp.into_inner()
+            .share
+            .ok_or_else(|| DeltaError::internal("no share in response"))
     }
 
     /// # Errors
@@ -41,9 +47,13 @@ impl DeltaCatalog {
         let resp = self
             .client
             .clone()
-            .delta_get_share(DeltaGetShareRequest { name: name.to_string() })
+            .delta_get_share(DeltaGetShareRequest {
+                name: name.to_string(),
+            })
             .await?;
-        resp.into_inner().share.ok_or_else(|| DeltaError::not_found(format!("share not found: {name}")))
+        resp.into_inner()
+            .share
+            .ok_or_else(|| DeltaError::not_found(format!("share not found: {name}")))
     }
 
     /// # Errors
@@ -52,7 +62,10 @@ impl DeltaCatalog {
         let resp = self
             .client
             .clone()
-            .delta_list_shares(DeltaListSharesRequest { max_results: 0, page_token: String::new() })
+            .delta_list_shares(DeltaListSharesRequest {
+                max_results: 0,
+                page_token: String::new(),
+            })
             .await?;
         Ok(resp.into_inner().shares)
     }
@@ -62,7 +75,9 @@ impl DeltaCatalog {
     pub async fn drop_share(&self, name: &str) -> Result<(), DeltaError> {
         self.client
             .clone()
-            .delta_drop_share(DeltaDropShareRequest { name: name.to_string() })
+            .delta_drop_share(DeltaDropShareRequest {
+                name: name.to_string(),
+            })
             .await?;
         Ok(())
     }
@@ -84,12 +99,19 @@ impl DeltaCatalog {
                 table_name: name.to_string(),
             })
             .await?;
-        resp.into_inner().table.ok_or_else(|| DeltaError::internal("no table in response"))
+        resp.into_inner()
+            .table
+            .ok_or_else(|| DeltaError::internal("no table in response"))
     }
 
     /// # Errors
     /// Returns `DeltaError` if the gRPC call fails.
-    pub async fn remove_table(&self, share: &str, schema: &str, name: &str) -> Result<(), DeltaError> {
+    pub async fn remove_table(
+        &self,
+        share: &str,
+        schema: &str,
+        name: &str,
+    ) -> Result<(), DeltaError> {
         self.client
             .clone()
             .delta_remove_table(DeltaRemoveTableRequest {
@@ -194,7 +216,9 @@ impl DeltaCatalog {
     pub async fn drop_recipient(&self, name: &str) -> Result<(), DeltaError> {
         self.client
             .clone()
-            .delta_drop_recipient(DeltaDropRecipientRequest { name: name.to_string() })
+            .delta_drop_recipient(DeltaDropRecipientRequest {
+                name: name.to_string(),
+            })
             .await?;
         Ok(())
     }
