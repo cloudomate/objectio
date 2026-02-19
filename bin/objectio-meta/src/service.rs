@@ -3069,10 +3069,8 @@ impl MetadataService for MetaService {
         let req = request.into_inner();
         let table_key = format!("{}\x00{}\x00{}", req.share, req.schema, req.table_name);
         let removed = self.delta_tables.write().remove(&table_key).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_delta_table(&table_key);
-            }
+        if removed && let Some(store) = &self.store {
+            store.delete_delta_table(&table_key);
         }
         Ok(Response::new(DeltaRemoveTableResponse { success: removed }))
     }
