@@ -80,16 +80,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: gateway, image: objectio-gateway }
-          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: meta,    image: objectio-meta    }
-          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: osd,     image: objectio-osd     }
-          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: cli,     image: objectio-cli     }
-          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: all,     image: objectio         }
-          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: gateway, image: objectio-gateway }
-          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: meta,    image: objectio-meta    }
-          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: osd,     image: objectio-osd     }
-          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: cli,     image: objectio-cli     }
-          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: all,     image: objectio         }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: gateway,       image: objectio-gateway       }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: meta,          image: objectio-meta          }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: osd,           image: objectio-osd           }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: cli,           image: objectio-cli           }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: block-gateway, image: objectio-block-gateway }
+          - { arch: amd64, runner: ubuntu-latest,    platform: linux/amd64, target: all,           image: objectio               }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: gateway,       image: objectio-gateway       }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: meta,          image: objectio-meta          }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: osd,           image: objectio-osd           }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: cli,           image: objectio-cli           }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: block-gateway, image: objectio-block-gateway }
+          - { arch: arm64, runner: ubuntu-24.04-arm, platform: linux/arm64, target: all,           image: objectio               }
 
     steps:
       - uses: actions/checkout@v4
@@ -147,7 +149,7 @@ jobs:
             TAGS="$TAGS ${GITHUB_REF#refs/tags/}"
           fi
 
-          IMAGES="objectio-gateway objectio-meta objectio-osd objectio-cli objectio"
+          IMAGES="objectio-gateway objectio-meta objectio-osd objectio-cli objectio-block-gateway objectio"
           for IMAGE in $IMAGES; do
             echo "::group::Manifest $IMAGE"
             for TAG in $TAGS; do

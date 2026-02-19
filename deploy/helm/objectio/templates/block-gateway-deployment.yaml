@@ -1,0 +1,78 @@
+{{- if .Values.blockGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "objectio.blockGateway.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: block-gateway
+spec:
+  replicas: {{ .Values.blockGateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "objectio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: block-gateway
+  template:
+    metadata:
+      labels:
+        {{- include "objectio.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: block-gateway
+    spec:
+      containers:
+        - name: block-gateway
+          image: {{ .Values.global.imageRegistry }}/{{ .Values.blockGateway.image.repository }}:{{ .Values.blockGateway.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args:
+            - "--listen"
+            - "0.0.0.0:{{ .Values.blockGateway.service.grpcPort }}"
+            - "--nbd-listen"
+            - "0.0.0.0:{{ .Values.blockGateway.service.nbdPort }}"
+            - "--advertise-host"
+            - {{ .Values.blockGateway.advertiseHost | quote }}
+            - "--meta-endpoint"
+            - "http://{{ include "objectio.meta.fullname" . }}:{{ .Values.meta.service.port }}"
+            - "--data-dir"
+            - "/var/lib/objectio/block-gw"
+            - "--ec-k"
+            - {{ .Values.ec.k | quote }}
+            - "--ec-m"
+            - {{ .Values.ec.m | quote }}
+            - "--cache-bytes"
+            - {{ .Values.blockGateway.cacheBytes | quote }}
+            - "--flush-interval-s"
+            - {{ .Values.blockGateway.flushIntervalS | quote }}
+            - "--log-level"
+            - {{ .Values.blockGateway.logLevel | quote }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.blockGateway.service.grpcPort }}
+              protocol: TCP
+            - name: nbd
+              containerPort: {{ .Values.blockGateway.service.nbdPort }}
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/objectio
+          resources:
+            {{- toYaml .Values.blockGateway.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.blockGateway.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "objectio.blockGateway.fullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

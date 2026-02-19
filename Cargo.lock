@@ -1769,6 +1769,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "objectio-block-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "clap",
+ "crc32c",
+ "futures",
+ "hex",
+ "objectio-block",
+ "objectio-common",
+ "objectio-erasure",
+ "objectio-proto",
+ "parking_lot",
+ "prost",
+ "redb",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "objectio-cli"
 version = "0.1.0"
 dependencies = [

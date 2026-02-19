@@ -75,6 +75,13 @@ OSD headless service name.
 {{- end }}
 
 {{/*
+Block Gateway fullname.
+*/}}
+{{- define "objectio.blockGateway.fullname" -}}
+{{- printf "%s-block-gateway" (include "objectio.fullname" .) }}
+{{- end }}
+
+{{/*
 Prometheus fullname.
 */}}
 {{- define "objectio.prometheus.fullname" -}}

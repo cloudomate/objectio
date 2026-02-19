@@ -215,6 +215,51 @@ services:
     depends_on:
       - meta1
 
+  # ==========================================================================
+  # Block Gateway (NBD + gRPC block storage)
+  # ==========================================================================
+  block-gateway:
+    image: objectio-block-gateway:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: block-gateway
+    ports:
+      - "9300:9300"
+      - "10809:10809"
+    environment:
+      RUST_BACKTRACE: 1
+    command:
+      - "--listen"
+      - "0.0.0.0:9300"
+      - "--nbd-listen"
+      - "0.0.0.0:10809"
+      - "--advertise-host"
+      - "localhost"
+      - "--meta-endpoint"
+      - "http://meta1:9100"
+      - "--data-dir"
+      - "/var/lib/objectio/block-gw"
+      - "--ec-k"
+      - "4"
+      - "--ec-m"
+      - "2"
+      - "--log-level"
+      - "info"
+    volumes:
+      - block-gw-data:/var/lib/objectio
+    depends_on:
+      - meta1
+      - osd1
+      - osd2
+      - osd3
+      - osd4
+      - osd5
+      - osd6
+    networks:
+      - objectio-net
+    restart: unless-stopped
+
 networks:
   objectio-net:
     driver: bridge
@@ -229,3 +274,4 @@ volumes:
   osd4-data:
   osd5-data:
   osd6-data:
+  block-gw-data:

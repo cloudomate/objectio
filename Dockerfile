@@ -238,7 +238,34 @@ ENTRYPOINT ["objectio-cli"]
 CMD ["--help"]
 
 # =============================================================================
-# Stage 9: All-in-one image (for development/testing)
+# Stage 9: Block Gateway (NBD + gRPC block storage gateway)
+# =============================================================================
+FROM runtime-base AS block-gateway
+
+ARG TARGETARCH
+
+LABEL org.opencontainers.image.title="ObjectIO Block Gateway"
+LABEL org.opencontainers.image.description="NBD + gRPC block storage gateway for ObjectIO"
+LABEL org.opencontainers.image.architecture="${TARGETARCH}"
+
+COPY --from=builder /build/target/release/objectio-block-gateway /usr/local/bin/
+
+USER objectio
+
+# 9300: gRPC BlockService
+# 10809: NBD TCP server
+EXPOSE 9300 10809
+
+VOLUME ["/var/lib/objectio"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
+
+ENTRYPOINT ["objectio-block-gateway"]
+CMD ["--listen", "0.0.0.0:9300", "--nbd-listen", "0.0.0.0:10809", "--data-dir", "/var/lib/objectio/block-gw"]
+
+# =============================================================================
+# Stage 10: All-in-one image (for development/testing)
 # =============================================================================
 FROM runtime-base AS all
 
@@ -253,10 +280,11 @@ COPY --from=builder /build/target/release/objectio-meta /usr/local/bin/
 COPY --from=builder /build/target/release/objectio-osd /usr/local/bin/
 COPY --from=builder /build/target/release/objectio-cli /usr/local/bin/
 COPY --from=builder /build/target/release/objectio-install /usr/local/bin/
+COPY --from=builder /build/target/release/objectio-block-gateway /usr/local/bin/
 
 USER objectio
 
-EXPOSE 9000 9100 9101 9200 9201
+EXPOSE 9000 9100 9101 9200 9201 9300 10809
 
 VOLUME ["/var/lib/objectio"]
 

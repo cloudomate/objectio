@@ -22,6 +22,7 @@ members = [
     "bin/objectio-osd",
     "bin/objectio-cli",
     "bin/objectio-install",
+    "bin/objectio-block-gateway",
 ]
 
 [workspace.package]

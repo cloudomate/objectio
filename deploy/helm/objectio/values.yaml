@@ -78,6 +78,32 @@ osd:
       cpu: "2"
       memory: 2Gi
 
+blockGateway:
+  enabled: false
+  image:
+    repository: objectio-block-gateway
+    tag: latest
+  replicas: 1
+  advertiseHost: ""   # Hostname/IP advertised in NBD attachment URLs; defaults to service ClusterIP
+  cacheBytes: 268435456   # 256 MB write cache
+  flushIntervalS: 5
+  logLevel: info
+  service:
+    type: ClusterIP
+    grpcPort: 9300
+    nbdPort: 10809
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
 ec:
   k: 4
   m: 2
