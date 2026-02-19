@@ -78,7 +78,10 @@ pub fn apply_row_filter(metadata: &mut Value, row_filter_expression: &str) {
         metadata["properties"] = Value::Object(serde_json::Map::new());
     }
 
-    if let Some(props) = metadata.get_mut("properties").and_then(Value::as_object_mut) {
+    if let Some(props) = metadata
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
         props.insert(
             "obio.row-filter".to_string(),
             Value::String(row_filter_expression.to_string()),
@@ -158,9 +161,7 @@ mod tests {
         let mut md = sample_metadata();
         apply_row_filter(&mut md, "");
 
-        assert!(md["properties"]
-            .get("obio.row-filter")
-            .is_none());
+        assert!(md["properties"].get("obio.row-filter").is_none());
     }
 
     #[test]
@@ -175,9 +176,11 @@ mod tests {
 
         let fields = md["schemas"][0]["fields"].as_array().unwrap();
         assert_eq!(fields.len(), 2);
-        assert!(!fields
-            .iter()
-            .map(|f| f["name"].as_str().unwrap())
-            .any(|n| n == "ssn"));
+        assert!(
+            !fields
+                .iter()
+                .map(|f| f["name"].as_str().unwrap())
+                .any(|n| n == "ssn")
+        );
     }
 }

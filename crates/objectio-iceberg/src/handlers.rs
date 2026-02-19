@@ -15,12 +15,12 @@ use crate::types::{
     CreateDataFilterRequest as CreateDataFilterRestRequest, CreateNamespaceRequest,
     CreateNamespaceResponse, CreateTableRequest, DataFilterResponse, EffectivePolicyEntry,
     EffectivePolicyParams, EffectivePolicyResponse, GetEncryptionPolicyResponse, GetQuotaResponse,
-    GetTagsResponse, ListDataFiltersResponse as ListDataFiltersRestResponse,
-    ListNamespacesParams, ListNamespacesResponse, ListTablesParams,
-    ListTablesResponse, LoadNamespaceResponse, LoadTableResponse, PurgeParams, RenameTableRequest,
-    SetEncryptionPolicyRequest, SetPolicyRequest, SetQuotaRequest, SetRoleBindingRequest,
-    SetTagsRequest, SimulateMatchedStatement, SimulatePolicyRequest,
-    SimulatePolicyResponse, UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
+    GetTagsResponse, ListDataFiltersResponse as ListDataFiltersRestResponse, ListNamespacesParams,
+    ListNamespacesResponse, ListTablesParams, ListTablesResponse, LoadNamespaceResponse,
+    LoadTableResponse, PurgeParams, RenameTableRequest, SetEncryptionPolicyRequest,
+    SetPolicyRequest, SetQuotaRequest, SetRoleBindingRequest, SetTagsRequest,
+    SimulateMatchedStatement, SimulatePolicyRequest, SimulatePolicyResponse,
+    UpdateNamespacePropertiesRequest, UpdateNamespacePropertiesResponse,
 };
 use axum::Extension;
 use axum::Json;
@@ -383,8 +383,8 @@ pub async fn update_namespace_properties(
     .await?;
 
     // Reject non-admin attempts to set or remove the __policy property
-    let touches_policy = req.updates.contains_key("__policy")
-        || req.removals.iter().any(|k| k == "__policy");
+    let touches_policy =
+        req.updates.contains_key("__policy") || req.removals.iter().any(|k| k == "__policy");
     if touches_policy {
         require_admin(auth.as_ref())?;
     }
@@ -437,14 +437,14 @@ pub async fn create_table(
     check_ns_policy(&state, auth.as_ref(), &levels, "iceberg:CreateTable", &arn).await?;
 
     // Check namespace quota
-    let ns_props = state
-        .catalog
-        .load_namespace(levels.clone())
-        .await?;
+    let ns_props = state.catalog.load_namespace(levels.clone()).await?;
     if let Some(max_str) = ns_props.properties.get(QUOTA_MAX_TABLES_KEY)
         && let Ok(max_tables) = max_str.parse::<u32>()
     {
-        let (existing_tables, _) = state.catalog.list_tables(levels.clone(), None, None).await?;
+        let (existing_tables, _) = state
+            .catalog
+            .list_tables(levels.clone(), None, None)
+            .await?;
         #[allow(clippy::cast_possible_truncation)]
         let count = existing_tables.len() as u32;
         if count >= max_tables {
@@ -520,8 +520,7 @@ pub async fn create_table(
         "refs": {}
     });
 
-    let metadata_location =
-        format!("{location}/metadata/00000-{table_uuid}.metadata.json");
+    let metadata_location = format!("{location}/metadata/00000-{table_uuid}.metadata.json");
 
     let metadata_bytes = serde_json::to_vec(&metadata)
         .map_err(|e| IcebergError::internal(format!("failed to serialize metadata: {e}")))?;
@@ -818,7 +817,9 @@ pub async fn set_namespace_policy(
 
     // Validate policy before persisting
     if let Err(e) = validate_iceberg_policy(&req.policy) {
-        return Err(IcebergError::bad_request(format!("Invalid iceberg policy: {e}")));
+        return Err(IcebergError::bad_request(format!(
+            "Invalid iceberg policy: {e}"
+        )));
     }
 
     // Store policy as __policy property on the namespace
@@ -848,7 +849,9 @@ pub async fn set_table_policy(
 
     // Validate policy before persisting
     if let Err(e) = validate_iceberg_policy(&req.policy) {
-        return Err(IcebergError::bad_request(format!("Invalid iceberg policy: {e}")));
+        return Err(IcebergError::bad_request(format!(
+            "Invalid iceberg policy: {e}"
+        )));
     }
 
     state
@@ -881,7 +884,12 @@ pub async fn set_catalog_policy(
 
     // Ensure __catalog namespace exists
     let catalog_ns = vec![CATALOG_POLICY_NAMESPACE.to_string()];
-    if !state.catalog.namespace_exists(catalog_ns.clone()).await.unwrap_or(false) {
+    if !state
+        .catalog
+        .namespace_exists(catalog_ns.clone())
+        .await
+        .unwrap_or(false)
+    {
         let _ = state
             .catalog
             .create_namespace(catalog_ns.clone(), HashMap::new())
@@ -974,7 +982,10 @@ pub async fn simulate_policy(
     }
 
     let ns_levels: Vec<String> = if parts.len() > 1 {
-        parts[..parts.len() - 1].iter().map(|s| (*s).to_string()).collect()
+        parts[..parts.len() - 1]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
     } else {
         parts.iter().map(|s| (*s).to_string()).collect()
     };
@@ -1003,10 +1014,9 @@ pub async fn simulate_policy(
     if let Some(ref json) = catalog_policy_str
         && let Ok(policy) = BucketPolicy::from_json(json)
     {
-        let explanation =
-            state
-                .policy_evaluator
-                .evaluate_with_explanation(&policy, &context, "catalog");
+        let explanation = state
+            .policy_evaluator
+            .evaluate_with_explanation(&policy, &context, "catalog");
         if explanation.decision == objectio_auth::policy::PolicyDecision::Deny {
             return Ok(Json(explanation_to_response(explanation)));
         }
@@ -1023,10 +1033,9 @@ pub async fn simulate_policy(
         if let Some(ref json) = policy_json
             && let Ok(policy) = BucketPolicy::from_json(json)
         {
-            let explanation =
-                state
-                    .policy_evaluator
-                    .evaluate_with_explanation(&policy, &context, &ns_label);
+            let explanation = state
+                .policy_evaluator
+                .evaluate_with_explanation(&policy, &context, &ns_label);
             if explanation.decision == objectio_auth::policy::PolicyDecision::Deny
                 || explanation.decision == objectio_auth::policy::PolicyDecision::Allow
             {
@@ -1049,10 +1058,9 @@ pub async fn simulate_policy(
             && let Ok(policy) = BucketPolicy::from_json(&json_str)
         {
             let source = format!("table:{}", ns_levels.join(".") + "/" + t);
-            let explanation =
-                state
-                    .policy_evaluator
-                    .evaluate_with_explanation(&policy, &context, &source);
+            let explanation = state
+                .policy_evaluator
+                .evaluate_with_explanation(&policy, &context, &source);
             if explanation.decision != objectio_auth::policy::PolicyDecision::ImplicitDeny {
                 return Ok(Json(explanation_to_response(explanation)));
             }
@@ -1076,16 +1084,16 @@ fn explanation_to_response(
     };
     SimulatePolicyResponse {
         decision: decision.to_string(),
-        matched_statement: explanation.matched_statement.map(|ms| {
-            SimulateMatchedStatement {
+        matched_statement: explanation
+            .matched_statement
+            .map(|ms| SimulateMatchedStatement {
                 sid: ms.sid,
                 effect: match ms.effect {
                     objectio_auth::policy::Effect::Allow => "Allow".to_string(),
                     objectio_auth::policy::Effect::Deny => "Deny".to_string(),
                 },
                 source: ms.source,
-            }
-        }),
+            }),
     }
 }
 
@@ -1240,9 +1248,15 @@ pub async fn set_table_tags(
     if md.get("properties").is_none() {
         md["properties"] = json!({});
     }
-    if let Some(props) = md.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
+    if let Some(props) = md
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
         for (k, v) in &req.tags {
-            props.insert(format!("{TAG_PREFIX}{k}"), serde_json::Value::String(v.clone()));
+            props.insert(
+                format!("{TAG_PREFIX}{k}"),
+                serde_json::Value::String(v.clone()),
+            );
         }
     }
 
@@ -1280,11 +1294,21 @@ pub async fn get_table_tags(
 ) -> Result<Json<GetTagsResponse>> {
     let levels = parse_namespace(&namespace);
     let arn = build_iceberg_arn(&levels, Some(&table));
-    check_table_policy(&state, auth.as_ref(), &levels, &table, "iceberg:LoadTable", &arn).await?;
+    check_table_policy(
+        &state,
+        auth.as_ref(),
+        &levels,
+        &table,
+        "iceberg:LoadTable",
+        &arn,
+    )
+    .await?;
 
     let (_location, metadata_bytes) = state.catalog.load_table(levels, &table).await?;
     if metadata_bytes.is_empty() {
-        return Ok(Json(GetTagsResponse { tags: HashMap::new() }));
+        return Ok(Json(GetTagsResponse {
+            tags: HashMap::new(),
+        }));
     }
 
     let md: serde_json::Value = serde_json::from_slice(&metadata_bytes)
@@ -1297,8 +1321,12 @@ pub async fn get_table_tags(
             props
                 .iter()
                 .filter_map(|(k, v)| {
-                    k.strip_prefix(TAG_PREFIX)
-                        .map(|tag_key| (tag_key.to_string(), v.as_str().unwrap_or_default().to_string()))
+                    k.strip_prefix(TAG_PREFIX).map(|tag_key| {
+                        (
+                            tag_key.to_string(),
+                            v.as_str().unwrap_or_default().to_string(),
+                        )
+                    })
                 })
                 .collect()
         })

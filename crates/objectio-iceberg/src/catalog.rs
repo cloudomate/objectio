@@ -9,8 +9,8 @@ use objectio_proto::metadata::{
     IcebergGetTablePolicyRequest, IcebergListNamespacesRequest, IcebergListTablesRequest,
     IcebergLoadNamespaceRequest, IcebergLoadTableRequest, IcebergNamespaceExistsRequest,
     IcebergRenameTableRequest, IcebergSetTablePolicyRequest, IcebergTableExistsRequest,
-    IcebergTableIdentifier, IcebergUpdateNamespacePropertiesRequest,
-    ListDataFiltersRequest, metadata_service_client::MetadataServiceClient,
+    IcebergTableIdentifier, IcebergUpdateNamespacePropertiesRequest, ListDataFiltersRequest,
+    metadata_service_client::MetadataServiceClient,
 };
 use tonic::transport::Channel;
 
@@ -414,10 +414,7 @@ impl IcebergCatalog {
     ///
     /// # Errors
     /// Returns `IcebergError` on gRPC failure.
-    pub async fn create_data_filter(
-        &self,
-        params: NewDataFilter<'_>,
-    ) -> Result<IcebergDataFilter> {
+    pub async fn create_data_filter(&self, params: NewDataFilter<'_>) -> Result<IcebergDataFilter> {
         let resp = self
             .meta_client
             .clone()

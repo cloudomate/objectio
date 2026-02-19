@@ -10,6 +10,7 @@ const OBJECTIO_MAGIC: &[u8] = b"OBJIO001";
 
 /// Detect available disks that can be used for ObjectIO
 pub fn detect_available_disks() -> Result<Vec<String>> {
+    #[allow(unused_mut)]
     let mut available = Vec::new();
 
     // On Linux, scan /sys/block for block devices
@@ -55,6 +56,7 @@ pub fn detect_available_disks() -> Result<Vec<String>> {
 
 /// List all block devices (including those in use)
 pub fn list_all_disks() -> Result<Vec<String>> {
+    #[allow(unused_mut)]
     let mut all = Vec::new();
 
     #[cfg(target_os = "linux")]
@@ -86,6 +88,7 @@ pub fn list_all_disks() -> Result<Vec<String>> {
 }
 
 /// Check if a disk is suitable for ObjectIO
+#[cfg(target_os = "linux")]
 fn is_disk_suitable(path: &str) -> Result<bool> {
     let path = Path::new(path);
 

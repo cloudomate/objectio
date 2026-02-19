@@ -6,8 +6,8 @@
 
 use crate::tables;
 use crate::types::{
-    MultipartUploadState, OsdNode, StoredAccessKey, StoredChunkRef, StoredDataFilter,
-    StoredGroup, StoredSnapshot, StoredUser, StoredVolume,
+    MultipartUploadState, OsdNode, StoredAccessKey, StoredChunkRef, StoredDataFilter, StoredGroup,
+    StoredSnapshot, StoredUser, StoredVolume,
 };
 use objectio_proto::metadata::BucketMeta;
 use prost::Message;

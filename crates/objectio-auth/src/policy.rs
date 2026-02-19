@@ -819,9 +819,7 @@ impl PolicyEvaluator {
             return values.clone();
         }
         // Fall back to single-valued lookup
-        self.get_condition_value(key, context)
-            .into_iter()
-            .collect()
+        self.get_condition_value(key, context).into_iter().collect()
     }
 
     /// Match a pattern with wildcards (* and ?)
@@ -1390,24 +1388,46 @@ mod tests {
         let policy = BucketPolicy::from_json(json).unwrap();
 
         // IP inside 10.0.0.0/8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("10.1.2.3".parse().unwrap());
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("10.1.2.3".parse().unwrap());
         assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
 
         // IP outside 10.0.0.0/8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("192.168.1.1".parse().unwrap());
-        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("192.168.1.1".parse().unwrap());
+        assert_eq!(
+            evaluator.evaluate(&policy, &ctx),
+            PolicyDecision::ImplicitDeny
+        );
 
         // Exact boundary: 10.255.255.255 is in /8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("10.255.255.255".parse().unwrap());
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("10.255.255.255".parse().unwrap());
         assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
 
         // 11.0.0.0 is NOT in 10.0.0.0/8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("11.0.0.0".parse().unwrap());
-        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("11.0.0.0".parse().unwrap());
+        assert_eq!(
+            evaluator.evaluate(&policy, &ctx),
+            PolicyDecision::ImplicitDeny
+        );
     }
 
     #[test]
@@ -1429,13 +1449,24 @@ mod tests {
         let policy = BucketPolicy::from_json(json).unwrap();
 
         // IP inside 192.168.1.0/24 — NotIpAddress does NOT match → no deny
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("192.168.1.50".parse().unwrap());
-        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("192.168.1.50".parse().unwrap());
+        assert_eq!(
+            evaluator.evaluate(&policy, &ctx),
+            PolicyDecision::ImplicitDeny
+        );
 
         // IP outside 192.168.1.0/24 — NotIpAddress matches → deny
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("192.168.2.1".parse().unwrap());
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("192.168.2.1".parse().unwrap());
         assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Deny);
     }
 
@@ -1458,14 +1489,25 @@ mod tests {
         let policy = BucketPolicy::from_json(json).unwrap();
 
         // fd12::1 is in fd00::/8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("fd12::1".parse().unwrap());
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("fd12::1".parse().unwrap());
         assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::Allow);
 
         // fe80::1 is NOT in fd00::/8
-        let ctx = RequestContext::new("arn:obio:iam::objectio:user/a", "s3:GetObject", "arn:aws:s3:::b/*")
-            .with_source_ip("fe80::1".parse().unwrap());
-        assert_eq!(evaluator.evaluate(&policy, &ctx), PolicyDecision::ImplicitDeny);
+        let ctx = RequestContext::new(
+            "arn:obio:iam::objectio:user/a",
+            "s3:GetObject",
+            "arn:aws:s3:::b/*",
+        )
+        .with_source_ip("fe80::1".parse().unwrap());
+        assert_eq!(
+            evaluator.evaluate(&policy, &ctx),
+            PolicyDecision::ImplicitDeny
+        );
     }
 
     #[test]

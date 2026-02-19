@@ -159,11 +159,13 @@ mod tests {
         assert_eq!(policy.statements.len(), 1);
         // Reader should have 6 read-only actions
         assert_eq!(policy.statements[0].action.0.len(), 6);
-        assert!(policy.statements[0]
-            .resource
-            .0
-            .iter()
-            .any(|r| r.contains("analytics")));
+        assert!(
+            policy.statements[0]
+                .resource
+                .0
+                .iter()
+                .any(|r| r.contains("analytics"))
+        );
     }
 
     #[test]
@@ -172,6 +174,11 @@ mod tests {
         let json = IcebergRole::NamespaceOwner.to_policy_json(&arns, "prod");
         let policy = BucketPolicy::from_json(&json).unwrap();
         assert_eq!(policy.statements[0].action.0, vec!["iceberg:*"]);
-        assert!(policy.statements[0].resource.0.contains(&"arn:obio:iceberg:::prod/*".to_string()));
+        assert!(
+            policy.statements[0]
+                .resource
+                .0
+                .contains(&"arn:obio:iceberg:::prod/*".to_string())
+        );
     }
 }

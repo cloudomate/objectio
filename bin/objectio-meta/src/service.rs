@@ -35,38 +35,37 @@ use objectio_proto::metadata::{
     CreateUserResponse,
     DeleteAccessKeyRequest,
     DeleteAccessKeyResponse,
-    DeleteGroupRequest,
-    DeleteGroupResponse,
-    DeleteDataFilterRequest,
-    DeleteDataFilterResponse,
     DeleteBucketPolicyRequest,
     DeleteBucketPolicyResponse,
     DeleteBucketRequest,
     DeleteBucketResponse,
+    DeleteDataFilterRequest,
+    DeleteDataFilterResponse,
+    DeleteGroupRequest,
+    DeleteGroupResponse,
     DeleteObjectRequest,
     DeleteObjectResponse,
     DeleteUserRequest,
     DeleteUserResponse,
     ErasureType,
-    GetUserGroupsRequest,
-    GetUserGroupsResponse,
-    GroupMeta,
-    GetDataFiltersForPrincipalRequest,
     GetAccessKeyForAuthRequest,
     GetAccessKeyForAuthResponse,
     GetBucketPolicyRequest,
     GetBucketPolicyResponse,
     GetBucketRequest,
     GetBucketResponse,
+    GetDataFiltersForPrincipalRequest,
     GetListingNodesRequest,
     GetListingNodesResponse,
     GetObjectRequest,
     GetObjectResponse,
     GetPlacementRequest,
     GetPlacementResponse,
+    GetUserGroupsRequest,
+    GetUserGroupsResponse,
     GetUserRequest,
     GetUserResponse,
-    IcebergDataFilter,
+    GroupMeta,
     // Iceberg types
     IcebergCommitTableRequest,
     IcebergCommitTableResponse,
@@ -74,6 +73,7 @@ use objectio_proto::metadata::{
     IcebergCreateNamespaceResponse,
     IcebergCreateTableRequest,
     IcebergCreateTableResponse,
+    IcebergDataFilter,
     IcebergDropNamespaceRequest,
     IcebergDropNamespaceResponse,
     IcebergDropTableRequest,
@@ -2661,10 +2661,7 @@ impl MetadataService for MetaService {
             store.put_group(&req.group_id, &group_snapshot);
         }
 
-        info!(
-            "Added user {} to group {}",
-            req.user_id, req.group_id
-        );
+        info!("Added user {} to group {}", req.user_id, req.group_id);
 
         Ok(Response::new(AddUserToGroupResponse { success: true }))
     }
@@ -2693,14 +2690,9 @@ impl MetadataService for MetaService {
             store.put_group(&req.group_id, &group_snapshot);
         }
 
-        info!(
-            "Removed user {} from group {}",
-            req.user_id, req.group_id
-        );
+        info!("Removed user {} from group {}", req.user_id, req.group_id);
 
-        Ok(Response::new(RemoveUserFromGroupResponse {
-            success: true,
-        }))
+        Ok(Response::new(RemoveUserFromGroupResponse { success: true }))
     }
 
     async fn get_user_groups(
@@ -2796,9 +2788,7 @@ impl MetadataService for MetaService {
             .data_filters
             .read()
             .values()
-            .filter(|f| {
-                f.namespace_levels.join("\x00") == ns_key && f.table_name == req.table_name
-            })
+            .filter(|f| f.namespace_levels.join("\x00") == ns_key && f.table_name == req.table_name)
             .map(|f| IcebergDataFilter {
                 filter_id: f.filter_id.clone(),
                 filter_name: f.filter_name.clone(),
@@ -2823,9 +2813,7 @@ impl MetadataService for MetaService {
         let req = request.into_inner();
 
         let removed = self.data_filters.write().remove(&req.filter_id).is_some();
-        if removed
-            && let Some(store) = &self.store
-        {
+        if removed && let Some(store) = &self.store {
             store.delete_data_filter(&req.filter_id);
         }
 
@@ -2850,9 +2838,9 @@ impl MetadataService for MetaService {
             .filter(|f| {
                 f.namespace_levels.join("\x00") == ns_key
                     && f.table_name == req.table_name
-                    && f.principal_arns.iter().any(|p| {
-                        p == "*" || all_arns.iter().any(|a| a == p)
-                    })
+                    && f.principal_arns
+                        .iter()
+                        .any(|p| p == "*" || all_arns.iter().any(|a| a == p))
             })
             .map(|f| IcebergDataFilter {
                 filter_id: f.filter_id.clone(),

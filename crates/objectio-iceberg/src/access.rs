@@ -207,7 +207,9 @@ pub struct HierarchicalPolicyCheck<'a> {
 ///
 /// # Errors
 /// Returns `IcebergError` with `FORBIDDEN` status on explicit policy deny.
-pub fn check_hierarchical_policies(check: &HierarchicalPolicyCheck<'_>) -> Result<(), IcebergError> {
+pub fn check_hierarchical_policies(
+    check: &HierarchicalPolicyCheck<'_>,
+) -> Result<(), IcebergError> {
     let HierarchicalPolicyCheck {
         evaluator,
         catalog_policy_json,
@@ -260,15 +262,13 @@ pub fn check_hierarchical_policies(check: &HierarchicalPolicyCheck<'_>) -> Resul
 /// # Errors
 /// Returns a descriptive error message if validation fails.
 pub fn validate_iceberg_policy(policy_json: &str) -> Result<(), String> {
-    let policy = BucketPolicy::from_json(policy_json)
-        .map_err(|e| format!("Invalid policy JSON: {e}"))?;
+    let policy =
+        BucketPolicy::from_json(policy_json).map_err(|e| format!("Invalid policy JSON: {e}"))?;
 
     for (i, stmt) in policy.statements.iter().enumerate() {
         // Validate action prefixes
         for action in &stmt.action.0 {
-            if action != "*"
-                && !action.starts_with("iceberg:")
-            {
+            if action != "*" && !action.starts_with("iceberg:") {
                 return Err(format!(
                     "Statement {i}: action \"{action}\" must use the \"iceberg:\" prefix"
                 ));
@@ -277,9 +277,7 @@ pub fn validate_iceberg_policy(policy_json: &str) -> Result<(), String> {
 
         // Validate resource ARN prefixes
         for resource in &stmt.resource.0 {
-            if resource != "*"
-                && !resource.starts_with("arn:obio:iceberg:::")
-            {
+            if resource != "*" && !resource.starts_with("arn:obio:iceberg:::") {
                 return Err(format!(
                     "Statement {i}: resource \"{resource}\" must start with \"arn:obio:iceberg:::\""
                 ));
@@ -303,7 +301,16 @@ mod tests {
         table_name: Option<&str>,
         policy_source: &str,
     ) -> Result<(), IcebergError> {
-        check_with_tags(policy_json, user_arn, action, resource_arn, ns_levels, table_name, policy_source, &HashMap::new())
+        check_with_tags(
+            policy_json,
+            user_arn,
+            action,
+            resource_arn,
+            ns_levels,
+            table_name,
+            policy_source,
+            &HashMap::new(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
