@@ -41,6 +41,7 @@ use objectio_proto::metadata::{
     ErasureType,
     GetBucketPolicyRequest,
     GetBucketRequest,
+    GetListingNodesRequest,
     GetPlacementRequest,
     ListAccessKeysRequest,
     ListBucketsRequest,
@@ -1909,6 +1910,17 @@ pub async fn get_object(
         );
     }
 
+    // Build node_id -> address map from placement for shard reads
+    let mut node_address_map: HashMap<Vec<u8>, String> = placement
+        .nodes
+        .iter()
+        .map(|n| (n.node_id.clone(), n.node_address.clone()))
+        .collect();
+
+    // If we have stored shard locations pointing to nodes not in placement
+    // (e.g. topology changed), fetch all active nodes as fallback
+    // This is done lazily below only if a node_id is missing from the map.
+
     // Get object metadata from primary OSD (position 0)
     let primary_osd = &placement.nodes[0];
     let object = match get_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &key).await {
@@ -2009,12 +2021,16 @@ pub async fn get_object(
             // Try each replica until we get the data
             let mut data_read = false;
             for shard_loc in &stripe.shards {
+                let node_addr = resolve_node_address(
+                    &mut node_address_map,
+                    &mut meta_client,
+                    &shard_loc.node_id,
+                )
+                .await;
                 let node_placement = objectio_proto::metadata::NodePlacement {
                     position: shard_loc.position,
                     node_id: shard_loc.node_id.clone(),
-                    node_address: get_node_address_from_meta(&mut meta_client, &shard_loc.node_id)
-                        .await
-                        .unwrap_or_else(|| "http://localhost:9002".to_string()),
+                    node_address: node_addr,
                     disk_id: shard_loc.disk_id.clone(),
                     shard_type: shard_loc.shard_type,
                     local_group: shard_loc.local_group,
@@ -2118,12 +2134,16 @@ pub async fn get_object(
             }
 
             if let Some(shard_loc) = shard_map.get(&(pos as u32)) {
+                let node_addr = resolve_node_address(
+                    &mut node_address_map,
+                    &mut meta_client,
+                    &shard_loc.node_id,
+                )
+                .await;
                 let node_placement = objectio_proto::metadata::NodePlacement {
                     position: shard_loc.position,
                     node_id: shard_loc.node_id.clone(),
-                    node_address: get_node_address_from_meta(&mut meta_client, &shard_loc.node_id)
-                        .await
-                        .unwrap_or_else(|| "http://localhost:9002".to_string()),
+                    node_address: node_addr,
                     disk_id: shard_loc.disk_id.clone(),
                     shard_type: shard_loc.shard_type,
                     local_group: shard_loc.local_group,
@@ -2159,15 +2179,16 @@ pub async fn get_object(
                 }
 
                 if let Some(shard_loc) = shard_map.get(&(pos as u32)) {
+                    let node_addr = resolve_node_address(
+                        &mut node_address_map,
+                        &mut meta_client,
+                        &shard_loc.node_id,
+                    )
+                    .await;
                     let node_placement = objectio_proto::metadata::NodePlacement {
                         position: shard_loc.position,
                         node_id: shard_loc.node_id.clone(),
-                        node_address: get_node_address_from_meta(
-                            &mut meta_client,
-                            &shard_loc.node_id,
-                        )
-                        .await
-                        .unwrap_or_else(|| "http://localhost:9002".to_string()),
+                        node_address: node_addr,
                         disk_id: shard_loc.disk_id.clone(),
                         shard_type: shard_loc.shard_type,
                         local_group: shard_loc.local_group,
@@ -2293,14 +2314,46 @@ pub async fn get_object(
     }
 }
 
-/// Helper to get node address from metadata service
-async fn get_node_address_from_meta(
-    _meta_client: &mut MetadataServiceClient<Channel>,
-    _node_id: &[u8],
-) -> Option<String> {
-    // TODO: Query metadata service for node address
-    // For now, return None and let caller use default
-    None
+/// Resolve the gRPC address for a node.
+///
+/// First checks the in-memory map (populated from placement response).
+/// On cache miss, fetches all active nodes via `GetListingNodes` and
+/// populates the map so subsequent lookups are free.
+async fn resolve_node_address(
+    node_map: &mut HashMap<Vec<u8>, String>,
+    meta_client: &mut MetadataServiceClient<Channel>,
+    node_id: &[u8],
+) -> String {
+    // Fast path: already in the map (populated from placement or a prior listing call)
+    if let Some(addr) = node_map.get(node_id) {
+        return addr.clone();
+    }
+
+    // Slow path: node not in placement (topology may have changed).
+    // Fetch all active nodes and populate the map.
+    if let Ok(resp) = meta_client
+        .get_listing_nodes(GetListingNodesRequest {
+            bucket: String::new(),
+        })
+        .await
+    {
+        for n in &resp.into_inner().nodes {
+            node_map
+                .entry(n.node_id.clone())
+                .or_insert_with(|| n.address.clone());
+        }
+    }
+
+    node_map
+        .get(node_id)
+        .cloned()
+        .unwrap_or_else(|| {
+            warn!(
+                "Could not resolve address for node {:?}, no listing entry found",
+                Uuid::from_slice(node_id).map_or_else(|_| format!("{node_id:?}"), |u| u.to_string()),
+            );
+            String::from("http://localhost:9002")
+        })
 }
 
 /// Head object (HEAD /{bucket}/{key})
