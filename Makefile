@@ -13,6 +13,7 @@
         docker-multiarch-osd docker-multiarch-cli docker-multiarch-all \
         buildx-setup \
         cluster-up cluster-down cluster-logs \
+        kind-up kind-down kind-load kind-logs kind-status \
         dev push push-multiarch help
 
 # Configuration
@@ -223,6 +224,43 @@ cluster-cli:
 		objectio-cli $(ARGS)
 
 # =============================================================================
+# Kind (Kubernetes in Docker) Cluster
+# =============================================================================
+
+## Create Kind cluster and deploy full ObjectIO stack (S3 + Iceberg + Delta Sharing)
+kind-up:
+	bash deploy/kind/setup.sh
+
+## Create Kind cluster and deploy using pre-built GHCR images (no local build)
+kind-up-registry:
+	bash deploy/kind/setup.sh --registry ghcr.io/cloudomate
+
+## Tear down the Kind cluster
+kind-down:
+	bash deploy/kind/setup.sh --teardown
+
+## Build all images and load into the running Kind cluster
+kind-load:
+	docker build --target gateway       -t objectio-gateway:latest .
+	docker build --target meta          -t objectio-meta:latest .
+	docker build --target osd           -t objectio-osd:latest .
+	docker build --target cli           -t objectio-cli:latest .
+	docker build --target block-gateway -t objectio-block-gateway:latest .
+	kind load docker-image objectio-gateway:latest       --name objectio
+	kind load docker-image objectio-meta:latest          --name objectio
+	kind load docker-image objectio-osd:latest           --name objectio
+	kind load docker-image objectio-cli:latest           --name objectio
+	kind load docker-image objectio-block-gateway:latest --name objectio
+
+## Tail logs for all ObjectIO pods in Kind
+kind-logs:
+	kubectl logs -n objectio -l app.kubernetes.io/name=objectio --all-containers -f --max-log-requests=20
+
+## Show pod status in Kind cluster
+kind-status:
+	kubectl get pods -n objectio -o wide
+
+# =============================================================================
 # CI/CD Helpers
 # =============================================================================
 
@@ -270,12 +308,20 @@ help:
 	@echo "    - linux/amd64: Uses ISA-L for ~3-5x faster erasure coding"
 	@echo "    - linux/arm64: Uses pure Rust SIMD (no ISA-L)"
 	@echo ""
-	@echo "Cluster:"
+	@echo "Local Docker Compose Cluster:"
 	@echo "  cluster-up     Start local cluster"
 	@echo "  cluster-down   Stop local cluster"
 	@echo "  cluster-clean  Stop cluster and remove data"
 	@echo "  cluster-logs   View all logs"
 	@echo "  cluster-status Check cluster status"
+	@echo ""
+	@echo "Kind (Kubernetes) Cluster:"
+	@echo "  kind-up        Create Kind cluster + deploy full stack"
+	@echo "  kind-up-registry  Deploy from GHCR images (no build)"
+	@echo "  kind-down      Delete Kind cluster"
+	@echo "  kind-load      Build + load images into existing Kind cluster"
+	@echo "  kind-logs      Tail all pod logs"
+	@echo "  kind-status    Show pod status"
 	@echo ""
 	@echo "Variables:"
 	@echo "  DOCKER_REGISTRY  Registry prefix (default: '')"

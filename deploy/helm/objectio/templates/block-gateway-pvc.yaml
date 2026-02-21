@@ -1,0 +1,18 @@
+{{- if and .Values.blockGateway.enabled .Values.blockGateway.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "objectio.blockGateway.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: block-gateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.blockGateway.persistence.storageClass }}
+  storageClassName: {{ .Values.blockGateway.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.blockGateway.persistence.size }}
+{{- end }}
