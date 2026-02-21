@@ -85,6 +85,10 @@ services:
       - "0.0.0.0:9100"
       - "--peers"
       - "meta1:9100,meta2:9100,meta3:9100"
+      - "--ec-k"
+      - "3"
+      - "--ec-m"
+      - "2"
       - "--log-level"
       - "info"
     volumes:
@@ -102,6 +106,10 @@ services:
       - "0.0.0.0:9100"
       - "--peers"
       - "meta1:9100,meta2:9100,meta3:9100"
+      - "--ec-k"
+      - "3"
+      - "--ec-m"
+      - "2"
       - "--log-level"
       - "info"
     volumes:
@@ -119,6 +127,10 @@ services:
       - "0.0.0.0:9100"
       - "--peers"
       - "meta1:9100,meta2:9100,meta3:9100"
+      - "--ec-k"
+      - "3"
+      - "--ec-m"
+      - "2"
       - "--log-level"
       - "info"
     volumes:
