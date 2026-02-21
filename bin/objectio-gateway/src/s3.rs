@@ -1965,9 +1965,30 @@ pub async fn get_object(
         None => None,
     };
 
+    // Log stripe layout for multi-stripe objects (multipart uploads)
+    if object.stripes.len() > 1 {
+        let stripe_sizes: Vec<u64> = object.stripes.iter().map(|s| s.data_size).collect();
+        let stripe_total: u64 = stripe_sizes.iter().sum();
+        info!(
+            "Multi-stripe object {}/{}: {} stripes, stripe_sizes={:?}, stripe_total={}, object.size={}",
+            bucket, key, object.stripes.len(), stripe_sizes, stripe_total, total_size
+        );
+        if stripe_total != total_size {
+            warn!(
+                "Stripe data_size sum ({}) does not match object size ({}) for {}/{}",
+                stripe_total, total_size, bucket, key
+            );
+        }
+    }
+
     // Determine which stripes to fetch (skip non-overlapping stripes for range requests)
     let stripe_plan: Vec<(usize, u64)> = if let Some(ref range) = resolved_range {
-        overlapping_stripes(&object.stripes, total_size, range)
+        let plan = overlapping_stripes(&object.stripes, total_size, range);
+        debug!(
+            "Range request bytes={}-{} for {}/{}: fetching {} of {} stripes",
+            range.start, range.end, bucket, key, plan.len(), object.stripes.len()
+        );
+        plan
     } else {
         // Full object: all stripes, offsets unused since we don't slice
         object
@@ -2269,13 +2290,26 @@ pub async fn get_object(
     }
 
     info!(
-        "Read object: {}/{}, size={}, stripes_fetched={}/{}",
+        "Read object: {}/{}, size={}, stripes_fetched={}/{}{}",
         bucket,
         key,
         all_data.len(),
         stripe_plan.len(),
-        object.stripes.len()
+        object.stripes.len(),
+        if let Some(ref r) = resolved_range {
+            format!(", range=bytes {}-{}", r.start, r.end)
+        } else {
+            String::new()
+        }
     );
+
+    // Verify data integrity for full (non-range) reads
+    if resolved_range.is_none() && all_data.len() as u64 != total_size {
+        error!(
+            "Data size mismatch for {}/{}: reassembled {} bytes but object.size={}",
+            bucket, key, all_data.len(), total_size
+        );
+    }
 
     // Build response — range requests already have sliced data
     if let Some(ref range) = resolved_range {
@@ -3356,6 +3390,20 @@ async fn complete_multipart_upload_internal(
         Ok(response) => {
             let resp = response.into_inner();
             if let Some(object) = resp.object {
+                // Log multipart assembly details
+                let stripe_sizes: Vec<u64> = object.stripes.iter().map(|s| s.data_size).collect();
+                let stripe_total: u64 = stripe_sizes.iter().sum();
+                info!(
+                    "Completed multipart {}/{}: size={}, stripes={}, stripe_sizes={:?}, stripe_total={}",
+                    bucket, key, object.size, object.stripes.len(), stripe_sizes, stripe_total
+                );
+                if stripe_total != object.size {
+                    error!(
+                        "Multipart stripe data_size sum ({}) != object.size ({}) for {}/{}",
+                        stripe_total, object.size, bucket, key
+                    );
+                }
+
                 // Store the final object metadata on primary OSD
                 let placement = match meta_client
                     .get_placement(GetPlacementRequest {
