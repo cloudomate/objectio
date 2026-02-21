@@ -13,6 +13,8 @@ ObjectIO is a software-defined storage (SDS) platform written in Rust that provi
 | [Deployment](deployment/README.md) | Installation and configuration |
 | [API Reference](api/README.md) | S3 API, Iceberg REST Catalog, and authentication |
 | [Operations](operations/README.md) | Monitoring, recovery, maintenance |
+| [Delta Sharing](api/delta-sharing.md) | Delta Sharing protocol API |
+| [CLI Reference](api/cli.md) | objectio-cli commands |
 
 ## Documentation Structure
 
@@ -41,6 +43,8 @@ docs/
 │   ├── README.md                # API overview
 │   ├── s3-operations.md         # S3 API reference
 │   ├── iceberg-api.md           # Iceberg REST Catalog API
+│   ├── delta-sharing.md         # Delta Sharing protocol API
+│   ├── cli.md                   # CLI reference
 │   └── authentication.md        # SigV4 and security
 └── operations/
     ├── README.md                # Operations overview
@@ -51,10 +55,12 @@ docs/
 ## Key Features
 
 - **S3 API Compatibility**: Works with aws-cli, boto3, s3cmd, and any S3-compatible SDK
-- **Iceberg REST Catalog**: Apache Iceberg table catalog for Spark, Trino, and Flink
+- **Iceberg REST Catalog**: Apache Iceberg table catalog with governance (tags, quotas, data filters, role bindings)
+- **Delta Sharing**: Iceberg tables shared via the Delta Sharing open protocol with bearer token auth
 - **Block Storage**: Distributed volumes with thin provisioning, snapshots, clones, and QoS
 - **Erasure Coding**: Storage-efficient data protection (4+2, 8+4, LRC)
 - **Raw Disk Access**: O_DIRECT/F_NOCACHE for maximum performance
+- **Monitoring**: Prometheus metrics on all services, Grafana dashboards
 - **Flexible Deployment**: Single-node to multi-datacenter scale
 - **Pure Rust**: No C/C++ dependencies for core functionality
 
@@ -62,7 +68,7 @@ docs/
 
 | Component | Binary | Purpose |
 |-----------|--------|---------|
-| S3 Gateway | `objectio-gateway` | S3 REST API, Iceberg REST Catalog, authentication, erasure encoding |
+| S3 Gateway | `objectio-gateway` | S3 REST API, Iceberg REST Catalog, Delta Sharing, authentication, erasure encoding |
 | Metadata Service | `objectio-meta` | Bucket/object/volume metadata (redb persistence) |
 | Storage Node (OSD) | `objectio-osd` | Raw disk storage, shard I/O, block storage gRPC |
 | Admin CLI | `objectio-cli` | Cluster, user, and volume management |
@@ -80,6 +86,7 @@ docs/
 | Authentication | Complete | SigV4, bucket policies, Iceberg policies, IAM users |
 | Iceberg REST Catalog | Complete | Namespace/table CRUD, access control, metrics |
 | Block Storage | Complete | Volumes, snapshots, clones, QoS, write cache/journal |
+| Delta Sharing | Complete | Shares, recipients, bearer token auth, presigned URLs |
 | Raft Consensus | Placeholder | openraft dependency exists, state machine scaffolded |
 | External IAM | Planned | OIDC, OpenFGA integration |
 
