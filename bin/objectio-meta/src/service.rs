@@ -2436,14 +2436,26 @@ impl MetadataService for MetaService {
                 Box::new(topology.active_nodes())
             };
 
-        // Build a lookup id → admin_state so we can attach the operator
-        // intent to each ListingNode without re-reading the OsdNode list
-        // per iteration.
+        // Build lookups keyed by node_id:
+        //   admin_state_by_id — operator intent (In/Out/Draining)
+        //   address_by_id    — the real OSD endpoint string. The placement
+        //                       topology's `address` field is a SocketAddr
+        //                       which can't represent DNS names (e.g.
+        //                       "http://objectio-osd-3.objectio-osd-headless:9200")
+        //                       and falls back to "0.0.0.0:9200". If we
+        //                       used that, every node would collapse to
+        //                       the same address and the gateway's
+        //                       address-based dedup would reduce the
+        //                       whole cluster to a single row.
         let admin_state_by_id: std::collections::HashMap<[u8; 16], objectio_common::OsdAdminState> =
             osd_nodes
                 .iter()
                 .map(|n| (n.node_id, n.admin_state))
                 .collect();
+        let address_by_id: std::collections::HashMap<[u8; 16], String> = osd_nodes
+            .iter()
+            .map(|n| (n.node_id, n.address.clone()))
+            .collect();
 
         let mut nodes: Vec<ListingNode> = topology_iter
             .enumerate()
@@ -2453,9 +2465,16 @@ impl MetadataService for MetaService {
                     .get(&id_bytes)
                     .copied()
                     .unwrap_or_default();
+                // Prefer the registered DNS form; fall back to the
+                // topology's parsed SocketAddr only when the OSD isn't
+                // in osd_nodes (shouldn't happen in practice).
+                let address = address_by_id
+                    .get(&id_bytes)
+                    .cloned()
+                    .unwrap_or_else(|| format!("http://{}", node.address));
                 ListingNode {
                     node_id: id_bytes.to_vec(),
-                    address: format!("http://{}", node.address),
+                    address,
                     shard_id: idx as u32, // Assign logical shard IDs in order
                     failure_domain: Some(objectio_proto::metadata::FailureDomainInfo {
                         region: node.failure_domain.region.clone(),
