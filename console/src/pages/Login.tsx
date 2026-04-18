@@ -72,14 +72,14 @@ export default function Login({ onLogin }: Props) {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="w-full max-w-xs">
         <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-          <div className="flex items-center gap-2.5 mb-5">
+          <div className="flex flex-col items-start gap-1 mb-5">
             <img
               src={wordmark}
               alt="objectio"
               className="h-7 w-auto select-none"
               draggable={false}
             />
-            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+            <span className="text-[11px] text-gray-400 uppercase tracking-wider pl-0.5">
               Console
             </span>
           </div>

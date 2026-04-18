@@ -65,14 +65,14 @@ export default function Layout({ user, tenant, onLogout }: Props) {
       {/* Sidebar */}
       <aside className="w-52 bg-white border-r border-gray-200 flex flex-col">
         <div className="px-3 py-3 border-b border-gray-200">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col items-start gap-0.5">
             <img
               src={wordmark}
               alt="objectio"
               className="h-6 w-auto select-none"
               draggable={false}
             />
-            <span className="text-[10px] text-gray-400 uppercase tracking-wider">
+            <span className="text-[10px] text-gray-400 uppercase tracking-wider pl-0.5">
               Console
             </span>
           </div>
