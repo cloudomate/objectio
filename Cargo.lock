@@ -2178,6 +2178,7 @@ dependencies = [
  "objectio-meta-store",
  "objectio-placement",
  "objectio-proto",
+ "openraft",
  "parking_lot",
  "prost",
  "rand 0.8.5",

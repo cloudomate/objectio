@@ -4,6 +4,8 @@
 //! object storage and block storage.
 
 mod block_service;
+mod raft_admin;
+mod raft_rpc;
 mod service;
 
 use anyhow::Result;
@@ -83,6 +85,18 @@ struct Args {
     /// Metrics server port (Prometheus)
     #[arg(long, default_value = "9101")]
     metrics_port: u16,
+
+    /// HTTP admin port for Raft bootstrap + membership endpoints
+    /// (/_admin/raft/{init,add-learner,change-membership,status}).
+    #[arg(long, default_value = "9102")]
+    admin_port: u16,
+
+    /// This node's addressable endpoint for Raft peers (host:port of the
+    /// gRPC server). Peers dial this when adding us as a learner or
+    /// sending AppendEntries. Defaults to `--listen` but must be
+    /// pod-reachable, not `0.0.0.0`, in production.
+    #[arg(long, default_value = "")]
+    raft_advertise: String,
 }
 
 #[tokio::main]
@@ -196,16 +210,90 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ------------------------------------------------------------
+    // Raft wiring (Phase R1)
+    //
+    // Meta always runs through Raft. A one-pod deployment boots a
+    // single-voter cluster after /_admin/raft/init; multi-pod
+    // deployments add peers as learners and promote them to voters.
+    // ------------------------------------------------------------
+    let node_id: u64 = args.node_id.unwrap_or(1);
+    let self_addr = if args.raft_advertise.is_empty() {
+        // For local dev we fall back to listen-as-advertise; it's fine
+        // when all pods are on localhost or the k8s headless DNS is
+        // resolvable and peers reach each other by hostname.
+        args.listen.clone()
+    } else {
+        args.raft_advertise.clone()
+    };
+
+    let raft_db = meta_service
+        .store()
+        .map(|s| s.db())
+        .expect("meta service must be backed by a persistent store for Raft");
+    let raft_storage = objectio_meta_store::MetaRaftStorage::new(raft_db);
+    let (log_store, state_machine) = openraft::storage::Adaptor::new(raft_storage);
+    let raft_config = Arc::new(
+        openraft::Config {
+            cluster_name: "objectio-meta".into(),
+            heartbeat_interval: 250,
+            election_timeout_min: 500,
+            election_timeout_max: 1000,
+            ..Default::default()
+        }
+        .validate()
+        .expect("raft config valid"),
+    );
+    let network = objectio_meta_store::MetaRaftNetworkFactory::new(node_id);
+    let raft = openraft::Raft::<objectio_meta_store::MetaTypeConfig>::new(
+        node_id,
+        raft_config,
+        network,
+        log_store,
+        state_machine,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("raft init: {e}"))?;
+    let raft = Arc::new(raft);
+    info!(
+        "Raft node id={} advertise={} (call POST /init on :{} to bootstrap)",
+        node_id, self_addr, args.admin_port
+    );
+
+    // Start HTTP admin server (init, add-learner, change-membership, status)
+    let admin_state = Arc::new(raft_admin::RaftAdminState {
+        raft: raft.clone(),
+        self_id: node_id,
+        self_addr: self_addr.clone(),
+    });
+    let admin_port = args.admin_port;
+    tokio::spawn(async move {
+        let router = admin_state.router();
+        let addr: SocketAddr = format!("0.0.0.0:{admin_port}")
+            .parse()
+            .expect("admin port valid");
+        info!("Raft admin API on http://0.0.0.0:{}/", admin_port);
+        if let Ok(l) = TcpListener::bind(addr).await {
+            let _ = axum::serve(l, router).await;
+        } else {
+            error!("Raft admin server failed to bind {admin_port}");
+        }
+    });
+
     info!("Starting gRPC server on {}", addr);
     info!(
         "Metrics available at http://0.0.0.0:{}/metrics",
         metrics_port
     );
 
-    // Start gRPC server with both metadata and block services
+    // Start gRPC server with metadata, block, and Raft RPC services.
+    let raft_rpc_svc = raft_rpc::RaftRpcService::new(raft.clone(), node_id);
     Server::builder()
         .add_service(MetadataServiceServer::from_arc(meta_service))
         .add_service(BlockServiceServer::from_arc(block_service))
+        .add_service(objectio_proto::raft::raft_rpc_server::RaftRpcServer::new(
+            raft_rpc_svc,
+        ))
         .serve_with_shutdown(addr, async {
             tokio::signal::ctrl_c().await.ok();
             info!("Shutting down...");

@@ -13,6 +13,7 @@ use objectio_proto::metadata::BucketMeta;
 use prost::Message;
 use redb::{Database, ReadableTable};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::error;
 
 /// Error type for metadata store operations
@@ -45,11 +46,24 @@ impl From<redb::TransactionError> for MetaStoreError {
 pub type MetaStoreResult<T> = Result<T, MetaStoreError>;
 
 /// Persistent metadata store backed by redb.
+///
+/// Wraps an `Arc<Database>` so the same file can be shared with
+/// [`crate::MetaRaftStorage`] — consensus needs to write to the same
+/// `CONFIG` table that MetaStore reads from, and redb rejects multiple
+/// handles to the same file, so handle-sharing is the only option.
 pub struct MetaStore {
-    db: Database,
+    db: Arc<Database>,
 }
 
 impl MetaStore {
+    /// Borrow the underlying shared database handle. Exposed for
+    /// [`crate::MetaRaftStorage`] so Raft's state-machine applies can
+    /// write to the same tables the rest of meta reads.
+    #[must_use]
+    pub fn db(&self) -> Arc<Database> {
+        self.db.clone()
+    }
+
     /// Open (or create) the redb database at the given path.
     pub fn open(path: impl AsRef<Path>) -> MetaStoreResult<Self> {
         let path = path.as_ref();
@@ -90,7 +104,7 @@ impl MetaStore {
         }
         write_txn.commit()?;
 
-        Ok(Self { db })
+        Ok(Self { db: Arc::new(db) })
     }
 
     // ---- Buckets (prost-encoded) ----

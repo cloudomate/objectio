@@ -442,6 +442,14 @@ impl MetaService {
         !self.osd_nodes.read().is_empty()
     }
 
+    /// Borrow the underlying persistent store, if the service is
+    /// persistence-backed. Raft wiring needs this so `MetaRaftStorage`
+    /// can share the same redb database handle.
+    #[must_use]
+    pub fn store(&self) -> Option<Arc<MetaStore>> {
+        self.store.clone()
+    }
+
     /// Load all data from the persistent store into in-memory maps.
     fn load_from_store(&self) {
         let Some(store) = &self.store else { return };
