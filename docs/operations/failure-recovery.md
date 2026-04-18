@@ -207,18 +207,36 @@ leader's clients see `failed_precondition "not the raft leader —
 forward to node X"` on the next write and retry there.
 
 ```bash
-# Simulate a leader crash
-kubectl delete pod meta-0 -n objectio
+# Simulate a leader crash. Use `--grace-period=0 --force` — a graceful
+# shutdown keeps sending heartbeats during the termination window,
+# which suppresses the follower election until the container actually
+# exits:
+kubectl delete pod -n objectio objectio-meta-0 --grace-period=0 --force
 
-# Watch followers elect a new leader (usually < 1s)
-kubectl logs -n objectio meta-1 | grep -E "state_change|leader"
-
-# New leader visible in status
-curl http://meta-1:9102/status | jq .leader_id
+# Watch followers elect a new leader (expect ~5s from kill to new
+# leader with default heartbeat=250ms, election_timeout=500–1000ms,
+# leader_lease=1s):
+for i in 1 2; do
+  curl -s http://objectio-meta-$i.objectio-meta-headless:9102/status
+done
 ```
 
-When meta-0 comes back, it rejoins as a follower, catches up via
-AppendEntries replication, and starts participating again.
+**Verified on the datacore kind cluster (2026-04-18):** leader (node 1)
+force-deleted at T+0s; meta-1 (node 2) became leader at term=2, log
+index 6 at ~T+5s. Meta-2 recognized the new leader in the same
+interval. Writes continued against the new leader. When meta-0's
+StatefulSet pod came back on its existing PVC ~30s later, it read
+its Raft log, noticed the higher term, stepped down from its stored
+leader state, received AppendEntries from the new leader, and
+rejoined as Follower at term=2/log=6 without operator action.
+
+**Bootstrap addresses matter.** The membership stores the peer
+advertise address. Bootstrap must use the new helm chart (which sets
+`--raft-advertise $HOSTNAME.objectio-meta-headless:9100`) — a
+`kubectl set image` rollover on a pre-Raft StatefulSet misses the new
+args and would register node 1 with listen address `0.0.0.0:9100`,
+breaking future replication to that pod. Re-install fresh when
+rolling up from a pre-R1 release.
 
 ### Complete metadata cluster failure
 
