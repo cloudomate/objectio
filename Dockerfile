@@ -160,6 +160,10 @@ LABEL org.opencontainers.image.architecture="${TARGETARCH}"
 
 COPY --from=builder /build/target/release/objectio-gateway /usr/local/bin/
 
+# Console web UI — the gateway serves it as a static SPA at /_console.
+# Must be pre-built (`cd console && npm run build`) before the docker build.
+COPY console/dist /usr/share/objectio/console
+
 USER objectio
 EXPOSE 9000
 
