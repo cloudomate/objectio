@@ -1,0 +1,194 @@
+global:
+  imageRegistry: ghcr.io/cloudomate
+  imagePullPolicy: IfNotPresent
+
+gateway:
+  image:
+    repository: objectio-gateway
+    tag: latest
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 9000
+  noAuth: true
+  logLevel: info
+  warehouseLocation: s3://objectio-warehouse
+  region: us-east-1
+  # Gateway's own topological position. Feeds locality-aware read routing:
+  # shards on OSDs that share enclosing failure-domain levels are pulled
+  # first, saving cross-zone / cross-DC bandwidth. Empty strings disable
+  # the ranking (every OSD ranks as "unknown" distance).
+  topology:
+    region: ""
+    zone: ""
+    datacenter: ""
+    rack: ""
+  # Delta Sharing presigned URL config. Set externalEndpoint + credentials to enable.
+  deltaSharing:
+    externalEndpoint: ""
+    accessKeyId: ""
+    secretKey: ""
+  oidc:
+    issuerUrl: ""
+    clientId: ""
+    clientSecret: ""
+    audience: ""
+    groupsClaim: "groups"
+    scopes: "openid profile email"
+    adminRoles: ""
+  # Server-side encryption (SSE-S3) master key. When enabled, the gateway
+  # gets OBJECTIO_MASTER_KEY mounted from a Secret; buckets with default
+  # encryption will encrypt at rest. The Secret is generated once on first
+  # install and preserved across `helm upgrade` — rotating it would make
+  # existing encrypted objects unreadable.
+  sse:
+    enabled: false
+    # Optional: pin the 32-byte base64 key. Leave empty to auto-generate.
+    masterKey: ""
+  # KMS backend. `local` is self-contained and uses the service master key
+  # above to wrap per-KMS-key material. `vault` points at an external
+  # HashiCorp Vault Transit engine; the referenced `tokenSecretName` Secret
+  # must contain a `token` key holding a Vault token with the right ACLs.
+  kms:
+    backend: local
+    vault:
+      addr: ""
+      transitPath: transit
+      tokenSecretName: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []
+
+meta:
+  image:
+    repository: objectio-meta
+    tag: latest
+  replicas: 1
+  service:
+    port: 9100
+    metricsPort: 9101
+  logLevel: info
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+osd:
+  image:
+    repository: objectio-osd
+    tag: latest
+  replicas: 1
+  service:
+    port: 9200
+    metricsPort: 9201
+  logLevel: info
+  persistence:
+    data:
+      size: 50Gi
+      storageClass: ""
+    state:
+      size: 5Gi
+      storageClass: ""
+  failureDomain:
+    region: default
+    datacenter: default
+    rack: rack1
+  storage:
+    blockSize: 4194304
+    diskFile: disk.raw
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+blockGateway:
+  enabled: false
+  image:
+    repository: objectio-block-gateway
+    tag: latest
+  replicas: 1
+  advertiseHost: ""   # Hostname/IP advertised in NBD attachment URLs; defaults to service ClusterIP
+  cacheBytes: 268435456   # 256 MB write cache
+  flushIntervalS: 5
+  logLevel: info
+  service:
+    type: ClusterIP
+    grpcPort: 9300
+    nbdPort: 10809
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+ec:
+  k: 1
+  m: 0
+
+monitoring:
+  enabled: false
+
+  prometheus:
+    image:
+      repository: prom/prometheus
+      tag: v2.48.0
+    retention: 30d
+    scrapeInterval: 15s
+    service:
+      type: ClusterIP
+      port: 9090
+    persistence:
+      size: 10Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+  grafana:
+    image:
+      repository: grafana/grafana
+      tag: "10.2.2"
+    adminUser: admin
+    adminPassword: objectio
+    service:
+      type: ClusterIP
+      port: 3000
+    persistence:
+      size: 5Gi
+      storageClass: ""
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi

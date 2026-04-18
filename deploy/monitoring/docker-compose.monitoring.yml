@@ -1,0 +1,74 @@
+# ObjectIO Monitoring Stack
+#
+# Provides Prometheus metrics collection and Grafana visualization
+#
+# Usage:
+#   # Start ObjectIO first (from /data/objectio):
+#   docker compose up -d
+#
+#   # Then start monitoring stack:
+#   docker compose -f docker-compose.monitoring.yml up -d
+#
+#   # Access Grafana at http://localhost:3000 (admin/objectio)
+#   # Access Prometheus at http://localhost:9090
+#
+# For production, consider:
+#   - Adding persistent volumes for Prometheus data
+#   - Setting up alertmanager for notifications
+#   - Using proper authentication for Grafana
+
+services:
+  # Prometheus - Metrics collection and storage
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: objectio-prometheus
+    hostname: prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - datacore_objectio-net
+
+  # Grafana - Visualization and dashboards
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: objectio-grafana
+    hostname: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=objectio
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    networks:
+      - datacore_objectio-net
+    depends_on:
+      - prometheus
+
+networks:
+  # Use the existing ObjectIO datacore network
+  datacore_objectio-net:
+    external: true
+
+volumes:
+  prometheus-data:
+    name: objectio-prometheus-data
+  grafana-data:
+    name: objectio-grafana-data

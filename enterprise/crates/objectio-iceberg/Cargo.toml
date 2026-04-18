@@ -1,0 +1,24 @@
+[package]
+name = "objectio-iceberg"
+description = "Iceberg REST Catalog for ObjectIO (BUSL-1.1)"
+version.workspace = true
+edition.workspace = true
+# Override the workspace Apache-2.0 default — this crate is BUSL-licensed.
+# See enterprise/LICENSE for the full text; it auto-converts to Apache-2.0
+# on the Change Date (2030-04-18).
+license = "BUSL-1.1"
+
+[dependencies]
+objectio-auth = { workspace = true }
+objectio-common = { workspace = true }
+objectio-proto = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+prost = { workspace = true }
+
+[lints]
+workspace = true

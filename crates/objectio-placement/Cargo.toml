@@ -1,0 +1,17 @@
+[package]
+name = "objectio-placement"
+description = "CRUSH-like placement algorithm for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objectio-common = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

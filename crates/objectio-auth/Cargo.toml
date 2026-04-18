@@ -1,0 +1,59 @@
+[package]
+name = "objectio-auth"
+description = "Authentication and authorization for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["builtin"]
+# Builtin SigV4 authentication (always available)
+builtin = []
+# OIDC/JWT authentication support
+oidc = ["dep:jsonwebtoken", "dep:reqwest"]
+# OpenFGA policy engine support
+openfga = ["dep:reqwest"]
+# Full feature set
+full = ["builtin", "oidc", "openfga"]
+
+[dependencies]
+# Async support
+async-trait = "0.1"
+
+# Crypto for SigV4/SigV2
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Time handling
+chrono = "0.4"
+
+# HTTP types
+http = "1.2"
+
+# Regex for pattern matching
+regex = "1.11"
+
+# Random generation
+rand = { workspace = true }
+
+# OIDC support (optional)
+jsonwebtoken = { version = "9", optional = true }
+
+# HTTP client for external services (optional)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

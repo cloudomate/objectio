@@ -1,0 +1,24 @@
+[package]
+name = "objectio-s3"
+description = "S3-compatible API layer for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+objectio-common = { workspace = true }
+objectio-client = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+quick-xml = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+ring = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }

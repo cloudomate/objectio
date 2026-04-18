@@ -1,0 +1,99 @@
+# ObjectIO Docker Compose - Development Tools
+# Use docker-compose.cluster.yml for running a local cluster
+#
+# Usage:
+#   docker compose run dev        # Interactive dev shell
+#   docker compose run build      # Build workspace
+#   docker compose run test       # Run tests
+#   docker compose run lint       # Run clippy
+
+services:
+  # Development container for building and running ObjectIO
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    working_dir: /build
+    stdin_open: true
+    tty: true
+    command: bash
+
+  # Build service - builds the workspace with ISA-L
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    working_dir: /build
+    command: cargo build --workspace --features isal
+
+  # Release build
+  build-release:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    working_dir: /build
+    command: cargo build --workspace --release --features isal
+
+  # Test service - runs all tests
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    working_dir: /build
+    command: cargo test --workspace --features isal
+
+  # Clippy linting service
+  lint:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/build/target
+    working_dir: /build
+    command: cargo clippy --workspace --all-targets --features isal -- -D warnings
+
+  # Format check
+  fmt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder-base
+    volumes:
+      - .:/build
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+    working_dir: /build
+    command: cargo fmt --all -- --check
+
+volumes:
+  cargo-cache:
+  cargo-git:
+  target-cache:

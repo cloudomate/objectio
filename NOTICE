@@ -1,0 +1,30 @@
+ObjectIO
+Copyright (c) 2026 ObjectIO
+
+This product includes software developed at ObjectIO (https://github.com/cloudomate/objectio).
+
+Dual licensing
+==============
+
+Most of this repository is licensed under the Apache License, Version 2.0.
+See the root [LICENSE](./LICENSE) file for the full terms.
+
+Files under the `enterprise/` directory are licensed under the Business
+Source License 1.1 (BUSL-1.1) instead — see [enterprise/LICENSE](./enterprise/LICENSE).
+On 2030-04-18, those files automatically convert to Apache-2.0 under the
+BUSL change-license clause.
+
+- `enterprise/crates/objectio-iceberg/` — Iceberg REST Catalog
+- `enterprise/crates/objectio-delta-sharing/` — Delta Sharing server
+
+The BUSL portion is also gated at runtime by an Ed25519-signed license
+file; install one via the console or `PUT /_admin/license` to unlock the
+Enterprise endpoints.
+
+Third-party components
+======================
+
+See `Cargo.lock` for the full dependency tree. Notable upstream components
+include tokio, axum, tonic, prost, reed-solomon-simd, redb, and ed25519-dalek.
+Each is distributed under its own upstream license (Apache-2.0, MIT, or
+dual).

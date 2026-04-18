@@ -1,0 +1,20 @@
+# OSD 4 Configuration - datacore 3+2 EC deployment
+
+[osd]
+node_name = "osd4"
+listen = "0.0.0.0:9200"
+meta_endpoint = "http://meta1:9100"
+weight = 1.0
+
+[osd.failure_domain]
+region = "local"
+datacenter = "datacore"
+rack = "rack1"
+
+[storage]
+disks = ["/data/disk0/disk.raw"]
+block_size = 4194304
+data_dir = "/var/lib/objectio/osd"
+
+[logging]
+level = "info"

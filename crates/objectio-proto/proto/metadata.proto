@@ -1,0 +1,1582 @@
+syntax = "proto3";
+
+package objectio.metadata;
+
+// Metadata service for bucket and object operations
+service MetadataService {
+    // Bucket operations
+    rpc CreateBucket(CreateBucketRequest) returns (CreateBucketResponse);
+    rpc DeleteBucket(DeleteBucketRequest) returns (DeleteBucketResponse);
+    rpc GetBucket(GetBucketRequest) returns (GetBucketResponse);
+    rpc ListBuckets(ListBucketsRequest) returns (ListBucketsResponse);
+
+    // Object metadata operations
+    rpc CreateObject(CreateObjectRequest) returns (CreateObjectResponse);
+    rpc DeleteObject(DeleteObjectRequest) returns (DeleteObjectResponse);
+    rpc GetObject(GetObjectRequest) returns (GetObjectResponse);
+    rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
+
+    // Placement
+    rpc GetPlacement(GetPlacementRequest) returns (GetPlacementResponse);
+
+    // Multipart upload
+    rpc CreateMultipartUpload(CreateMultipartUploadRequest) returns (CreateMultipartUploadResponse);
+    rpc GetMultipartUpload(GetMultipartUploadRequest) returns (GetMultipartUploadResponse);
+    rpc RegisterPart(RegisterPartRequest) returns (RegisterPartResponse);
+    rpc ListParts(ListPartsRequest) returns (ListPartsResponse);
+    rpc CompleteMultipartUpload(CompleteMultipartUploadRequest) returns (CompleteMultipartUploadResponse);
+    rpc AbortMultipartUpload(AbortMultipartUploadRequest) returns (AbortMultipartUploadResponse);
+    rpc ListMultipartUploads(ListMultipartUploadsRequest) returns (ListMultipartUploadsResponse);
+
+    // Bucket policy
+    rpc SetBucketPolicy(SetBucketPolicyRequest) returns (SetBucketPolicyResponse);
+    rpc GetBucketPolicy(GetBucketPolicyRequest) returns (GetBucketPolicyResponse);
+    rpc DeleteBucketPolicy(DeleteBucketPolicyRequest) returns (DeleteBucketPolicyResponse);
+
+    // OSD registration (for placement)
+    rpc RegisterOsd(RegisterOsdRequest) returns (RegisterOsdResponse);
+
+    // Get all active nodes for listing operations (scatter-gather)
+    rpc GetListingNodes(GetListingNodesRequest) returns (GetListingNodesResponse);
+
+    // IAM operations (user/credential persistence)
+    rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+    rpc GetUser(GetUserRequest) returns (GetUserResponse);
+    rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+    rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+    rpc CreateAccessKey(CreateAccessKeyRequest) returns (CreateAccessKeyResponse);
+    rpc ListAccessKeys(ListAccessKeysRequest) returns (ListAccessKeysResponse);
+    rpc DeleteAccessKey(DeleteAccessKeyRequest) returns (DeleteAccessKeyResponse);
+    rpc GetAccessKeyForAuth(GetAccessKeyForAuthRequest) returns (GetAccessKeyForAuthResponse);
+
+    // Iceberg catalog operations
+    rpc IcebergCreateNamespace(IcebergCreateNamespaceRequest) returns (IcebergCreateNamespaceResponse);
+    rpc IcebergLoadNamespace(IcebergLoadNamespaceRequest) returns (IcebergLoadNamespaceResponse);
+    rpc IcebergDropNamespace(IcebergDropNamespaceRequest) returns (IcebergDropNamespaceResponse);
+    rpc IcebergListNamespaces(IcebergListNamespacesRequest) returns (IcebergListNamespacesResponse);
+    rpc IcebergUpdateNamespaceProperties(IcebergUpdateNamespacePropertiesRequest) returns (IcebergUpdateNamespacePropertiesResponse);
+    rpc IcebergNamespaceExists(IcebergNamespaceExistsRequest) returns (IcebergNamespaceExistsResponse);
+    rpc IcebergCreateTable(IcebergCreateTableRequest) returns (IcebergCreateTableResponse);
+    rpc IcebergLoadTable(IcebergLoadTableRequest) returns (IcebergLoadTableResponse);
+    rpc IcebergCommitTable(IcebergCommitTableRequest) returns (IcebergCommitTableResponse);
+    rpc IcebergDropTable(IcebergDropTableRequest) returns (IcebergDropTableResponse);
+    rpc IcebergRenameTable(IcebergRenameTableRequest) returns (IcebergRenameTableResponse);
+    rpc IcebergListTables(IcebergListTablesRequest) returns (IcebergListTablesResponse);
+    rpc IcebergTableExists(IcebergTableExistsRequest) returns (IcebergTableExistsResponse);
+
+    // Iceberg warehouse management
+    rpc IcebergCreateWarehouse(IcebergCreateWarehouseRequest) returns (IcebergCreateWarehouseResponse);
+    rpc IcebergListWarehouses(IcebergListWarehousesRequest) returns (IcebergListWarehousesResponse);
+    rpc IcebergDeleteWarehouse(IcebergDeleteWarehouseRequest) returns (IcebergDeleteWarehouseResponse);
+
+    // Iceberg table policy
+    rpc IcebergSetTablePolicy(IcebergSetTablePolicyRequest) returns (IcebergSetTablePolicyResponse);
+    rpc IcebergGetTablePolicy(IcebergGetTablePolicyRequest) returns (IcebergGetTablePolicyResponse);
+
+    // Group management
+    rpc CreateGroup(CreateGroupRequest) returns (CreateGroupResponse);
+    rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse);
+    rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+    rpc AddUserToGroup(AddUserToGroupRequest) returns (AddUserToGroupResponse);
+    rpc RemoveUserFromGroup(RemoveUserFromGroupRequest) returns (RemoveUserFromGroupResponse);
+    rpc GetUserGroups(GetUserGroupsRequest) returns (GetUserGroupsResponse);
+
+    // Data filter management (column/row security)
+    rpc CreateDataFilter(CreateDataFilterRequest) returns (CreateDataFilterResponse);
+    rpc ListDataFilters(ListDataFiltersRequest) returns (ListDataFiltersResponse);
+    rpc DeleteDataFilter(DeleteDataFilterRequest) returns (DeleteDataFilterResponse);
+    rpc GetDataFiltersForPrincipal(GetDataFiltersForPrincipalRequest) returns (ListDataFiltersResponse);
+
+    // Delta Sharing protocol — share, schema (namespace), table, and recipient management
+    rpc DeltaCreateShare(DeltaCreateShareRequest)         returns (DeltaCreateShareResponse);
+    rpc DeltaGetShare(DeltaGetShareRequest)               returns (DeltaGetShareResponse);
+    rpc DeltaListShares(DeltaListSharesRequest)           returns (DeltaListSharesResponse);
+    rpc DeltaDropShare(DeltaDropShareRequest)             returns (DeltaDropShareResponse);
+    rpc DeltaAddTable(DeltaAddTableRequest)               returns (DeltaAddTableResponse);
+    rpc DeltaRemoveTable(DeltaRemoveTableRequest)         returns (DeltaRemoveTableResponse);
+    rpc DeltaListTables(DeltaListTablesRequest)           returns (DeltaListTablesResponse);
+    rpc DeltaCreateRecipient(DeltaCreateRecipientRequest) returns (DeltaCreateRecipientResponse);
+    rpc DeltaGetRecipientByToken(DeltaGetRecipientByTokenRequest) returns (DeltaGetRecipientByTokenResponse);
+    rpc DeltaListRecipients(DeltaListRecipientsRequest)   returns (DeltaListRecipientsResponse);
+    rpc DeltaDropRecipient(DeltaDropRecipientRequest)     returns (DeltaDropRecipientResponse);
+
+    // Cluster configuration (OIDC, storage settings, etc.)
+    rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+    rpc SetConfig(SetConfigRequest) returns (SetConfigResponse);
+    rpc DeleteConfig(DeleteConfigRequest) returns (DeleteConfigResponse);
+    rpc ListConfig(ListConfigRequest) returns (ListConfigResponse);
+
+    // Server Pools
+    rpc CreatePool(CreatePoolRequest) returns (CreatePoolResponse);
+    rpc GetPool(GetPoolRequest) returns (GetPoolResponse);
+    rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+    rpc UpdatePool(UpdatePoolRequest) returns (UpdatePoolResponse);
+    rpc DeletePool(DeletePoolRequest) returns (DeletePoolResponse);
+
+    // Tenants (multi-tenancy)
+    rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+    rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+    rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+    rpc UpdateTenant(UpdateTenantRequest) returns (UpdateTenantResponse);
+    rpc DeleteTenant(DeleteTenantRequest) returns (DeleteTenantResponse);
+
+    // Bucket versioning
+    rpc PutBucketVersioning(PutBucketVersioningRequest) returns (PutBucketVersioningResponse);
+    rpc GetBucketVersioning(GetBucketVersioningRequest) returns (GetBucketVersioningResponse);
+
+    // Object lock configuration
+    rpc PutObjectLockConfiguration(PutObjectLockConfigRequest) returns (PutObjectLockConfigResponse);
+    rpc GetObjectLockConfiguration(GetObjectLockConfigRequest) returns (GetObjectLockConfigResponse);
+
+    // Lifecycle configuration
+    rpc PutBucketLifecycle(PutBucketLifecycleRequest) returns (PutBucketLifecycleResponse);
+    rpc GetBucketLifecycle(GetBucketLifecycleRequest) returns (GetBucketLifecycleResponse);
+    rpc DeleteBucketLifecycle(DeleteBucketLifecycleRequest) returns (DeleteBucketLifecycleResponse);
+
+    // Bucket default server-side encryption configuration
+    rpc PutBucketEncryption(PutBucketEncryptionRequest) returns (PutBucketEncryptionResponse);
+    rpc GetBucketEncryption(GetBucketEncryptionRequest) returns (GetBucketEncryptionResponse);
+    rpc DeleteBucketEncryption(DeleteBucketEncryptionRequest) returns (DeleteBucketEncryptionResponse);
+
+    // KMS key management (for SSE-KMS). Key material is wrapped by the
+    // service master key before it reaches meta, so meta never sees
+    // plaintext KEKs — they're encrypted-at-rest in Redb.
+    rpc CreateKmsKey(CreateKmsKeyRequest) returns (CreateKmsKeyResponse);
+    rpc GetKmsKey(GetKmsKeyRequest) returns (GetKmsKeyResponse);
+    rpc ListKmsKeys(ListKmsKeysRequest) returns (ListKmsKeysResponse);
+    rpc DeleteKmsKey(DeleteKmsKeyRequest) returns (DeleteKmsKeyResponse);
+
+    // Named IAM policies (PBAC)
+    rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
+    rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+    rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+    rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+    rpc AttachPolicy(AttachPolicyRequest) returns (AttachPolicyResponse);
+    rpc DetachPolicy(DetachPolicyRequest) returns (DetachPolicyResponse);
+    rpc ListAttachedPolicies(ListAttachedPoliciesRequest) returns (ListAttachedPoliciesResponse);
+}
+
+// Bucket metadata
+message BucketMeta {
+    string name = 1;
+    string owner = 2;
+    uint64 created_at = 3;
+    string storage_class = 4;
+    VersioningState versioning = 5;
+    string pool = 6;                 // Server pool for placement (empty = default pool)
+    string tenant = 7;               // Owning tenant (empty = system tenant)
+    uint64 quota_bytes = 8;          // Per-bucket storage quota (0 = unlimited)
+    uint64 quota_objects = 9;        // Per-bucket object count quota (0 = unlimited)
+    ObjectLockConfiguration object_lock = 10;  // Object lock config (immutable after creation)
+    // NOTE: default encryption is persisted in a separate table keyed by bucket name
+    // (BUCKET_ENCRYPTION_CONFIGS) to keep BucketMeta read-hot and avoid rewriting it on
+    // PutBucketEncryption. Loaded into the meta service on boot. No field here.
+}
+
+enum VersioningState {
+    VERSIONING_DISABLED = 0;
+    VERSIONING_ENABLED = 1;
+    VERSIONING_SUSPENDED = 2;
+}
+
+// Erasure coding type
+enum ErasureType {
+    // Standard Reed-Solomon MDS (Maximum Distance Separable)
+    // Any k shards can reconstruct the data
+    ERASURE_MDS = 0;
+
+    // Locally Repairable Codes (LRC)
+    // Local parity groups enable faster single-shard recovery
+    ERASURE_LRC = 1;
+
+    // Simple replication (no erasure coding)
+    // Data is replicated N times without encoding
+    // Use replication_count=1 for single-disk mode (no redundancy)
+    // Use replication_count=3 for 3-way replication
+    ERASURE_REPLICATION = 2;
+}
+
+// Object metadata
+message ObjectMeta {
+    string bucket = 1;
+    string key = 2;
+    bytes object_id = 3;        // 16-byte UUID
+    uint64 size = 4;
+    string etag = 5;
+    string content_type = 6;
+    uint64 created_at = 7;
+    uint64 modified_at = 8;
+    string storage_class = 9;
+    map<string, string> user_metadata = 10;
+    string version_id = 11;
+    bool is_delete_marker = 12;
+    repeated StripeMeta stripes = 13;
+    ObjectRetention retention = 14;   // Object-level retention policy
+    LegalHold legal_hold = 15;        // Legal hold status
+
+    // Server-side encryption (all optional; absent = plaintext, backward compatible).
+    // Populated on PutObject; consulted on GetObject to decrypt the reconstructed stream.
+    SseAlgorithm encryption_algorithm = 16;
+    string kms_key_id = 17;                        // KMS key ARN (SSE_KMS only)
+    bytes encrypted_dek = 18;                      // DEK wrapped by master/KMS key
+    bytes encryption_iv = 19;                      // Base IV; per-chunk IVs derived deterministically
+    map<string, string> encryption_context = 20;   // AWS KMS encryption context
+}
+
+// Stripe metadata (EC group)
+message StripeMeta {
+    uint64 stripe_id = 1;
+    uint32 ec_k = 2;                // Data shards
+    uint32 ec_m = 3;                // Total parity shards (local + global for LRC)
+    repeated ShardLocation shards = 4;
+
+    // LRC-specific fields
+    ErasureType ec_type = 5;        // MDS or LRC
+    uint32 ec_local_parity = 6;     // Number of local parity shards (LRC only)
+    uint32 ec_global_parity = 7;    // Number of global parity shards (LRC only)
+    uint32 local_group_size = 8;    // Data shards per local group (LRC only)
+
+    // Original data size for this stripe (needed for decoding multipart uploads)
+    uint64 data_size = 9;
+
+    // Object ID used when writing shards (needed for multipart uploads where each part has different ID)
+    bytes object_id = 10;
+
+    // AES-CTR initialization vector used to encrypt this stripe's bytes,
+    // when the object is SSE-S3/SSE-KMS. Empty for plaintext objects and
+    // for legacy single-stripe encrypted objects that stored the IV on
+    // `ObjectMeta.encryption_iv` only (fall back to that if unset).
+    // Multipart objects populate this per stripe.
+    bytes encryption_iv = 11;
+}
+
+// Shard location
+message ShardLocation {
+    uint32 position = 1;        // Position in stripe
+    bytes node_id = 2;          // 16-byte UUID
+    bytes disk_id = 3;          // 16-byte UUID
+    uint64 offset = 4;
+
+    // LRC-specific fields
+    ShardType shard_type = 5;   // Type of shard (data, local parity, global parity)
+    uint32 local_group = 6;     // Local group index (for LRC)
+}
+
+// Shard type for LRC
+enum ShardType {
+    SHARD_DATA = 0;             // Data shard
+    SHARD_LOCAL_PARITY = 1;     // Local parity shard (XOR of local group)
+    SHARD_GLOBAL_PARITY = 2;    // Global parity shard (RS over all data)
+}
+
+// Create bucket
+message CreateBucketRequest {
+    string name = 1;
+    string owner = 2;
+    string storage_class = 3;
+    string region = 4;
+    string tenant = 5;              // Owning tenant (empty = system tenant)
+}
+
+message CreateBucketResponse {
+    BucketMeta bucket = 1;
+}
+
+// Delete bucket
+message DeleteBucketRequest {
+    string name = 1;
+}
+
+message DeleteBucketResponse {
+    bool success = 1;
+}
+
+// Get bucket
+message GetBucketRequest {
+    string name = 1;
+}
+
+message GetBucketResponse {
+    BucketMeta bucket = 1;
+}
+
+// List buckets
+message ListBucketsRequest {
+    string owner = 1;
+    string tenant = 2;              // Filter by tenant (empty = all for system admin)
+}
+
+message ListBucketsResponse {
+    repeated BucketMeta buckets = 1;
+}
+
+// Create object
+message CreateObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    uint64 size = 3;
+    string content_type = 4;
+    string etag = 5;
+    map<string, string> user_metadata = 6;
+    repeated StripeMeta stripes = 7;
+    bytes object_id = 8;        // 16-byte UUID (provided by caller)
+}
+
+message CreateObjectResponse {
+    ObjectMeta object = 1;
+}
+
+// Delete object
+message DeleteObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;      // Optional: delete specific version
+}
+
+message DeleteObjectResponse {
+    bool success = 1;
+    string version_id = 2;      // Version ID of delete marker (if versioning enabled)
+}
+
+// Get object
+message GetObjectRequest {
+    string bucket = 1;
+    string key = 2;
+    string version_id = 3;      // Optional: get specific version
+}
+
+message GetObjectResponse {
+    ObjectMeta object = 1;
+}
+
+// List objects
+message ListObjectsRequest {
+    string bucket = 1;
+    string prefix = 2;
+    string delimiter = 3;
+    string start_after = 4;
+    string continuation_token = 5;
+    uint32 max_keys = 6;
+    bool include_versions = 7;
+}
+
+message ListObjectsResponse {
+    repeated ObjectMeta objects = 1;
+    repeated string common_prefixes = 2;
+    string next_continuation_token = 3;
+    bool is_truncated = 4;
+    uint32 key_count = 5;
+}
+
+// Get placement for new object
+message GetPlacementRequest {
+    string bucket = 1;
+    string key = 2;
+    uint64 size = 3;
+    string storage_class = 4;
+}
+
+message GetPlacementResponse {
+    string storage_class = 1;
+    uint32 ec_k = 2;
+    uint32 ec_m = 3;                // Total parity (local + global for LRC)
+    repeated NodePlacement nodes = 4;
+
+    // LRC-specific fields
+    ErasureType ec_type = 5;        // MDS, LRC, or REPLICATION
+    uint32 ec_local_parity = 6;     // Number of local parity shards (LRC only)
+    uint32 ec_global_parity = 7;    // Number of global parity shards (LRC only)
+    uint32 local_group_size = 8;    // Data shards per local group (LRC only)
+
+    // Replication-specific fields
+    uint32 replication_count = 9;   // Number of replicas (REPLICATION mode only)
+}
+
+message NodePlacement {
+    uint32 position = 1;            // Shard position
+    bytes node_id = 2;
+    string node_address = 3;
+    bytes disk_id = 4;
+
+    // LRC-specific fields
+    ShardType shard_type = 5;       // Type of shard
+    uint32 local_group = 6;         // Local group index (for LRC)
+}
+
+// Multipart upload
+message CreateMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string content_type = 3;
+    map<string, string> user_metadata = 4;
+
+    // SSE decision made on the CreateMultipartUpload request (AWS semantics:
+    // multipart SSE is fixed at creation time; per-UploadPart SSE headers
+    // are ignored). The gateway generates + wraps the DEK here so parts
+    // can decrypt it without round-tripping through a KMS again.
+    SseAlgorithm encryption_algorithm = 5;
+    string kms_key_id = 6;
+    bytes encrypted_dek = 7;
+    // SSE-C only: the base64-encoded MD5 of the customer-supplied key.
+    // UploadPart requests for this MPU must resupply the key and a matching
+    // MD5 — we never store the key itself.
+    string customer_key_md5 = 8;
+    // SSE-KMS only: AWS-compatible encryption context (arbitrary string map).
+    // Supplied at CreateMultipartUpload time as an AEAD binding on the wrapped
+    // DEK — decrypt fails if the context differs.
+    map<string, string> encryption_context = 9;
+}
+
+message CreateMultipartUploadResponse {
+    string upload_id = 1;
+    string bucket = 2;
+    string key = 3;
+
+    // Echo back the SSE decision so the gateway response to the client
+    // can include the right `x-amz-server-side-encryption` header.
+    SseAlgorithm encryption_algorithm = 4;
+    string kms_key_id = 5;
+}
+
+// Look up an in-flight MPU so the gateway can fetch its encryption
+// state when an UploadPart request arrives (AWS semantics fix SSE at
+// CreateMultipartUpload time; per-part SSE headers are ignored).
+message GetMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+}
+
+message GetMultipartUploadResponse {
+    bool found = 1;
+    string content_type = 2;
+    map<string, string> user_metadata = 3;
+    uint64 initiated = 4;
+    SseAlgorithm encryption_algorithm = 5;
+    string kms_key_id = 6;
+    bytes encrypted_dek = 7;
+    string customer_key_md5 = 8;
+    map<string, string> encryption_context = 9;
+}
+
+message CompleteMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    repeated PartInfo parts = 4;
+}
+
+message PartInfo {
+    uint32 part_number = 1;
+    string etag = 2;
+    uint64 size = 3;
+}
+
+message CompleteMultipartUploadResponse {
+    ObjectMeta object = 1;
+}
+
+message AbortMultipartUploadRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+}
+
+message AbortMultipartUploadResponse {
+    bool success = 1;
+}
+
+message ListMultipartUploadsRequest {
+    string bucket = 1;
+    string prefix = 2;
+    string key_marker = 3;
+    string upload_id_marker = 4;
+    uint32 max_uploads = 5;
+}
+
+message ListMultipartUploadsResponse {
+    repeated MultipartUpload uploads = 1;
+    string next_key_marker = 2;
+    string next_upload_id_marker = 3;
+    bool is_truncated = 4;
+}
+
+message MultipartUpload {
+    string key = 1;
+    string upload_id = 2;
+    uint64 initiated = 3;
+    string storage_class = 4;
+}
+
+// Register a completed part upload
+message RegisterPartRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    uint32 part_number = 4;
+    string etag = 5;
+    uint64 size = 6;
+    repeated StripeMeta stripes = 7;  // EC stripes info for this part (multiple for large parts)
+}
+
+message RegisterPartResponse {
+    bool success = 1;
+    string etag = 2;            // Confirmed ETag
+}
+
+// List parts of a multipart upload
+message ListPartsRequest {
+    string bucket = 1;
+    string key = 2;
+    string upload_id = 3;
+    uint32 part_number_marker = 4;  // Start listing after this part number
+    uint32 max_parts = 5;           // Max parts to return (default 1000)
+}
+
+message ListPartsResponse {
+    repeated PartMeta parts = 1;
+    bool is_truncated = 2;
+    uint32 next_part_number_marker = 3;
+    string bucket = 4;
+    string key = 5;
+    string upload_id = 6;
+}
+
+// Extended part metadata (includes stripe info for internal use)
+message PartMeta {
+    uint32 part_number = 1;
+    string etag = 2;
+    uint64 size = 3;
+    uint64 last_modified = 4;
+    repeated StripeMeta stripes = 5;  // EC stripes info (multiple for large parts)
+}
+
+// Bucket policy operations
+message SetBucketPolicyRequest {
+    string bucket = 1;
+    string policy_json = 2;  // JSON-encoded bucket policy
+}
+
+message SetBucketPolicyResponse {
+    bool success = 1;
+}
+
+message GetBucketPolicyRequest {
+    string bucket = 1;
+}
+
+message GetBucketPolicyResponse {
+    string policy_json = 1;  // JSON-encoded bucket policy (empty if no policy)
+    bool has_policy = 2;     // True if bucket has a policy set
+}
+
+message DeleteBucketPolicyRequest {
+    string bucket = 1;
+}
+
+message DeleteBucketPolicyResponse {
+    bool success = 1;
+}
+
+// Failure domain for CRUSH placement. Empty string at any level means
+// "inherit from enclosing level"; default-zero keeps OSDs that only
+// populate region/datacenter/rack backward-compatible with this richer
+// model. `zone` sits between region and datacenter (AZ / row); `host`
+// sits below rack (physical host) so multiple OSDs on the same box can
+// share a failure-correlation group.
+message FailureDomainInfo {
+    string region = 1;          // Region name (e.g., "us-east-1")
+    string datacenter = 2;      // Datacenter name (e.g., "dc1"); in cloud: empty and rely on zone
+    string rack = 3;            // Rack identifier (e.g., "rack-01")
+    string zone = 4;            // Availability zone (e.g., "us-east-1a") or row (on-prem)
+    string host = 5;            // Physical host (e.g., "node-07")
+}
+
+// OSD registration
+message RegisterOsdRequest {
+    bytes node_id = 1;                  // 16-byte UUID
+    string address = 2;                 // gRPC endpoint (e.g., "http://192.168.1.10:9002")
+    repeated bytes disk_ids = 3;        // 16-byte UUIDs for each disk
+    FailureDomainInfo failure_domain = 4; // Where this OSD sits in the topology
+    string node_name = 5;               // Human-readable name (optional)
+    double weight = 6;                  // Placement weight (default: 1.0)
+    // Raw capacity of each disk in bytes, index-aligned with `disk_ids`.
+    // Meta sums these across OSDs to enforce the license's max_raw_capacity_bytes
+    // cap. Older OSDs that don't populate this leave the cap check with 0 for
+    // their disks, which is conservative (under-reports usage, never blocks
+    // an already-registered cluster from re-registering).
+    repeated uint64 disk_capacity_bytes = 7;
+}
+
+message RegisterOsdResponse {
+    bool success = 1;
+    uint64 topology_version = 2;        // Current cluster topology version
+}
+
+// Get listing nodes for scatter-gather list operations
+message GetListingNodesRequest {
+    string bucket = 1;          // Optional: filter by bucket's storage class
+}
+
+message GetListingNodesResponse {
+    repeated ListingNode nodes = 1;
+    uint64 topology_version = 2; // For continuation token validation
+}
+
+message ListingNode {
+    bytes node_id = 1;
+    string address = 2;
+    uint32 shard_id = 3;        // Logical shard ID for partitioned listing (0..N-1)
+    // Full failure-domain coordinates so gateways can render the topology
+    // tree and prefer same-domain shards on reads (Phase 2). Empty fields
+    // on older meta servers fall back to "default".
+    FailureDomainInfo failure_domain = 4;
+}
+
+// ============ IAM Messages ============
+
+// User status
+enum UserStatus {
+    USER_ACTIVE = 0;
+    USER_SUSPENDED = 1;
+    USER_DELETED = 2;
+}
+
+// Access key status
+enum KeyStatus {
+    KEY_ACTIVE = 0;
+    KEY_INACTIVE = 1;
+}
+
+// User metadata
+message UserMeta {
+    string user_id = 1;
+    string display_name = 2;
+    string arn = 3;
+    UserStatus status = 4;
+    uint64 created_at = 5;
+    string email = 6;
+    string tenant = 7;              // Owning tenant (empty = system tenant)
+}
+
+// Access key metadata
+message AccessKeyMeta {
+    string access_key_id = 1;
+    string secret_access_key = 2;   // Only returned on creation
+    string user_id = 3;
+    KeyStatus status = 4;
+    uint64 created_at = 5;
+    string tenant = 6;              // Inherited from user's tenant
+}
+
+// Create user
+message CreateUserRequest {
+    string display_name = 1;
+    string email = 2;
+    string tenant = 3;              // Assign user to tenant (empty = system tenant)
+}
+
+message CreateUserResponse {
+    UserMeta user = 1;
+}
+
+// Get user
+message GetUserRequest {
+    string user_id = 1;
+}
+
+message GetUserResponse {
+    UserMeta user = 1;
+}
+
+// List users
+message ListUsersRequest {
+    uint32 max_results = 1;
+    string marker = 2;
+}
+
+message ListUsersResponse {
+    repeated UserMeta users = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+// Delete user
+message DeleteUserRequest {
+    string user_id = 1;
+}
+
+message DeleteUserResponse {
+    bool success = 1;
+}
+
+// Create access key
+message CreateAccessKeyRequest {
+    string user_id = 1;
+}
+
+message CreateAccessKeyResponse {
+    AccessKeyMeta access_key = 1;   // Includes secret_access_key
+}
+
+// List access keys
+message ListAccessKeysRequest {
+    string user_id = 1;
+}
+
+message ListAccessKeysResponse {
+    repeated AccessKeyMeta access_keys = 1;  // secret_access_key is empty
+}
+
+// Delete access key
+message DeleteAccessKeyRequest {
+    string access_key_id = 1;
+}
+
+message DeleteAccessKeyResponse {
+    bool success = 1;
+}
+
+// Get access key for authentication (includes secret for verification)
+message GetAccessKeyForAuthRequest {
+    string access_key_id = 1;
+}
+
+message GetAccessKeyForAuthResponse {
+    AccessKeyMeta access_key = 1;   // Includes secret_access_key
+    UserMeta user = 2;
+}
+
+// ============ Iceberg Catalog Messages ============
+
+// Iceberg namespace (multi-level, e.g. ["db1", "schema1"])
+message IcebergNamespace {
+    repeated string levels = 1;
+}
+
+// Iceberg table identifier
+message IcebergTableIdentifier {
+    repeated string namespace_levels = 1;
+    string name = 2;
+}
+
+// Iceberg table entry stored in meta
+message IcebergTableEntry {
+    string metadata_location = 1;   // S3 URL to metadata.json
+    uint64 created_at = 2;
+    uint64 updated_at = 3;
+    bytes metadata_json = 4;        // Full table metadata JSON
+    bytes policy_json = 5;          // Optional: IAM-style access policy JSON
+}
+
+// ---- Namespace RPCs ----
+
+message IcebergCreateNamespaceRequest {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+    string warehouse = 10;
+}
+
+message IcebergCreateNamespaceResponse {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+}
+
+message IcebergLoadNamespaceRequest {
+    repeated string namespace_levels = 1;
+    string warehouse = 10;
+}
+
+message IcebergLoadNamespaceResponse {
+    repeated string namespace_levels = 1;
+    map<string, string> properties = 2;
+}
+
+message IcebergDropNamespaceRequest {
+    repeated string namespace_levels = 1;
+    string warehouse = 10;
+}
+
+message IcebergDropNamespaceResponse {
+    bool success = 1;
+}
+
+message IcebergListNamespacesRequest {
+    repeated string parent_levels = 1;  // empty = list top-level
+    string page_token = 2;
+    uint32 page_size = 3;
+    string warehouse = 10;
+}
+
+message IcebergListNamespacesResponse {
+    repeated IcebergNamespace namespaces = 1;
+    string next_page_token = 2;
+}
+
+message IcebergUpdateNamespacePropertiesRequest {
+    repeated string namespace_levels = 1;
+    repeated string removals = 2;
+    map<string, string> updates = 3;
+    string warehouse = 10;
+}
+
+message IcebergUpdateNamespacePropertiesResponse {
+    repeated string updated = 1;
+    repeated string removed = 2;
+    repeated string missing = 3;    // keys requested for removal that didn't exist
+}
+
+message IcebergNamespaceExistsRequest {
+    repeated string namespace_levels = 1;
+    string warehouse = 10;
+}
+
+message IcebergNamespaceExistsResponse {
+    bool exists = 1;
+}
+
+// ---- Table RPCs ----
+
+message IcebergCreateTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string metadata_location = 3;   // S3 URL to initial metadata.json
+    bytes metadata_json = 4;        // Full table metadata JSON
+    string warehouse = 10;
+}
+
+message IcebergCreateTableResponse {
+    string metadata_location = 1;
+    bytes metadata_json = 2;        // Stored metadata JSON echoed back
+}
+
+message IcebergLoadTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string warehouse = 10;
+}
+
+message IcebergLoadTableResponse {
+    string metadata_location = 1;
+    bytes metadata_json = 2;        // Stored metadata JSON
+}
+
+message IcebergCommitTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string current_metadata_location = 3;   // Expected (CAS)
+    string new_metadata_location = 4;       // Desired
+    bytes new_metadata_json = 5;            // New metadata JSON to store
+    string warehouse = 10;
+}
+
+message IcebergCommitTableResponse {
+    string metadata_location = 1;
+    bytes metadata_json = 2;                // Stored metadata JSON
+}
+
+message IcebergDropTableRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    bool purge = 3;
+    string warehouse = 10;
+}
+
+message IcebergDropTableResponse {
+    bool success = 1;
+}
+
+message IcebergRenameTableRequest {
+    IcebergTableIdentifier source = 1;
+    IcebergTableIdentifier destination = 2;
+}
+
+message IcebergRenameTableResponse {
+    bool success = 1;
+}
+
+message IcebergListTablesRequest {
+    repeated string namespace_levels = 1;
+    string page_token = 2;
+    uint32 page_size = 3;
+    string warehouse = 10;
+}
+
+message IcebergListTablesResponse {
+    repeated IcebergTableIdentifier identifiers = 1;
+    string next_page_token = 2;
+}
+
+message IcebergTableExistsRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string warehouse = 10;
+}
+
+message IcebergTableExistsResponse {
+    bool exists = 1;
+}
+
+// ---- Table policy RPCs ----
+
+message IcebergSetTablePolicyRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    bytes policy_json = 3;
+}
+
+message IcebergSetTablePolicyResponse {
+    bool success = 1;
+}
+
+message IcebergGetTablePolicyRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message IcebergGetTablePolicyResponse {
+    bytes policy_json = 1;
+}
+
+// ============ Group Messages ============
+
+message GroupMeta {
+    string group_id = 1;
+    string group_name = 2;
+    string arn = 3;
+    repeated string member_user_ids = 4;
+    uint64 created_at = 5;
+}
+
+message CreateGroupRequest {
+    string group_name = 1;
+}
+
+message CreateGroupResponse {
+    GroupMeta group = 1;
+}
+
+message DeleteGroupRequest {
+    string group_id = 1;
+}
+
+message DeleteGroupResponse {
+    bool success = 1;
+}
+
+message ListGroupsRequest {
+    uint32 max_results = 1;
+    string marker = 2;
+}
+
+message ListGroupsResponse {
+    repeated GroupMeta groups = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+message AddUserToGroupRequest {
+    string group_id = 1;
+    string user_id = 2;
+}
+
+message AddUserToGroupResponse {
+    bool success = 1;
+}
+
+message RemoveUserFromGroupRequest {
+    string group_id = 1;
+    string user_id = 2;
+}
+
+message RemoveUserFromGroupResponse {
+    bool success = 1;
+}
+
+message GetUserGroupsRequest {
+    string user_id = 1;
+}
+
+message GetUserGroupsResponse {
+    repeated GroupMeta groups = 1;
+}
+
+// ============ Iceberg Data Filter Messages ============
+
+message IcebergDataFilter {
+    string filter_id = 1;
+    string filter_name = 2;
+    repeated string namespace_levels = 3;
+    string table_name = 4;
+    repeated string principal_arns = 5;
+    repeated string allowed_columns = 6;
+    repeated string excluded_columns = 7;
+    string row_filter_expression = 8;
+    uint64 created_at = 9;
+    uint64 updated_at = 10;
+}
+
+message CreateDataFilterRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string filter_name = 3;
+    repeated string principal_arns = 4;
+    repeated string allowed_columns = 5;
+    repeated string excluded_columns = 6;
+    string row_filter_expression = 7;
+}
+
+message CreateDataFilterResponse {
+    IcebergDataFilter filter = 1;
+}
+
+message ListDataFiltersRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+}
+
+message ListDataFiltersResponse {
+    repeated IcebergDataFilter filters = 1;
+}
+
+message DeleteDataFilterRequest {
+    string filter_id = 1;
+}
+
+message DeleteDataFilterResponse {
+    bool success = 1;
+}
+
+message GetDataFiltersForPrincipalRequest {
+    repeated string namespace_levels = 1;
+    string table_name = 2;
+    string principal_arn = 3;
+    repeated string group_arns = 4;
+}
+
+// ============================================================
+// Delta Sharing Protocol Messages
+// ============================================================
+
+// A Share is a named collection of Iceberg namespace+table pairs shared with recipients.
+message DeltaShareEntry {
+    string name    = 1;
+    string comment = 2;
+    int64  created_at = 3;
+    string tenant  = 4;     // Owning tenant (empty = system)
+}
+
+// A table inside a share. Schema maps to an Iceberg namespace; name maps to an Iceberg table.
+message DeltaShareTableEntry {
+    string share              = 1;
+    string schema             = 2;   // Iceberg namespace (first-level)
+    string table_name         = 3;   // Iceberg table name
+    string share_id           = 4;   // stable UUID for delta-sharing responses
+    string table_type         = 5;   // "delta", "uniform" (Iceberg via Delta Sharing), or empty (default: infer)
+    string bucket             = 6;   // For delta tables: S3 bucket containing Delta Lake files
+    string path               = 7;   // For delta tables: path within bucket to Delta table root
+    string warehouse          = 8;   // For uniform/iceberg tables: warehouse name
+    string namespace          = 9;   // For uniform/iceberg tables: full namespace (dot-separated)
+}
+
+// A recipient identified by a bearer token (stored as bcrypt hash).
+message DeltaRecipientEntry {
+    string name          = 1;
+    // bcrypt hash of the bearer token; the raw token is returned only once at creation time
+    string token_hash    = 2;
+    repeated string shares = 3;
+    int64  created_at    = 4;
+}
+
+// ---- Share RPCs ----
+
+message DeltaCreateShareRequest {
+    string name    = 1;
+    string comment = 2;
+    string tenant  = 3;
+}
+message DeltaCreateShareResponse {
+    DeltaShareEntry share = 1;
+}
+
+message DeltaGetShareRequest {
+    string name = 1;
+}
+message DeltaGetShareResponse {
+    DeltaShareEntry share = 1;
+}
+
+message DeltaListSharesRequest {
+    uint32 max_results       = 1;
+    string page_token        = 2;
+    string tenant            = 3;   // Filter by tenant (empty = all)
+}
+message DeltaListSharesResponse {
+    repeated DeltaShareEntry shares = 1;
+    string next_page_token          = 2;
+}
+
+message DeltaDropShareRequest {
+    string name = 1;
+}
+message DeltaDropShareResponse {
+    bool success = 1;
+}
+
+// ---- Table RPCs ----
+
+message DeltaAddTableRequest {
+    string share      = 1;
+    string schema     = 2;
+    string table_name = 3;
+    string table_type = 4;   // "delta" or "uniform" (Iceberg)
+    string bucket     = 5;   // For delta: S3 bucket
+    string path       = 6;   // For delta: path to Delta table root
+    string warehouse  = 7;   // For uniform: warehouse name
+    string namespace  = 8;   // For uniform: full namespace
+}
+message DeltaAddTableResponse {
+    DeltaShareTableEntry table = 1;
+}
+
+message DeltaRemoveTableRequest {
+    string share      = 1;
+    string schema     = 2;
+    string table_name = 3;
+}
+message DeltaRemoveTableResponse {
+    bool success = 1;
+}
+
+message DeltaListTablesRequest {
+    string share        = 1;
+    string schema       = 2;   // optional: filter by schema
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message DeltaListTablesResponse {
+    repeated DeltaShareTableEntry tables = 1;
+    string next_page_token               = 2;
+}
+
+// ---- Recipient RPCs ----
+
+message DeltaCreateRecipientRequest {
+    string name             = 1;
+    repeated string shares  = 2;
+}
+message DeltaCreateRecipientResponse {
+    DeltaRecipientEntry recipient  = 1;
+    // Raw bearer token (returned once; not stored in plain text)
+    string              raw_token  = 2;
+}
+
+message DeltaGetRecipientByTokenRequest {
+    // Raw bearer token presented in the Authorization header
+    string raw_token = 1;
+}
+message DeltaGetRecipientByTokenResponse {
+    DeltaRecipientEntry recipient = 1;
+    bool                found     = 2;
+}
+
+message DeltaListRecipientsRequest {
+    uint32 max_results = 1;
+    string page_token  = 2;
+}
+message DeltaListRecipientsResponse {
+    repeated DeltaRecipientEntry recipients = 1;
+    string next_page_token                  = 2;
+}
+
+message DeltaDropRecipientRequest {
+    string name = 1;
+}
+message DeltaDropRecipientResponse {
+    bool success = 1;
+}
+
+// ============ Cluster Configuration ============
+
+message ConfigEntry {
+    string key = 1;           // Hierarchical key: "identity/openid/keycloak", "cluster/region"
+    bytes value = 2;          // JSON-encoded config value
+    uint64 updated_at = 3;    // Unix timestamp of last update
+    string updated_by = 4;    // user_id or "system" for CLI defaults
+    uint64 version = 5;       // Monotonically increasing version for change detection
+}
+
+message GetConfigRequest {
+    string key = 1;
+}
+message GetConfigResponse {
+    ConfigEntry entry = 1;
+    bool found = 2;
+}
+
+message SetConfigRequest {
+    string key = 1;
+    bytes value = 2;
+    string updated_by = 3;
+}
+message SetConfigResponse {
+    ConfigEntry entry = 1;
+}
+
+message DeleteConfigRequest {
+    string key = 1;
+}
+message DeleteConfigResponse {
+    bool success = 1;
+}
+
+message ListConfigRequest {
+    string prefix = 1;        // e.g. "identity/openid" lists all OIDC providers
+}
+message ListConfigResponse {
+    repeated ConfigEntry entries = 1;
+}
+
+// ============ Server Pools ============
+
+// A pool is a named group of OSDs with its own EC config and placement rules.
+// Pools are shared infrastructure — multiple tenants can use the same pool.
+message PoolConfig {
+    string name = 1;                      // Unique pool name (e.g. "default", "fast-nvme", "archive")
+    ErasureType ec_type = 2;              // MDS, LRC, or Replication
+    uint32 ec_k = 3;                      // Data shards
+    uint32 ec_m = 4;                      // Parity shards (MDS) or total parity (LRC)
+    uint32 ec_local_parity = 5;           // LRC local parity per group
+    uint32 ec_global_parity = 6;          // LRC global parity
+    uint32 replication_count = 7;         // Replication factor (if type=Replication)
+    repeated string osd_tags = 8;         // Only place data on OSDs with matching tags (empty = all)
+    string failure_domain = 9;            // Minimum failure domain separation: "rack", "node", "datacenter"
+    uint64 quota_bytes = 10;              // Pool-level capacity quota (0 = unlimited)
+    string description = 11;
+    bool enabled = 12;
+    uint64 created_at = 13;
+    uint64 updated_at = 14;
+}
+
+message CreatePoolRequest { PoolConfig pool = 1; }
+message CreatePoolResponse { PoolConfig pool = 1; }
+
+message GetPoolRequest { string name = 1; }
+message GetPoolResponse { PoolConfig pool = 1; bool found = 2; }
+
+message ListPoolsRequest {}
+message ListPoolsResponse { repeated PoolConfig pools = 1; }
+
+message UpdatePoolRequest { PoolConfig pool = 1; }
+message UpdatePoolResponse { PoolConfig pool = 1; }
+
+message DeletePoolRequest { string name = 1; }
+message DeletePoolResponse { bool success = 1; }
+
+// ============ Tenants (Multi-tenancy) ============
+
+// A tenant is an isolation boundary for users, buckets, and access policies.
+// Tenants are assigned to pool(s) via configuration. The default pool is shared.
+message TenantConfig {
+    string name = 1;                      // Unique tenant name (e.g. "acme-corp", "team-analytics")
+    string display_name = 2;
+    string default_pool = 3;              // Default pool for new buckets in this tenant (empty = system default)
+    repeated string allowed_pools = 4;    // Pools this tenant may use (empty = all pools)
+    uint64 quota_bytes = 5;               // Tenant-level storage quota (0 = unlimited)
+    uint64 quota_buckets = 6;             // Max buckets for this tenant (0 = unlimited)
+    uint64 quota_objects = 7;             // Max objects across all buckets (0 = unlimited)
+    repeated string admin_users = 8;      // User ARNs with admin rights for this tenant
+    string oidc_provider = 9;             // OIDC provider name for this tenant's users (empty = any)
+    map<string, string> labels = 10;      // Arbitrary metadata labels
+    bool enabled = 11;
+    uint64 created_at = 12;
+    uint64 updated_at = 13;
+}
+
+message CreateTenantRequest { TenantConfig tenant = 1; }
+message CreateTenantResponse { TenantConfig tenant = 1; }
+
+message GetTenantRequest { string name = 1; }
+message GetTenantResponse { TenantConfig tenant = 1; bool found = 2; }
+
+message ListTenantsRequest {}
+message ListTenantsResponse { repeated TenantConfig tenants = 1; }
+
+message UpdateTenantRequest { TenantConfig tenant = 1; }
+message UpdateTenantResponse { TenantConfig tenant = 1; }
+
+message DeleteTenantRequest { string name = 1; }
+message DeleteTenantResponse { bool success = 1; }
+
+// ============================================================
+// Object Lock & Retention
+// ============================================================
+
+enum RetentionMode {
+    RETENTION_NONE = 0;
+    RETENTION_GOVERNANCE = 1;
+    RETENTION_COMPLIANCE = 2;
+}
+
+message RetentionRule {
+    RetentionMode mode = 1;
+    uint32 days = 2;        // Retention period in days (0 = not set)
+    uint32 years = 3;       // Retention period in years (0 = not set)
+}
+
+message ObjectLockConfiguration {
+    bool enabled = 1;
+    RetentionRule default_retention = 2;  // Default retention applied to new objects
+}
+
+message ObjectRetention {
+    RetentionMode mode = 1;
+    uint64 retain_until_date = 2;   // Unix timestamp
+}
+
+message LegalHold {
+    bool status = 1;    // true = ON, false = OFF
+}
+
+// ============================================================
+// Lifecycle Configuration
+// ============================================================
+
+message LifecycleConfiguration {
+    repeated LifecycleRule rules = 1;
+}
+
+message LifecycleRule {
+    string id = 1;
+    bool enabled = 2;
+    string prefix = 3;                                  // Filter by key prefix
+    uint32 expiration_days = 4;                         // Delete objects after N days
+    uint64 expiration_date = 5;                         // Delete objects after this date (unix timestamp, 0 = not set)
+    uint32 noncurrent_version_expiration_days = 6;      // Delete non-current versions after N days
+    bool expired_object_delete_marker = 7;              // Remove expired delete markers
+    uint32 abort_incomplete_multipart_upload_days = 8;  // Abort incomplete uploads after N days
+}
+
+// ============================================================
+// Versioning RPCs
+// ============================================================
+
+message PutBucketVersioningRequest {
+    string bucket = 1;
+    VersioningState state = 2;
+}
+message PutBucketVersioningResponse { bool success = 1; }
+
+message GetBucketVersioningRequest { string bucket = 1; }
+message GetBucketVersioningResponse { VersioningState state = 1; }
+
+// ============================================================
+// Object Lock RPCs
+// ============================================================
+
+message PutObjectLockConfigRequest {
+    string bucket = 1;
+    ObjectLockConfiguration config = 2;
+}
+message PutObjectLockConfigResponse { bool success = 1; }
+
+message GetObjectLockConfigRequest { string bucket = 1; }
+message GetObjectLockConfigResponse {
+    ObjectLockConfiguration config = 1;
+    bool found = 2;
+}
+
+// ============================================================
+// Lifecycle RPCs
+// ============================================================
+
+message PutBucketLifecycleRequest {
+    string bucket = 1;
+    LifecycleConfiguration config = 2;
+}
+message PutBucketLifecycleResponse { bool success = 1; }
+
+message GetBucketLifecycleRequest { string bucket = 1; }
+message GetBucketLifecycleResponse {
+    LifecycleConfiguration config = 1;
+    bool found = 2;
+}
+
+message DeleteBucketLifecycleRequest { string bucket = 1; }
+message DeleteBucketLifecycleResponse { bool success = 1; }
+
+// ============================================================
+// Iceberg Warehouse Management
+// ============================================================
+
+message IcebergWarehouse {
+    string name = 1;                    // Warehouse name (e.g. "production", "analytics")
+    string bucket = 2;                  // Backing S3 bucket name
+    string location = 3;               // S3 location (e.g. "s3://wh-production")
+    string tenant = 4;                  // Owning tenant (empty = system)
+    uint64 created_at = 5;
+    map<string, string> properties = 6; // Custom properties
+}
+
+message IcebergCreateWarehouseRequest {
+    string name = 1;
+    string tenant = 2;                  // Owning tenant
+    map<string, string> properties = 3;
+}
+
+message IcebergCreateWarehouseResponse {
+    IcebergWarehouse warehouse = 1;
+}
+
+message IcebergListWarehousesRequest {
+    string tenant = 1;                  // Filter by tenant (empty = all)
+}
+
+message IcebergListWarehousesResponse {
+    repeated IcebergWarehouse warehouses = 1;
+}
+
+message IcebergDeleteWarehouseRequest {
+    string name = 1;
+}
+
+message IcebergDeleteWarehouseResponse {
+    bool success = 1;
+}
+
+// ============================================================
+// Named IAM Policies (PBAC)
+// ============================================================
+
+message PolicyObject {
+    string name = 1;                // Unique policy name (e.g. "readonly", "dev-readwrite")
+    string policy_json = 2;         // AWS IAM JSON policy document
+    uint64 created_at = 3;
+    uint64 updated_at = 4;
+}
+
+message CreatePolicyRequest {
+    string name = 1;
+    string policy_json = 2;
+}
+message CreatePolicyResponse { PolicyObject policy = 1; }
+
+message GetPolicyRequest { string name = 1; }
+message GetPolicyResponse { PolicyObject policy = 1; bool found = 2; }
+
+message ListPoliciesRequest {}
+message ListPoliciesResponse { repeated PolicyObject policies = 1; }
+
+message DeletePolicyRequest { string name = 1; }
+message DeletePolicyResponse { bool success = 1; }
+
+// Attach/detach a named policy to a user or group
+message AttachPolicyRequest {
+    string policy_name = 1;
+    string user_id = 2;            // Attach to user (set one of user_id or group_id)
+    string group_id = 3;           // Attach to group
+}
+message AttachPolicyResponse { bool success = 1; }
+
+message DetachPolicyRequest {
+    string policy_name = 1;
+    string user_id = 2;
+    string group_id = 3;
+}
+message DetachPolicyResponse { bool success = 1; }
+
+message ListAttachedPoliciesRequest {
+    string user_id = 1;            // List policies for user (set one)
+    string group_id = 2;           // List policies for group
+}
+message ListAttachedPoliciesResponse { repeated string policy_names = 1; }
+
+// ============================================================
+// Server-Side Encryption
+// ============================================================
+
+// Encryption algorithm for an object.
+// Per-bucket defaults use the same enum (SSE_C cannot be a bucket default).
+enum SseAlgorithm {
+    SSE_NONE = 0;       // Plaintext (absent field on ObjectMeta defaults here)
+    SSE_S3 = 1;         // AES256, server-managed DEK wrapped by service master key
+    SSE_KMS = 2;        // aws:kms — DEK wrapped by external KMS
+    SSE_C = 3;          // Customer-provided key (per-request only; never a bucket default)
+}
+
+// One rule inside BucketSseConfiguration. AWS allows exactly one rule today;
+// we model it as repeated for wire compatibility with the AWS XML schema.
+message SseRule {
+    SseAlgorithm algorithm = 1;
+    string kms_key_id = 2;          // KMS key ARN (SSE_KMS only)
+    bool bucket_key_enabled = 3;    // S3 Bucket Keys optimization (SSE_KMS only)
+}
+
+// Default server-side encryption for a bucket.
+// Applied when a PutObject request does not specify its own SSE headers.
+message BucketSseConfiguration {
+    repeated SseRule rules = 1;
+}
+
+message PutBucketEncryptionRequest {
+    string bucket = 1;
+    BucketSseConfiguration config = 2;
+}
+message PutBucketEncryptionResponse { bool success = 1; }
+
+message GetBucketEncryptionRequest { string bucket = 1; }
+message GetBucketEncryptionResponse {
+    BucketSseConfiguration config = 1;
+    bool found = 2;
+}
+
+message DeleteBucketEncryptionRequest { string bucket = 1; }
+message DeleteBucketEncryptionResponse { bool success = 1; }
+
+// ============================================================
+// KMS Keys (for SSE-KMS)
+// ============================================================
+
+enum KmsKeyStatus {
+    KMS_KEY_ENABLED = 0;
+    KMS_KEY_DISABLED = 1;
+    KMS_KEY_PENDING_DELETION = 2;
+}
+
+// A KMS key entry. The gateway never sends plaintext key material over
+// the wire — `wrapped_key_material` is always encrypted by the gateway's
+// service master key (env `OBJECTIO_MASTER_KEY`). Meta stores the blob
+// verbatim and returns it on read; the gateway unwraps in-process.
+message KmsKey {
+    string key_id = 1;                 // Short id, e.g. "obj-2026-04-17-abc"
+    string arn = 2;                    // arn:obio:kms:::{key_id}
+    string description = 3;
+    bytes wrapped_key_material = 4;    // Encrypted by service master key
+    KmsKeyStatus status = 5;
+    uint64 created_at = 6;
+    uint64 updated_at = 7;
+    string created_by = 8;             // User ARN that created the key
+}
+
+message CreateKmsKeyRequest {
+    string key_id = 1;                 // Optional: server generates if empty
+    string description = 2;
+    bytes wrapped_key_material = 3;    // Already-wrapped 32 bytes
+    string created_by = 4;
+}
+message CreateKmsKeyResponse { KmsKey key = 1; }
+
+message GetKmsKeyRequest { string key_id = 1; }
+message GetKmsKeyResponse { KmsKey key = 1; bool found = 2; }
+
+message ListKmsKeysRequest {
+    uint32 max_results = 1;
+    string page_token = 2;
+}
+message ListKmsKeysResponse {
+    repeated KmsKey keys = 1;
+    string next_page_token = 2;
+}
+
+message DeleteKmsKeyRequest { string key_id = 1; }
+message DeleteKmsKeyResponse { bool success = 1; }

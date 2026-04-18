@@ -1,0 +1,23 @@
+{{- if .Values.blockGateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "objectio.blockGateway.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: block-gateway
+spec:
+  type: {{ .Values.blockGateway.service.type }}
+  ports:
+    - name: grpc
+      port: {{ .Values.blockGateway.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: nbd
+      port: {{ .Values.blockGateway.service.nbdPort }}
+      targetPort: nbd
+      protocol: TCP
+  selector:
+    {{- include "objectio.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: block-gateway
+{{- end }}

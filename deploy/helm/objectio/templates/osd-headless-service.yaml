@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "objectio.osd.headless" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: osd
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: grpc
+      port: {{ .Values.osd.service.port }}
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "objectio.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: osd

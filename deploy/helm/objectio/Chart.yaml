@@ -1,0 +1,15 @@
+apiVersion: v2
+name: objectio
+description: Distributed object storage with erasure coding, S3-compatible API, and block storage
+type: application
+version: 0.1.0
+appVersion: latest
+kubeVersion: ">=1.26.0"
+keywords:
+  - object-storage
+  - s3
+  - erasure-coding
+  - block-storage
+home: https://github.com/cloudomate/objectio
+sources:
+  - https://github.com/cloudomate/objectio

@@ -1,0 +1,31 @@
+[package]
+name = "objectio-erasure"
+description = "Pluggable erasure coding backends for ObjectIO"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Note: build.rs is no longer needed - erasure-isa-l crate bundles and builds ISA-L
+
+[features]
+default = ["rust-simd"]
+# Pure Rust backend using reed-solomon-simd (portable, works on all platforms)
+rust-simd = ["reed-solomon-simd"]
+# Intel ISA-L backend (x86/x86_64 only, uses erasure-isa-l crate which bundles ISA-L)
+# Build requirements: nasm, autoconf, automake, libtool, libclang-dev
+# ISA-L works on both Intel and AMD x86/x86_64 processors (uses standard AVX/AVX2/AVX-512)
+isal = ["erasure-isa-l"]
+
+[dependencies]
+objectio-common = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+# Optional: Pure Rust SIMD backend (default)
+reed-solomon-simd = { workspace = true, optional = true }
+
+# Optional: Intel ISA-L backend (bundles ISA-L, compiles from source)
+erasure-isa-l = { workspace = true, optional = true }
+
+[dev-dependencies]
+rand = { workspace = true }

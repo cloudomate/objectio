@@ -1,0 +1,131 @@
+# ObjectIO Helm values for Kind (local Kubernetes) testing
+#
+# Uses images built and loaded into Kind via:
+#   make kind-load
+#
+# Full stack: S3 + Iceberg REST + Delta Sharing + Monitoring
+# EC scheme: 4+2 (4 data + 2 parity shards, 6 OSDs required)
+
+global:
+  imageRegistry: ghcr.io/cloudomate
+  imagePullPolicy: IfNotPresent
+
+gateway:
+  image:
+    tag: latest
+  replicas: 1
+  noAuth: true                             # no SigV4 required for testing
+  warehouseLocation: s3://objectio-warehouse
+  region: us-east-1
+  logLevel: info
+  # Delta Sharing — endpoint is reached via NodePort 30000 → host port 9000
+  deltaSharing:
+    externalEndpoint: http://localhost:9000
+    accessKeyId: admin
+    secretKey: objectio-delta-secret-key
+  service:
+    type: ClusterIP
+    port: 9000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+meta:
+  image:
+    tag: latest
+  replicas: 3
+  logLevel: info
+  service:
+    port: 9100
+    metricsPort: 9101
+  persistence:
+    size: 1Gi
+    storageClass: standard    # Kind default local-path provisioner
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+osd:
+  image:
+    tag: latest
+  replicas: 6                 # 4+2 EC needs at least 6 OSDs
+  logLevel: info
+  service:
+    port: 9200
+    metricsPort: 9201
+  failureDomain:
+    region: kind
+    datacenter: kind
+    rack: rack1
+  storage:
+    blockSize: 4194304
+    diskFile: disk.raw
+  persistence:
+    data:
+      size: 5Gi
+      storageClass: standard
+    state:
+      size: 1Gi
+      storageClass: standard
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+ec:
+  k: 4
+  m: 2
+
+monitoring:
+  enabled: true
+
+  prometheus:
+    image:
+      repository: prom/prometheus
+      tag: v2.48.0
+    retention: 7d
+    scrapeInterval: 15s
+    service:
+      type: ClusterIP
+      port: 9090
+    persistence:
+      size: 2Gi
+      storageClass: standard
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  grafana:
+    image:
+      repository: grafana/grafana
+      tag: "10.2.2"
+    adminUser: admin
+    adminPassword: objectio
+    service:
+      type: ClusterIP
+      port: 3000
+    persistence:
+      size: 1Gi
+      storageClass: standard
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi

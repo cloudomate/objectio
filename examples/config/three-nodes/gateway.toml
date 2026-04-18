@@ -1,0 +1,33 @@
+# ObjectIO Gateway Configuration - Three Node Deployment
+#
+# The gateway is stateless and can run on any node.
+# For HA, run multiple gateways behind a load balancer.
+
+[gateway]
+# S3 API listen address
+listen = "0.0.0.0:9000"
+
+# Metadata service endpoint(s)
+meta_endpoint = "http://meta.objectio.local:9001"
+
+# Initial OSD endpoint (more discovered via placement)
+osd_endpoint = "http://osd-node1:9002"
+
+# AWS region for SigV4 verification
+region = "us-east-1"
+
+# Admin user name (creates default admin on startup)
+admin_user = "admin"
+
+# Erasure coding configuration
+# For 3 nodes: EC 6+3 survives 1 full node failure
+# k+m must be <= total_nodes * disks_per_node for optimal spread
+[gateway.erasure]
+ec_k = 6    # Data shards
+ec_m = 3    # Parity shards
+# Failure domain level for shard placement
+# Options: disk, node, rack, datacenter, region
+failure_domain = "rack"
+
+[logging]
+level = "info"

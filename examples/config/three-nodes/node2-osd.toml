@@ -1,0 +1,36 @@
+# ObjectIO OSD Configuration - Three Node Deployment (Node 2)
+#
+# Node 2 of 3 in a rack-spread deployment
+
+[osd]
+node_name = "osd-node2"
+listen = "0.0.0.0:9002"
+meta_endpoint = "http://meta.objectio.local:9001"
+weight = 1.0
+
+# Node 2 is in rack-02
+[osd.failure_domain]
+region = "us-east"
+datacenter = "dc1"
+rack = "rack-02"
+
+[storage]
+disks = [
+    "/mnt/nvme0",
+    "/mnt/nvme1",
+    "/mnt/nvme2",
+    "/mnt/nvme3",
+    "/mnt/nvme4",
+    "/mnt/nvme5",
+    "/mnt/nvme6",
+    "/mnt/nvme7",
+    "/mnt/nvme8",
+    "/mnt/nvme9",
+    "/mnt/nvme10",
+    "/mnt/nvme11",
+]
+block_size = 4194304
+data_dir = "/var/lib/objectio/osd"
+
+[logging]
+level = "info"

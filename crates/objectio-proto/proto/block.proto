@@ -1,0 +1,549 @@
+syntax = "proto3";
+
+package objectio.block;
+
+// Block storage service for volume management and I/O
+service BlockService {
+    // Volume operations
+    rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+    rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+    rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+    rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+    rpc ResizeVolume(ResizeVolumeRequest) returns (ResizeVolumeResponse);
+    rpc UpdateVolumeQos(UpdateVolumeQosRequest) returns (UpdateVolumeQosResponse);
+    rpc GetVolumeStats(GetVolumeStatsRequest) returns (GetVolumeStatsResponse);
+
+    // Snapshot operations
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+    rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+    rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+    rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+
+    // Clone from snapshot
+    rpc CloneVolume(CloneVolumeRequest) returns (CloneVolumeResponse);
+
+    // Attachment operations (iSCSI/NVMe-oF targets)
+    rpc AttachVolume(AttachVolumeRequest) returns (AttachVolumeResponse);
+    rpc DetachVolume(DetachVolumeRequest) returns (DetachVolumeResponse);
+    rpc ListAttachments(ListAttachmentsRequest) returns (ListAttachmentsResponse);
+
+    // Direct I/O operations (for NBD or custom clients)
+    rpc Read(ReadRequest) returns (ReadResponse);
+    rpc Write(WriteRequest) returns (WriteResponse);
+    rpc Flush(FlushRequest) returns (FlushResponse);
+    rpc Trim(TrimRequest) returns (TrimResponse);
+
+    // Metrics and observability
+    rpc GetOsdMetrics(GetOsdMetricsRequest) returns (GetOsdMetricsResponse);
+    rpc ListOsdMetrics(ListOsdMetricsRequest) returns (ListOsdMetricsResponse);
+    rpc GetClusterMetrics(GetClusterMetricsRequest) returns (GetClusterMetricsResponse);
+    rpc GetIoTrace(GetIoTraceRequest) returns (GetIoTraceResponse);
+}
+
+// Volume state
+enum VolumeState {
+    VOLUME_STATE_UNKNOWN = 0;
+    VOLUME_STATE_CREATING = 1;
+    VOLUME_STATE_AVAILABLE = 2;
+    VOLUME_STATE_ATTACHED = 3;
+    VOLUME_STATE_ERROR = 4;
+    VOLUME_STATE_DELETING = 5;
+}
+
+// Snapshot state
+enum SnapshotState {
+    SNAPSHOT_STATE_UNKNOWN = 0;
+    SNAPSHOT_STATE_CREATING = 1;
+    SNAPSHOT_STATE_AVAILABLE = 2;
+    SNAPSHOT_STATE_DELETING = 3;
+    SNAPSHOT_STATE_ERROR = 4;
+}
+
+// Target type for volume attachment
+enum TargetType {
+    TARGET_TYPE_UNKNOWN = 0;
+    TARGET_TYPE_ISCSI = 1;
+    TARGET_TYPE_NVMEOF = 2;
+    TARGET_TYPE_NBD = 3;
+}
+
+// QoS priority level
+enum QosPriority {
+    QOS_PRIORITY_LOW = 0;
+    QOS_PRIORITY_NORMAL = 1;
+    QOS_PRIORITY_HIGH = 2;
+    QOS_PRIORITY_CRITICAL = 3;
+}
+
+// Quality of Service configuration for a volume
+message VolumeQos {
+    uint64 max_iops = 1;            // Maximum IOPS (0 = unlimited)
+    uint64 min_iops = 2;            // Guaranteed minimum IOPS (reserved)
+    uint64 max_bandwidth_bps = 3;   // Maximum bandwidth in bytes/sec (0 = unlimited)
+    uint64 burst_iops = 4;          // Burst IOPS above max (for short periods)
+    uint32 burst_seconds = 5;       // How long burst can last
+    QosPriority priority = 6;       // I/O scheduling priority
+    uint64 target_latency_us = 7;   // Target latency SLO in microseconds
+}
+
+// Volume metadata
+message Volume {
+    string volume_id = 1;
+    string name = 2;
+    uint64 size_bytes = 3;          // Provisioned size
+    uint64 used_bytes = 4;          // Actual used (for thin provisioning stats)
+    string pool = 5;                // Storage pool (determines EC config)
+    VolumeState state = 6;
+    uint64 created_at = 7;
+    uint64 updated_at = 8;
+    string parent_snapshot_id = 9;  // For cloned volumes
+    uint32 chunk_size_bytes = 10;   // Chunk size (default 4MB)
+    map<string, string> metadata = 11;
+    VolumeQos qos = 12;             // QoS configuration
+}
+
+// Snapshot metadata
+message Snapshot {
+    string snapshot_id = 1;
+    string volume_id = 2;
+    string name = 3;
+    uint64 size_bytes = 4;          // Logical size (same as source volume)
+    uint64 unique_bytes = 5;        // Data unique to this snapshot
+    SnapshotState state = 6;
+    uint64 created_at = 7;
+    map<string, string> metadata = 8;
+}
+
+// Volume attachment info
+message Attachment {
+    string volume_id = 1;
+    TargetType target_type = 2;
+    string target_address = 3;      // e.g., iqn.2024-01.com.objectio:vol1
+    string initiator = 4;           // Allowed initiator (e.g., iqn.2024-01.com.client:host1)
+    uint64 attached_at = 5;
+    bool read_only = 6;
+}
+
+// Chunk reference (for sparse volumes)
+message ChunkRef {
+    uint64 chunk_id = 1;
+    string object_key = 2;          // Key in object storage
+    string etag = 3;                // For consistency verification
+    uint64 size_bytes = 4;          // Actual data size in chunk
+}
+
+// ============ Volume Operations ============
+
+message CreateVolumeRequest {
+    string name = 1;
+    uint64 size_bytes = 2;
+    string pool = 3;                // Optional: storage pool
+    uint32 chunk_size_bytes = 4;    // Optional: chunk size (default 4MB)
+    map<string, string> metadata = 5;
+    VolumeQos qos = 6;              // Optional: QoS configuration
+}
+
+message CreateVolumeResponse {
+    Volume volume = 1;
+}
+
+message DeleteVolumeRequest {
+    string volume_id = 1;
+    bool force = 2;                 // Force delete even if attached
+}
+
+message DeleteVolumeResponse {
+    bool success = 1;
+}
+
+message GetVolumeRequest {
+    string volume_id = 1;
+}
+
+message GetVolumeResponse {
+    Volume volume = 1;
+}
+
+message ListVolumesRequest {
+    string pool = 1;                // Optional: filter by pool
+    uint32 max_results = 2;
+    string marker = 3;
+}
+
+message ListVolumesResponse {
+    repeated Volume volumes = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+message ResizeVolumeRequest {
+    string volume_id = 1;
+    uint64 new_size_bytes = 2;      // Must be larger than current size
+}
+
+message ResizeVolumeResponse {
+    Volume volume = 1;
+}
+
+message UpdateVolumeQosRequest {
+    string volume_id = 1;
+    VolumeQos qos = 2;
+}
+
+message UpdateVolumeQosResponse {
+    Volume volume = 1;
+}
+
+message GetVolumeStatsRequest {
+    string volume_id = 1;
+}
+
+message GetVolumeStatsResponse {
+    VolumeStats stats = 1;
+}
+
+// Real-time I/O statistics for a volume
+message VolumeStats {
+    string volume_id = 1;
+    uint64 read_iops = 2;           // Current read IOPS
+    uint64 write_iops = 3;          // Current write IOPS
+    uint64 read_bandwidth_bps = 4;  // Current read bandwidth
+    uint64 write_bandwidth_bps = 5; // Current write bandwidth
+    uint64 read_latency_us = 6;     // Average read latency (microseconds)
+    uint64 write_latency_us = 7;    // Average write latency (microseconds)
+    uint64 throttled_ios = 8;       // Number of I/Os throttled by QoS
+    uint64 queued_ios = 9;          // Number of I/Os currently queued
+    double iops_utilization = 10;   // Ratio of current to max IOPS (0.0-1.0)
+    LatencyPercentiles read_latency_percentiles = 11;
+    LatencyPercentiles write_latency_percentiles = 12;
+}
+
+// Latency percentiles for detailed latency analysis
+message LatencyPercentiles {
+    uint64 min_us = 1;              // Minimum latency
+    uint64 max_us = 2;              // Maximum latency
+    uint64 avg_us = 3;              // Average latency
+    uint64 p50_us = 4;              // 50th percentile (median)
+    uint64 p90_us = 5;              // 90th percentile
+    uint64 p95_us = 6;              // 95th percentile
+    uint64 p99_us = 7;              // 99th percentile
+    uint64 p999_us = 8;             // 99.9th percentile
+}
+
+// ============ Snapshot Operations ============
+
+message CreateSnapshotRequest {
+    string volume_id = 1;
+    string name = 2;
+    map<string, string> metadata = 3;
+}
+
+message CreateSnapshotResponse {
+    Snapshot snapshot = 1;
+}
+
+message DeleteSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {
+    bool success = 1;
+}
+
+message GetSnapshotRequest {
+    string snapshot_id = 1;
+}
+
+message GetSnapshotResponse {
+    Snapshot snapshot = 1;
+}
+
+message ListSnapshotsRequest {
+    string volume_id = 1;           // Optional: filter by volume
+    uint32 max_results = 2;
+    string marker = 3;
+}
+
+message ListSnapshotsResponse {
+    repeated Snapshot snapshots = 1;
+    string next_marker = 2;
+    bool is_truncated = 3;
+}
+
+message CloneVolumeRequest {
+    string snapshot_id = 1;
+    string name = 2;
+    map<string, string> metadata = 3;
+}
+
+message CloneVolumeResponse {
+    Volume volume = 1;
+}
+
+// ============ Attachment Operations ============
+
+message AttachVolumeRequest {
+    string volume_id = 1;
+    TargetType target_type = 2;
+    string initiator = 3;           // Allowed initiator IQN/NQN
+    bool read_only = 4;
+}
+
+message AttachVolumeResponse {
+    Attachment attachment = 1;
+}
+
+message DetachVolumeRequest {
+    string volume_id = 1;
+    bool force = 2;                 // Force detach
+}
+
+message DetachVolumeResponse {
+    bool success = 1;
+}
+
+message ListAttachmentsRequest {
+    string volume_id = 1;           // Optional: filter by volume
+}
+
+message ListAttachmentsResponse {
+    repeated Attachment attachments = 1;
+}
+
+// ============ I/O Operations ============
+
+message ReadRequest {
+    string volume_id = 1;
+    uint64 offset_bytes = 2;        // Byte offset in volume
+    uint32 length_bytes = 3;        // Number of bytes to read
+}
+
+message ReadResponse {
+    bytes data = 1;
+}
+
+message WriteRequest {
+    string volume_id = 1;
+    uint64 offset_bytes = 2;        // Byte offset in volume
+    bytes data = 3;
+}
+
+message WriteResponse {
+    uint32 bytes_written = 1;
+}
+
+message FlushRequest {
+    string volume_id = 1;
+}
+
+message FlushResponse {
+    bool success = 1;
+}
+
+message TrimRequest {
+    string volume_id = 1;
+    uint64 offset_bytes = 2;
+    uint64 length_bytes = 3;
+}
+
+message TrimResponse {
+    bool success = 1;
+}
+
+// ============ OSD & Cluster Metrics ============
+
+// Health status for OSD components
+enum HealthStatus {
+    HEALTH_STATUS_UNKNOWN = 0;
+    HEALTH_STATUS_HEALTHY = 1;
+    HEALTH_STATUS_WARNING = 2;      // Degraded but operational
+    HEALTH_STATUS_ERROR = 3;        // Non-operational
+}
+
+// Disk health information
+message DiskHealth {
+    string disk_id = 1;             // Unique disk identifier
+    string device_path = 2;         // e.g., /dev/sda
+    string model = 3;               // Disk model
+    string serial = 4;              // Serial number
+    HealthStatus status = 5;
+    uint64 capacity_bytes = 6;      // Total capacity
+    uint64 used_bytes = 7;          // Used capacity
+    uint64 available_bytes = 8;     // Available capacity
+    double utilization = 9;         // Used/Total (0.0-1.0)
+    uint32 temperature_celsius = 10; // Current temperature
+    uint64 read_errors = 11;        // Cumulative read errors
+    uint64 write_errors = 12;       // Cumulative write errors
+    uint64 reallocated_sectors = 13; // SMART reallocated sector count
+    uint64 pending_sectors = 14;    // SMART pending sector count
+    uint64 power_on_hours = 15;     // SMART power-on hours
+    bool smart_healthy = 16;        // Overall SMART health
+}
+
+// OSD I/O statistics
+message OsdIoStats {
+    uint64 read_iops = 1;           // Current read IOPS
+    uint64 write_iops = 2;          // Current write IOPS
+    uint64 read_bandwidth_bps = 3;  // Read bandwidth in bytes/sec
+    uint64 write_bandwidth_bps = 4; // Write bandwidth in bytes/sec
+    uint64 total_read_bytes = 5;    // Cumulative bytes read
+    uint64 total_write_bytes = 6;   // Cumulative bytes written
+    uint64 total_read_ops = 7;      // Cumulative read operations
+    uint64 total_write_ops = 8;     // Cumulative write operations
+    LatencyPercentiles read_latency = 9;
+    LatencyPercentiles write_latency = 10;
+}
+
+// OSD metrics (storage admin view)
+message OsdMetrics {
+    string osd_id = 1;              // OSD identifier (e.g., "osd.1")
+    string node_name = 2;           // Hostname
+    string advertise_addr = 3;      // Public address
+    HealthStatus status = 4;
+    uint64 uptime_secs = 5;         // Time since OSD started
+
+    // Capacity
+    uint64 total_capacity_bytes = 6;
+    uint64 used_capacity_bytes = 7;
+    uint64 available_capacity_bytes = 8;
+    double capacity_utilization = 9; // Used/Total (0.0-1.0)
+
+    // I/O Performance
+    OsdIoStats io_stats = 10;
+
+    // Queue status
+    uint64 pending_ios = 11;        // I/Os waiting to be processed
+    uint64 active_ios = 12;         // I/Os currently in flight
+    uint64 queued_bytes = 13;       // Bytes in write queue
+
+    // Recovery/Repair status
+    uint64 recovering_objects = 14; // Objects being recovered
+    uint64 recovery_rate_bps = 15;  // Current recovery bandwidth
+
+    // Network
+    uint64 network_rx_bytes = 16;   // Total bytes received
+    uint64 network_tx_bytes = 17;   // Total bytes transmitted
+    uint64 network_errors = 18;     // Network errors
+
+    // Disk health
+    repeated DiskHealth disks = 19;
+
+    // Failure domain placement
+    string region = 20;
+    string datacenter = 21;
+    string rack = 22;
+}
+
+// Cluster-wide metrics (aggregated)
+message ClusterMetrics {
+    uint64 timestamp = 1;           // Metrics collection time (Unix epoch ms)
+
+    // Cluster health
+    HealthStatus overall_status = 2;
+    uint32 total_osds = 3;
+    uint32 healthy_osds = 4;
+    uint32 warning_osds = 5;
+    uint32 error_osds = 6;
+
+    // Capacity (cluster-wide)
+    uint64 total_capacity_bytes = 7;
+    uint64 used_capacity_bytes = 8;
+    uint64 available_capacity_bytes = 9;
+    double capacity_utilization = 10;
+
+    // I/O Performance (cluster-wide aggregated)
+    uint64 total_read_iops = 11;
+    uint64 total_write_iops = 12;
+    uint64 total_read_bandwidth_bps = 13;
+    uint64 total_write_bandwidth_bps = 14;
+    LatencyPercentiles cluster_read_latency = 15;
+    LatencyPercentiles cluster_write_latency = 16;
+
+    // Volume stats
+    uint32 total_volumes = 17;
+    uint32 attached_volumes = 18;
+    uint64 total_provisioned_bytes = 19;  // Sum of all volume sizes
+
+    // QoS
+    uint64 total_throttled_ios = 20;
+    uint64 total_reserved_iops = 21;      // Sum of min_iops across volumes
+    uint64 total_available_iops = 22;     // Cluster IOPS capacity
+
+    // Recovery
+    uint32 degraded_objects = 23;
+    uint32 recovering_objects = 24;
+    uint64 recovery_rate_bps = 25;
+
+    // Snapshots
+    uint32 total_snapshots = 26;
+    uint64 snapshot_space_bytes = 27;
+}
+
+// Request tracing for issue correlation
+message IoTrace {
+    string trace_id = 1;            // Unique trace identifier
+    string volume_id = 2;
+    uint64 offset_bytes = 3;
+    uint32 length_bytes = 4;
+    bool is_write = 5;
+
+    // Timing breakdown (all in microseconds)
+    uint64 request_received_at = 6;  // Unix timestamp microseconds
+    uint64 qos_wait_us = 7;         // Time waiting for QoS token
+    uint64 metadata_lookup_us = 8;  // Time to lookup chunk mapping
+    uint64 osd_queue_us = 9;        // Time waiting in OSD queue
+    uint64 disk_io_us = 10;         // Actual disk I/O time
+    uint64 network_us = 11;         // Network transfer time
+    uint64 total_latency_us = 12;   // Total end-to-end latency
+
+    // OSD involvement
+    repeated string osds_contacted = 13;  // OSDs that handled this I/O
+    string primary_osd = 14;        // Primary OSD for this chunk
+
+    // Errors
+    bool success = 15;
+    string error_message = 16;      // Error details if failed
+    string error_osd = 17;          // OSD where error occurred
+}
+
+// ============ Metrics API Requests/Responses ============
+
+message GetOsdMetricsRequest {
+    string osd_id = 1;              // OSD to query
+}
+
+message GetOsdMetricsResponse {
+    OsdMetrics metrics = 1;
+}
+
+message ListOsdMetricsRequest {
+    string rack = 1;                // Optional: filter by rack
+    string datacenter = 2;          // Optional: filter by datacenter
+    HealthStatus status = 3;        // Optional: filter by health status
+}
+
+message ListOsdMetricsResponse {
+    repeated OsdMetrics osds = 1;
+}
+
+message GetClusterMetricsRequest {
+    // Empty - returns current cluster metrics
+}
+
+message GetClusterMetricsResponse {
+    ClusterMetrics metrics = 1;
+}
+
+message GetIoTraceRequest {
+    // Query by trace_id or volume_id + time range
+    string trace_id = 1;            // Specific trace ID
+    string volume_id = 2;           // Volume to query traces for
+    uint64 start_time = 3;          // Unix timestamp (ms) - start of range
+    uint64 end_time = 4;            // Unix timestamp (ms) - end of range
+    uint32 max_results = 5;         // Maximum traces to return
+    bool errors_only = 6;           // Only return failed I/Os
+}
+
+message GetIoTraceResponse {
+    repeated IoTrace traces = 1;
+}

@@ -1,0 +1,38 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+*.local.*
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+/tmp/
+
+# Python virtual environments
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+console/dist/
+enterprise/.license-signing/
