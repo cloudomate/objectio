@@ -44,6 +44,17 @@ pub const DELTA_RECIPIENTS: TableDefinition<&str, &[u8]> = TableDefinition::new(
 // Key: hierarchical config path (e.g. "identity/openid/keycloak"), Value: prost-encoded ConfigEntry
 pub const CONFIG: TableDefinition<&str, &[u8]> = TableDefinition::new("config");
 
+// ---- Raft consensus tables ----
+// One row per log index → JSON-encoded openraft::Entry<MetaTypeConfig>.
+// Indexes are contiguous; the low watermark moves forward via purge.
+pub const RAFT_LOGS: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_logs");
+// Single-row table; the row holds the serialized current vote (JSON).
+pub const RAFT_VOTE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_vote");
+// Single-row table: last applied log id + stored membership + last purged
+// log id, JSON-encoded. Written in the same transaction as apply() so
+// recovery after crash never re-applies committed commands.
+pub const RAFT_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_state");
+
 // Server pools
 // Key: pool name, Value: prost-encoded PoolConfig
 pub const POOLS: TableDefinition<&str, &[u8]> = TableDefinition::new("pools");

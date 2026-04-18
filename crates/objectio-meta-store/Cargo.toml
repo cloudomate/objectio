@@ -19,3 +19,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
