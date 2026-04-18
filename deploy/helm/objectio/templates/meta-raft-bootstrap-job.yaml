@@ -84,7 +84,7 @@ spec:
                 echo "meta-0 initialized as single-voter cluster"
               else
                 case "$body" in
-                  *"already initialized"*|*NotAllowed*|*"InProgress"*)
+                  *"already initialized"*|*"not allowed to initialize"*|*NotAllowed*|*"InProgress"*)
                     echo "meta-0 already initialized (ok): $body"
                     ;;
                   *)
