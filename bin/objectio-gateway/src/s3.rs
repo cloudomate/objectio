@@ -2946,6 +2946,7 @@ pub async fn get_object(
     if let Ok(resp) = meta_client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     {
@@ -3614,6 +3615,7 @@ async fn resolve_node_address(
     if let Ok(resp) = meta_client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     {
@@ -6622,6 +6624,7 @@ async fn list_object_versions_internal(
         .clone()
         .get_listing_nodes(GetListingNodesRequest {
             bucket: bucket.clone(),
+            include_all_states: false,
         })
         .await
     {

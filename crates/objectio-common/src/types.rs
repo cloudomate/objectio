@@ -780,6 +780,64 @@ pub enum NodeStatus {
     Decommissioning,
 }
 
+/// Operator-set intent for an OSD, separate from observed `NodeStatus`.
+///
+/// `NodeStatus` is *derived* (heartbeats, disk health, etc.).
+/// `OsdAdminState` is *declared* — it's what the operator asked for
+/// via `PUT /_admin/osds/{id}/admin-state` and survives restarts.
+/// The meta service merges them when rebuilding the placement topology:
+/// `admin_state` wins when it says "don't place on me" (Out / Draining);
+/// otherwise the observed `NodeStatus` is used.
+///
+/// Serialised as lowercase string so wire, storage, and console all
+/// speak the same names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OsdAdminState {
+    /// Default — OSD participates in placement and serves reads/writes.
+    #[default]
+    In,
+    /// Operator-forced out of placement. Existing shards stay put
+    /// (no automatic migration); nothing new gets written. Reads still
+    /// work as long as the OSD process is up.
+    Out,
+    /// Operator requested drain. Placement excludes this OSD and the
+    /// drain worker (future phase) migrates its shards elsewhere;
+    /// when migration completes the meta flips it to `Out` for removal.
+    Draining,
+}
+
+impl OsdAdminState {
+    /// True iff this OSD should appear in the placement pool.
+    /// `In` accepts placement; both `Out` and `Draining` are excluded.
+    #[must_use]
+    pub const fn places(self) -> bool {
+        matches!(self, Self::In)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Out => "out",
+            Self::Draining => "draining",
+        }
+    }
+}
+
+impl std::str::FromStr for OsdAdminState {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "in" => Ok(Self::In),
+            "out" => Ok(Self::Out),
+            "draining" => Ok(Self::Draining),
+            _ => Err("expected one of: in, out, draining"),
+        }
+    }
+}
+
 /// Disk status
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiskStatus {

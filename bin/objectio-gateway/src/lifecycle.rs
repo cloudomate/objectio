@@ -116,6 +116,7 @@ async fn run_lifecycle_scan(
         let nodes = match client
             .get_listing_nodes(GetListingNodesRequest {
                 bucket: bucket.clone(),
+                include_all_states: false,
             })
             .await
         {

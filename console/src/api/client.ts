@@ -168,6 +168,11 @@ export interface DiskInfo {
   shard_count: number;
 }
 
+/// Operator-declared state for an OSD. Separate from `online`, which is
+/// derived from heartbeats. `in` is the default; `out` / `draining`
+/// keep the OSD out of placement.
+export type OsdAdminState = "in" | "out" | "draining";
+
 export interface NodeInfo {
   node_id: string;
   node_name: string;
@@ -185,9 +190,19 @@ export interface NodeInfo {
   cpu_cores: number;
   memory_bytes: number;
   version: string;
+  /// Optional — present on meta servers that expose admin_state
+  /// (anything past the host-actions phase 1 rollout). Older meta
+  /// omits the field; treat missing as "in".
+  admin_state?: OsdAdminState;
 }
 
 export const nodes = {
   list: (): Promise<{ nodes: NodeInfo[] }> =>
     request("GET", "/_admin/nodes"),
+  setAdminState: (nodeId: string, state: OsdAdminState) =>
+    request<{ found: boolean; changed: boolean; state: OsdAdminState }>(
+      "PUT",
+      `/_admin/osds/${nodeId}/admin-state`,
+      { state },
+    ),
 };

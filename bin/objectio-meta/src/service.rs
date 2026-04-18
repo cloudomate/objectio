@@ -249,6 +249,8 @@ use objectio_proto::metadata::{
     SetBucketPolicyResponse,
     SetConfigRequest,
     SetConfigResponse,
+    SetOsdAdminStateRequest,
+    SetOsdAdminStateResponse,
     ShardType,
     TenantConfig,
     UpdatePoolRequest,
@@ -1111,6 +1113,15 @@ impl MetaService {
             })
             .collect();
 
+        // Merge operator intent (admin_state) with observed status. An
+        // OSD that's In is Active; Draining / Out map to the matching
+        // NodeStatus so placement's `active_nodes()` filter skips them.
+        let status = match osd_node.admin_state {
+            objectio_common::OsdAdminState::In => NodeStatus::Active,
+            objectio_common::OsdAdminState::Draining => NodeStatus::Draining,
+            objectio_common::OsdAdminState::Out => NodeStatus::Decommissioning,
+        };
+
         let node_info = NodeInfo {
             id: node_id,
             name: hex::encode(&osd_node.node_id[..4]),
@@ -1119,7 +1130,7 @@ impl MetaService {
                 .parse()
                 .unwrap_or_else(|_| "0.0.0.0:9200".parse().unwrap()),
             failure_domain: FailureDomainInfo::new_full(&region, &zone, &dc, &rack, &host),
-            status: NodeStatus::Active,
+            status,
             disks,
             weight: 1.0,
             last_heartbeat: Self::current_timestamp(),
@@ -2298,6 +2309,18 @@ impl MetadataService for MetaService {
             .as_ref()
             .map(|fd| (fd.region.clone(), fd.datacenter.clone(), fd.rack.clone()));
         let num_disks = disk_ids.len();
+        // Preserve operator intent across re-registrations: if the OSD
+        // was marked Out or Draining and the same node_id (or address)
+        // re-registers, keep it out of placement until an admin
+        // explicitly flips it back to In.
+        let prev_admin_state = {
+            let nodes = self.osd_nodes.read();
+            nodes
+                .iter()
+                .find(|n| n.node_id == node_id || n.address == req.address)
+                .map(|n| n.admin_state)
+                .unwrap_or_default()
+        };
         let node = OsdNode {
             node_id,
             address: req.address.clone(),
@@ -2305,6 +2328,7 @@ impl MetadataService for MetaService {
             failure_domain: legacy_fd,
             topology: topology_tuple,
             disk_capacity_bytes,
+            admin_state: prev_admin_state,
         };
 
         // Check if node already exists and update, or add new. We dedupe
@@ -2381,28 +2405,67 @@ impl MetadataService for MetaService {
     /// Get all active nodes for scatter-gather listing operations
     async fn get_listing_nodes(
         &self,
-        _request: Request<GetListingNodesRequest>,
+        request: Request<GetListingNodesRequest>,
     ) -> Result<Response<GetListingNodesResponse>, Status> {
+        let req = request.into_inner();
         let topology = self.topology.read();
         let osd_nodes = self.osd_nodes.read();
 
-        // Collect all active nodes from topology, carrying their failure
-        // domain so gateways can render a topology tree and do locality
-        // routing (Phase 2).
-        let mut nodes: Vec<ListingNode> = topology
-            .active_nodes()
+        // Helper — map internal admin state → proto enum value.
+        let admin_state_proto = |s: objectio_common::OsdAdminState| -> i32 {
+            match s {
+                objectio_common::OsdAdminState::In => {
+                    objectio_proto::metadata::OsdAdminState::OsdAdminIn as i32
+                }
+                objectio_common::OsdAdminState::Out => {
+                    objectio_proto::metadata::OsdAdminState::OsdAdminOut as i32
+                }
+                objectio_common::OsdAdminState::Draining => {
+                    objectio_proto::metadata::OsdAdminState::OsdAdminDraining as i32
+                }
+            }
+        };
+
+        // When include_all_states is true, admin UI wants EVERY OSD
+        // including Draining / Out / Decommissioning. Scatter-gather
+        // callers (the default) only want Active ones.
+        let topology_iter: Box<dyn Iterator<Item = &objectio_placement::topology::NodeInfo>> =
+            if req.include_all_states {
+                Box::new(topology.all_nodes())
+            } else {
+                Box::new(topology.active_nodes())
+            };
+
+        // Build a lookup id → admin_state so we can attach the operator
+        // intent to each ListingNode without re-reading the OsdNode list
+        // per iteration.
+        let admin_state_by_id: std::collections::HashMap<[u8; 16], objectio_common::OsdAdminState> =
+            osd_nodes
+                .iter()
+                .map(|n| (n.node_id, n.admin_state))
+                .collect();
+
+        let mut nodes: Vec<ListingNode> = topology_iter
             .enumerate()
-            .map(|(idx, node)| ListingNode {
-                node_id: node.id.as_bytes().to_vec(),
-                address: format!("http://{}", node.address),
-                shard_id: idx as u32, // Assign logical shard IDs in order
-                failure_domain: Some(objectio_proto::metadata::FailureDomainInfo {
-                    region: node.failure_domain.region.clone(),
-                    datacenter: node.failure_domain.datacenter.clone(),
-                    rack: node.failure_domain.rack.clone(),
-                    zone: node.failure_domain.zone.clone(),
-                    host: node.failure_domain.host.clone(),
-                }),
+            .map(|(idx, node)| {
+                let id_bytes = *node.id.as_bytes();
+                let admin_state = admin_state_by_id
+                    .get(&id_bytes)
+                    .copied()
+                    .unwrap_or_default();
+                ListingNode {
+                    node_id: id_bytes.to_vec(),
+                    address: format!("http://{}", node.address),
+                    shard_id: idx as u32, // Assign logical shard IDs in order
+                    failure_domain: Some(objectio_proto::metadata::FailureDomainInfo {
+                        region: node.failure_domain.region.clone(),
+                        datacenter: node.failure_domain.datacenter.clone(),
+                        rack: node.failure_domain.rack.clone(),
+                        zone: node.failure_domain.zone.clone(),
+                        host: node.failure_domain.host.clone(),
+                    }),
+                    admin_state: admin_state_proto(admin_state),
+                }
             })
             .collect();
 
@@ -2426,6 +2489,7 @@ impl MetadataService for MetaService {
                         address: node.address.clone(),
                         shard_id: idx as u32,
                         failure_domain: fd,
+                        admin_state: admin_state_proto(node.admin_state),
                     }
                 })
                 .collect();
@@ -4185,6 +4249,107 @@ impl MetadataService for MetaService {
         }
 
         Ok(Response::new(DeleteConfigResponse { success: removed }))
+    }
+
+    async fn set_osd_admin_state(
+        &self,
+        request: Request<SetOsdAdminStateRequest>,
+    ) -> Result<Response<SetOsdAdminStateResponse>, Status> {
+        let req = request.into_inner();
+
+        // node_id must be 16 bytes (UUID).
+        let node_id: [u8; 16] = req.node_id.as_slice().try_into().map_err(|_| {
+            Status::invalid_argument("node_id must be 16 bytes")
+        })?;
+
+        // Map wire enum → internal enum. Proto's numeric `i32` reaches us
+        // here; rely on the generated accessor to handle unknown values.
+        // prost prefixes the proto enum variants with the enum name; map
+        // them back to our internal OsdAdminState.
+        let state = match objectio_proto::metadata::OsdAdminState::try_from(req.state) {
+            Ok(objectio_proto::metadata::OsdAdminState::OsdAdminIn) => {
+                objectio_common::OsdAdminState::In
+            }
+            Ok(objectio_proto::metadata::OsdAdminState::OsdAdminOut) => {
+                objectio_common::OsdAdminState::Out
+            }
+            Ok(objectio_proto::metadata::OsdAdminState::OsdAdminDraining) => {
+                objectio_common::OsdAdminState::Draining
+            }
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown OsdAdminState: {}",
+                    req.state
+                )));
+            }
+        };
+
+        let requested_by = if req.requested_by.is_empty() {
+            "meta".to_string()
+        } else {
+            req.requested_by.clone()
+        };
+
+        // Raft is the only write path. set_osd_admin_state persists to
+        // OSD_NODES inside apply, which every follower also observes.
+        let raft = self.raft_handle().ok_or_else(|| {
+            Status::failed_precondition(
+                "raft is not initialized — run POST /init on meta admin port",
+            )
+        })?;
+
+        let resp = raft
+            .client_write(objectio_meta_store::MetaCommand::SetOsdAdminState {
+                node_id,
+                state,
+                requested_by,
+            })
+            .await
+            .map_err(|e| raft_write_to_status(&e))?;
+
+        let (found, changed) = match resp.data {
+            objectio_meta_store::MetaResponse::OsdAdminStateSet { found, changed } => {
+                (found, changed)
+            }
+            _ => (false, false),
+        };
+
+        // Mirror the change into the in-memory OsdNode list so this
+        // process's topology rebuild sees the new state without a redb
+        // re-read. (Followers do this via their own apply — deferred
+        // until the apply-listener lands in a later phase.)
+        if found && changed {
+            let mut nodes = self.osd_nodes.write();
+            if let Some(n) = nodes.iter_mut().find(|n| n.node_id == node_id) {
+                n.admin_state = state;
+            }
+        }
+
+        // Rebuild the placement topology so the next `place_object`
+        // call respects the new state immediately.
+        if found && changed {
+            let snapshot = self.osd_nodes.read().clone();
+            for osd in &snapshot {
+                self.update_topology_with_node(osd);
+            }
+            info!(
+                "OSD {} admin_state → {} (via Raft, log_id={:?})",
+                hex::encode(node_id),
+                state.as_str(),
+                resp.log_id
+            );
+        } else if !found {
+            warn!(
+                "set_osd_admin_state: no OSD with node_id={}",
+                hex::encode(node_id)
+            );
+        }
+
+        Ok(Response::new(SetOsdAdminStateResponse {
+            found,
+            changed,
+            effective: req.state,
+        }))
     }
 
     async fn list_config(

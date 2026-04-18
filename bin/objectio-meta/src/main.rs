@@ -170,6 +170,7 @@ async fn main() -> Result<()> {
                 failure_domain: None,
                 topology: None,
                 disk_capacity_bytes: vec![0],
+                admin_state: objectio_common::OsdAdminState::default(),
             };
             meta_service.register_osd(node);
         }

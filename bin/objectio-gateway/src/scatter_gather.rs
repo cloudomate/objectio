@@ -267,6 +267,7 @@ impl ScatterGatherEngine {
         let nodes_resp = meta_client
             .get_listing_nodes(GetListingNodesRequest {
                 bucket: bucket.to_string(),
+                include_all_states: false,
             })
             .await?;
         let nodes_inner = nodes_resp.into_inner();
@@ -365,6 +366,7 @@ impl ScatterGatherEngine {
         let nodes_resp = meta_client
             .get_listing_nodes(GetListingNodesRequest {
                 bucket: bucket.to_string(),
+                include_all_states: false,
             })
             .await?;
         let nodes = nodes_resp.into_inner().nodes;

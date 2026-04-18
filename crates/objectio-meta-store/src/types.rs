@@ -93,6 +93,14 @@ pub struct OsdNode {
     /// treat missing entries as 0 bytes (conservative — under-reports).
     #[serde(default)]
     pub disk_capacity_bytes: Vec<u64>,
+    /// Operator-set intent — `In` (default, participating), `Out`
+    /// (forced out of placement), or `Draining`. Independent of
+    /// heartbeat-derived `NodeStatus` used by the topology; the service
+    /// merges the two when rebuilding CRUSH.
+    ///
+    /// `#[serde(default)]` so existing serialized OSDs load as `In`.
+    #[serde(default)]
+    pub admin_state: objectio_common::OsdAdminState,
 }
 
 /// EC configuration for a storage class

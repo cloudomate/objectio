@@ -1343,6 +1343,7 @@ async fn main() -> Result<()> {
                         .get_listing_nodes(
                             objectio_proto::metadata::GetListingNodesRequest {
                                 bucket: String::new(),
+                                include_all_states: false,
                             },
                         )
                         .await?
@@ -1438,6 +1439,7 @@ async fn main() -> Result<()> {
                         .get_listing_nodes(
                             objectio_proto::metadata::GetListingNodesRequest {
                                 bucket: String::new(),
+                                include_all_states: false,
                             },
                         )
                         .await?

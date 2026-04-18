@@ -20,8 +20,9 @@ use objectio_auth::AuthResult;
 use objectio_proto::metadata::{
     CreatePoolRequest, CreateTenantRequest, DeleteConfigRequest, DeletePoolRequest,
     DeleteTenantRequest, GetConfigRequest, GetListingNodesRequest, GetPoolRequest,
-    GetTenantRequest, ListConfigRequest, ListPoolsRequest, ListTenantsRequest, PoolConfig,
-    SetConfigRequest, TenantConfig, UpdatePoolRequest, UpdateTenantRequest,
+    GetTenantRequest, ListConfigRequest, ListPoolsRequest, ListTenantsRequest,
+    OsdAdminState as ProtoOsdAdminState, PoolConfig, SetConfigRequest, SetOsdAdminStateRequest,
+    TenantConfig, UpdatePoolRequest, UpdateTenantRequest,
 };
 use objectio_proto::storage::storage_service_client::StorageServiceClient;
 
@@ -1723,9 +1724,12 @@ pub async fn admin_list_nodes(
     }
 
     let mut meta = state.meta_client.clone();
+    // Admin UI needs every OSD including operator-disabled ones so it
+    // can render Mark Out state and let the operator flip it back.
     let nodes = match meta
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: true,
         })
         .await
     {
@@ -1737,16 +1741,21 @@ pub async fn admin_list_nodes(
 
     // Deduplicate by address (scatter-gather may return dupes for different shards)
     let mut seen = std::collections::HashSet::new();
-    let mut unique_addrs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut unique_addrs: Vec<(String, Vec<u8>, i32)> = Vec::new();
     for node in &nodes {
         if seen.insert(node.address.clone()) {
-            unique_addrs.push((node.address.clone(), node.node_id.clone()));
+            unique_addrs.push((
+                node.address.clone(),
+                node.node_id.clone(),
+                node.admin_state,
+            ));
         }
     }
 
     let mut result = Vec::new();
 
-    for (addr, node_id) in &unique_addrs {
+    for (addr, node_id, admin_state_i32) in &unique_addrs {
+        let admin_state_str = admin_state_label(*admin_state_i32);
         let osd_addr = if addr.starts_with("http") {
             addr.clone()
         } else {
@@ -1791,17 +1800,129 @@ pub async fn admin_list_nodes(
                             "cpu_cores": s.cpu_cores,
                             "memory_bytes": s.memory_bytes,
                             "version": s.version,
+                            "admin_state": admin_state_str,
                         })
                     }
-                    Err(_) => offline_node(node_id, addr),
+                    Err(_) => {
+                        let mut n = offline_node(node_id, addr);
+                        n["admin_state"] = serde_json::Value::String(admin_state_str.into());
+                        n
+                    }
                 }
             }
-            Err(_) => offline_node(node_id, addr),
+            Err(_) => {
+                let mut n = offline_node(node_id, addr);
+                n["admin_state"] = serde_json::Value::String(admin_state_str.into());
+                n
+            }
         };
         result.push(status);
     }
 
     Json(serde_json::json!({ "nodes": result })).into_response()
+}
+
+/// Wire enum i32 → lowercase label consumed by the console. Unknown
+/// values fall back to "in" — conservative, preserves placement.
+fn admin_state_label(s: i32) -> &'static str {
+    match ProtoOsdAdminState::try_from(s) {
+        Ok(ProtoOsdAdminState::OsdAdminIn) => "in",
+        Ok(ProtoOsdAdminState::OsdAdminOut) => "out",
+        Ok(ProtoOsdAdminState::OsdAdminDraining) => "draining",
+        Err(_) => "in",
+    }
+}
+
+/// `PUT /_admin/osds/{node_id}/admin-state`
+///
+/// Flip the operator-declared state of an OSD (In / Out / Draining).
+/// Routes through the meta's Raft — non-leader meta returns a forward
+/// hint the gateway surfaces as a 503; console retries.
+///
+/// Body: `{"state":"in"|"out"|"draining"}`
+#[derive(Debug, serde::Deserialize)]
+pub struct AdminStatePayload {
+    pub state: String,
+}
+
+pub async fn admin_set_osd_state(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    axum::extract::Path(node_id_hex): axum::extract::Path<String>,
+    Json(body): Json<AdminStatePayload>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+
+    // Parse 32-char hex → 16 raw bytes.
+    let node_id_bytes = match hex::decode(&node_id_hex) {
+        Ok(b) if b.len() == 16 => b,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "node_id must be 32 hex chars (16 bytes)",
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "node_id must be valid hex").into_response();
+        }
+    };
+
+    let wire_state = match body.state.to_ascii_lowercase().as_str() {
+        "in" => ProtoOsdAdminState::OsdAdminIn,
+        "out" => ProtoOsdAdminState::OsdAdminOut,
+        "draining" => ProtoOsdAdminState::OsdAdminDraining,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown state: {other} (expected in | out | draining)"),
+            )
+                .into_response();
+        }
+    };
+
+    // Attribute the change to the authenticated user when possible so
+    // the audit log reads right; fall back to "console" when the noauth
+    // path is in use.
+    let requested_by = match &auth {
+        Some(Extension(a)) => a.user_id.clone(),
+        None => "console".to_string(),
+    };
+
+    let mut meta = state.meta_client.clone();
+    let resp = meta
+        .set_osd_admin_state(SetOsdAdminStateRequest {
+            node_id: node_id_bytes,
+            state: wire_state as i32,
+            requested_by,
+        })
+        .await;
+
+    match resp {
+        Ok(r) => {
+            let r = r.into_inner();
+            Json(serde_json::json!({
+                "found": r.found,
+                "changed": r.changed,
+                "state": body.state.to_ascii_lowercase(),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            // FailedPrecondition from meta means Raft isn't the leader
+            // or is not initialised; surface as 503 so the console can
+            // retry rather than treating it as a permanent error.
+            let code = if e.code() == tonic::Code::FailedPrecondition {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (code, e.message().to_string()).into_response()
+        }
+    }
 }
 
 // ============================================================================
@@ -1827,6 +1948,7 @@ pub async fn compute_cluster_usage(state: &AppState) -> ClusterUsage {
     let Ok(resp) = meta
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     else {
@@ -2003,6 +2125,7 @@ pub async fn admin_cluster_info(
     let nodes = match client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     {
@@ -2069,6 +2192,7 @@ pub async fn admin_get_topology(
     let nodes = match client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     {
@@ -2212,6 +2336,7 @@ pub async fn admin_validate_placement(
     let nodes = match client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
+            include_all_states: false,
         })
         .await
     {

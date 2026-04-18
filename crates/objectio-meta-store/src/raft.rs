@@ -46,6 +46,20 @@ pub enum MetaCommand {
     /// Delete a cluster config entry. Idempotent — deleting a missing key
     /// applies successfully and returns `existed: false`.
     DeleteConfig { key: String },
+    /// Operator-declared state for an OSD. Persisted on `OsdNode` and
+    /// honoured by the placement topology: `Out` / `Draining` keep the
+    /// node out of new placements regardless of heartbeat status.
+    /// Idempotent — setting the same state again succeeds with
+    /// `changed: false`.
+    SetOsdAdminState {
+        /// 16-byte node UUID.
+        node_id: [u8; 16],
+        /// New state.
+        state: objectio_common::OsdAdminState,
+        /// Audit trail — who requested this change (user id / "console" /
+        /// "cli"). Stored in logs, not in the state machine.
+        requested_by: String,
+    },
 }
 
 /// Reply the state machine emits from `apply`, visible to the client that
@@ -63,6 +77,11 @@ pub enum MetaResponse {
     /// `DeleteConfig` committed; `existed` is true iff the key was
     /// present before deletion.
     ConfigDeleted { existed: bool },
+    /// `SetOsdAdminState` committed. `changed` is false if the OSD was
+    /// already in the requested state; `found` is false if the node_id
+    /// doesn't match any registered OSD (the command still applies
+    /// successfully, but the caller can surface a warning).
+    OsdAdminStateSet { changed: bool, found: bool },
 }
 
 declare_raft_types!(
@@ -94,6 +113,11 @@ mod tests {
             MetaCommand::DeleteConfig {
                 key: "license/active".into(),
             },
+            MetaCommand::SetOsdAdminState {
+                node_id: [7; 16],
+                state: objectio_common::OsdAdminState::Out,
+                requested_by: "console".into(),
+            },
         ];
         for cmd in cases {
             let json = serde_json::to_vec(&cmd).unwrap();
@@ -110,6 +134,14 @@ mod tests {
             MetaResponse::ConfigSet { version: 42 },
             MetaResponse::ConfigDeleted { existed: true },
             MetaResponse::ConfigDeleted { existed: false },
+            MetaResponse::OsdAdminStateSet {
+                changed: true,
+                found: true,
+            },
+            MetaResponse::OsdAdminStateSet {
+                changed: false,
+                found: false,
+            },
         ];
         for resp in cases {
             let json = serde_json::to_vec(&resp).unwrap();

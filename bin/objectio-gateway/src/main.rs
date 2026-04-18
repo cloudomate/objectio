@@ -730,6 +730,10 @@ async fn main() -> Result<()> {
             delete(admin::admin_remove_tenant_admin),
         )
         .route("/_admin/nodes", get(admin::admin_list_nodes))
+        .route(
+            "/_admin/osds/{node_id}/admin-state",
+            put(admin::admin_set_osd_state),
+        )
         .route("/_admin/cluster-info", get(admin::admin_cluster_info))
         .route("/_admin/topology", get(admin::admin_get_topology))
         .route(

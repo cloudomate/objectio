@@ -161,8 +161,64 @@ impl MetaRaftStorage {
                 state.last_applied = Some(log_id);
                 Ok(MetaResponse::ConfigDeleted { existed })
             }
+            MetaCommand::SetOsdAdminState {
+                node_id,
+                state: new_state,
+                requested_by: _,
+            } => {
+                // Same hex encoding the rest of the meta store uses to
+                // key OsdNodes in the OSD_NODES table.
+                let key = hex_encode_16(node_id);
+                let txn = self.db.begin_write().map_err(write_err)?;
+                let (found, changed) = {
+                    let mut t = txn.open_table(tables::OSD_NODES).map_err(write_err)?;
+                    // Read current bytes, release the borrow, then write
+                    // — otherwise redb's access-guard holds a borrow of
+                    // `t` that conflicts with the later insert.
+                    let current = t
+                        .get(key.as_str())
+                        .map_err(read_err)?
+                        .map(|v| v.value().to_vec());
+                    match current {
+                        Some(bytes) => {
+                            let mut node: crate::types::OsdNode = bincode::deserialize(&bytes)
+                                .map_err(|e| decode_err("OsdNode", e))?;
+                            let changed = node.admin_state != *new_state;
+                            if changed {
+                                node.admin_state = *new_state;
+                                let new_bytes = bincode::serialize(&node)
+                                    .map_err(|e| decode_err("OsdNode", e))?;
+                                t.insert(key.as_str(), new_bytes.as_slice())
+                                    .map_err(write_err)?;
+                            }
+                            (true, changed)
+                        }
+                        // Unknown node_id — command succeeds (idempotent) but
+                        // the caller learns via `found: false`. We still
+                        // advance `last_applied` so the log entry isn't
+                        // re-applied on restart.
+                        None => (false, false),
+                    }
+                };
+                txn.commit().map_err(write_err)?;
+                state.last_applied = Some(log_id);
+                Ok(MetaResponse::OsdAdminStateSet { changed, found })
+            }
         }
     }
+}
+
+/// 16-byte node id → 32-char lowercase hex, matching how MetaStore keys
+/// OsdNodes. Tiny local impl so the crate doesn't need a `hex` dep just
+/// for this one call site.
+fn hex_encode_16(bytes: &[u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(32);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
 }
 
 /// Current unix timestamp, used to stamp `updated_at` on config writes.

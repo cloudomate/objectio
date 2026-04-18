@@ -39,6 +39,11 @@ service MetadataService {
     // Get all active nodes for listing operations (scatter-gather)
     rpc GetListingNodes(GetListingNodesRequest) returns (GetListingNodesResponse);
 
+    // Set operator-declared state for an OSD (In / Out / Draining).
+    // Persisted via Raft and honoured by CRUSH on the next topology
+    // rebuild — Out and Draining are excluded from new placements.
+    rpc SetOsdAdminState(SetOsdAdminStateRequest) returns (SetOsdAdminStateResponse);
+
     // IAM operations (user/credential persistence)
     rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
     rpc GetUser(GetUserRequest) returns (GetUserResponse);
@@ -613,9 +618,34 @@ message RegisterOsdResponse {
     uint64 topology_version = 2;        // Current cluster topology version
 }
 
+// Operator-declared state for an OSD. Serialised as a string so adding
+// future variants (e.g. "quiescing") doesn't break older clients.
+enum OsdAdminState {
+    OSD_ADMIN_IN = 0;        // Default — participates in placement.
+    OSD_ADMIN_OUT = 1;       // Forced out; no new shards; existing shards stay.
+    OSD_ADMIN_DRAINING = 2;  // Migration in progress; excluded from placement.
+}
+
+message SetOsdAdminStateRequest {
+    bytes node_id = 1;          // 16-byte UUID
+    OsdAdminState state = 2;
+    string requested_by = 3;    // Audit (user id / "console" / "cli")
+}
+
+message SetOsdAdminStateResponse {
+    bool found = 1;             // node_id matched a registered OSD
+    bool changed = 2;           // state actually changed (false if no-op)
+    OsdAdminState effective = 3; // State after apply
+}
+
 // Get listing nodes for scatter-gather list operations
 message GetListingNodesRequest {
     string bucket = 1;          // Optional: filter by bucket's storage class
+    // When true, include OSDs that are not currently Active (Draining,
+    // Decommissioning, Out). Default false — scatter-gather callers
+    // only want live nodes, admin UI sets this to true to render
+    // state-colored topology.
+    bool include_all_states = 2;
 }
 
 message GetListingNodesResponse {
@@ -631,6 +661,9 @@ message ListingNode {
     // tree and prefer same-domain shards on reads (Phase 2). Empty fields
     // on older meta servers fall back to "default".
     FailureDomainInfo failure_domain = 4;
+    // Operator-declared state. Defaults to OSD_ADMIN_IN on meta servers
+    // that predate this field, which is the same as "no admin override".
+    OsdAdminState admin_state = 5;
 }
 
 // ============ IAM Messages ============

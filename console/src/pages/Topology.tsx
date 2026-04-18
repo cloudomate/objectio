@@ -19,7 +19,7 @@ import Drawer from "../components/Drawer";
 import CapacityBar from "../components/CapacityBar";
 import BreadcrumbPath from "../components/BreadcrumbPath";
 import StatusDot from "../components/StatusDot";
-import { nodes as nodesApi, type NodeInfo } from "../api/client";
+import { nodes as nodesApi, type NodeInfo, type OsdAdminState } from "../api/client";
 
 interface HostNode { host: string; osds: string[]; }
 interface RackNode { rack: string; hosts: HostNode[]; }
@@ -486,18 +486,55 @@ export default function Topology() {
           onClose={() => setSelectedHost(null)}
           width="w-[22rem]"
         >
-          <HostDrawerBody osds={selectedOsds} />
+          <HostDrawerBody
+            osds={selectedOsds}
+            onChanged={() => setRefreshKey((k) => k + 1)}
+          />
         </Drawer>
       )}
     </div>
   );
 }
 
-function HostDrawerBody({ osds }: { osds: NodeInfo[] }) {
+function HostDrawerBody({
+  osds,
+  onChanged,
+}: {
+  osds: NodeInfo[];
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState<null | OsdAdminState>(null);
+  const [error, setError] = useState<string | null>(null);
+
   const upCount = osds.filter((o) => o.online).length;
   const total = osds.reduce((s, o) => s + o.total_capacity, 0);
   const used = osds.reduce((s, o) => s + o.used_capacity, 0);
   const allUp = osds.length > 0 && upCount === osds.length;
+
+  // Host-level state summary: the drawer acts on ALL OSDs on the host
+  // at once. Show the most restrictive state (Out > Draining > In) so
+  // the operator can see "at least one OSD is already Out" without
+  // clicking through each row.
+  const effective: OsdAdminState = osds.some((o) => o.admin_state === "out")
+    ? "out"
+    : osds.some((o) => o.admin_state === "draining")
+      ? "draining"
+      : "in";
+
+  const applyToAll = async (target: OsdAdminState) => {
+    setBusy(target);
+    setError(null);
+    try {
+      await Promise.all(
+        osds.map((o) => nodesApi.setAdminState(o.node_id, target)),
+      );
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <>
@@ -505,9 +542,27 @@ function HostDrawerBody({ osds }: { osds: NodeInfo[] }) {
         <StatTile
           label="Status"
           value={
-            osds.length === 0 ? "–" : allUp ? "Up / In" : `${upCount}/${osds.length} Up`
+            osds.length === 0
+              ? "–"
+              : effective === "out"
+                ? "Out"
+                : effective === "draining"
+                  ? "Draining"
+                  : allUp
+                    ? "Up / In"
+                    : `${upCount}/${osds.length} Up`
           }
-          tone={osds.length === 0 ? "muted" : allUp ? "good" : "warn"}
+          tone={
+            osds.length === 0
+              ? "muted"
+              : effective === "out"
+                ? "warn"
+                : effective === "draining"
+                  ? "warn"
+                  : allUp
+                    ? "good"
+                    : "warn"
+          }
         />
         <StatTile
           label="OSDs"
@@ -545,7 +600,7 @@ function HostDrawerBody({ osds }: { osds: NodeInfo[] }) {
                     {osd.pod_name || osd.node_name}
                   </div>
                   <div className="text-[10px] text-gray-400 font-mono">
-                    {osd.online ? "up / in" : "down"}
+                    {osd.online ? "up" : "down"} / {osd.admin_state ?? "in"}
                   </div>
                 </div>
               </div>
@@ -566,16 +621,47 @@ function HostDrawerBody({ osds }: { osds: NodeInfo[] }) {
         <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">
           Host Actions
         </div>
+        {error && (
+          <div className="mb-2 px-2 py-1 rounded bg-red-50 border border-red-200 text-[11px] text-red-700">
+            {error}
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-1.5">
-          <HostActionButton icon={Power} label="Reboot" disabled />
-          <HostActionButton icon={Shuffle} label="Drain" disabled />
+          <HostActionButton
+            icon={Power}
+            label="Reboot"
+            disabled
+            title="Reboot needs a K8sHostProvider (Phase 2)"
+          />
+          <HostActionButton
+            icon={Shuffle}
+            label={busy === "draining" ? "Draining…" : "Drain"}
+            disabled={busy !== null || effective === "draining" || osds.length === 0}
+            onClick={() => applyToAll("draining")}
+            title="Mark all OSDs on this host as Draining (no new shards; real migration comes in Phase 3)"
+          />
         </div>
-        <div className="mt-1.5">
-          <HostActionButton icon={Ban} label="Mark Out" disabled tone="danger" />
+        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+          <HostActionButton
+            icon={Ban}
+            label={busy === "out" ? "Marking…" : "Mark Out"}
+            disabled={busy !== null || effective === "out" || osds.length === 0}
+            onClick={() => applyToAll("out")}
+            tone="danger"
+            title="Immediately remove from placement"
+          />
+          <HostActionButton
+            icon={Power}
+            label={busy === "in" ? "Returning…" : "Mark In"}
+            disabled={busy !== null || effective === "in" || osds.length === 0}
+            onClick={() => applyToAll("in")}
+            title="Return to placement"
+          />
         </div>
         <p className="mt-2 text-[10px] text-gray-400">
-          Host actions require CLI integration and are not yet wired to the
-          console.
+          Mark Out / Mark In / Drain apply to every OSD on this host and
+          persist through Raft. Reboot and Add Host need a platform
+          provider (K8s / Linux / Appliance) — coming next.
         </p>
       </div>
     </>
@@ -620,11 +706,15 @@ function HostActionButton({
   label,
   disabled,
   tone = "default",
+  onClick,
+  title,
 }: {
   icon: typeof Power;
   label: string;
   disabled?: boolean;
   tone?: "default" | "danger";
+  onClick?: () => void;
+  title?: string;
 }) {
   const palette =
     tone === "danger"
@@ -633,6 +723,8 @@ function HostActionButton({
   return (
     <button
       disabled={disabled}
+      onClick={onClick}
+      title={title}
       className={`w-full flex items-center justify-center gap-1.5 border rounded-md px-2 py-1.5 text-[11px] font-medium ${palette} disabled:opacity-50 disabled:cursor-not-allowed`}
     >
       <Icon size={12} />
