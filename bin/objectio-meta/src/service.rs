@@ -268,6 +268,34 @@ use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Map an openraft `client_write` error to a tonic status the gateway /
+/// CLI can interpret. ForwardToLeader becomes `FailedPrecondition` with
+/// a message the caller can parse for the leader id; all other errors
+/// become `Internal`. Concrete to the types used by `MetaTypeConfig`.
+fn raft_write_to_status(
+    err: &openraft::error::RaftError<
+        u64,
+        openraft::error::ClientWriteError<u64, openraft::BasicNode>,
+    >,
+) -> tonic::Status {
+    use openraft::error::{ClientWriteError, RaftError};
+    match err {
+        RaftError::APIError(ClientWriteError::ForwardToLeader(f)) => {
+            let leader = f
+                .leader_id
+                .map_or_else(|| "unknown".to_string(), |id| id.to_string());
+            let addr = f
+                .leader_node
+                .as_ref()
+                .map_or_else(String::new, |n| format!(" at {}", n.addr));
+            tonic::Status::failed_precondition(format!(
+                "not the raft leader — forward to node {leader}{addr}"
+            ))
+        }
+        other => tonic::Status::internal(format!("raft client_write: {other}")),
+    }
+}
+
 /// Metadata service state
 ///
 /// Note: Object metadata is stored on OSDs (primary OSD for each object).
@@ -343,6 +371,12 @@ pub struct MetaService {
     license: RwLock<Arc<objectio_license::License>>,
     /// Persistent store (None = in-memory only)
     store: Option<Arc<MetaStore>>,
+    /// Raft handle — set by main.rs after `Raft::new()` succeeds. Config
+    /// mutations route through `client_write`; other mutations still
+    /// write to redb directly pending their R2+ migration. Behind a
+    /// `RwLock` so the service can be constructed before Raft (the
+    /// existing startup order needs meta_service to register OSDs first).
+    raft: RwLock<Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>>>,
 }
 
 /// Statistics for the metadata service
@@ -425,6 +459,7 @@ impl MetaService {
             kms_keys: RwLock::new(HashMap::new()),
             license: RwLock::new(Arc::new(objectio_license::License::community())),
             store: None,
+            raft: RwLock::new(None),
         }
     }
 
@@ -448,6 +483,25 @@ impl MetaService {
     #[must_use]
     pub fn store(&self) -> Option<Arc<MetaStore>> {
         self.store.clone()
+    }
+
+    /// Install the Raft handle. Called from `main.rs` once the cluster
+    /// scaffolding is live, before the service is wrapped in `Arc`.
+    /// Config mutations routed through Raft become linearizable; without
+    /// a handle set, they fall back to the legacy direct-redb path
+    /// (useful for in-memory tests).
+    pub fn set_raft(
+        &self,
+        raft: Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>,
+    ) {
+        *self.raft.write() = Some(raft);
+    }
+
+    /// Current Raft handle, if any.
+    fn raft_handle(
+        &self,
+    ) -> Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>> {
+        self.raft.read().clone()
     }
 
     /// Load all data from the persistent store into in-memory maps.
@@ -3966,6 +4020,82 @@ impl MetadataService for MetaService {
             return Err(Status::invalid_argument("config key is required"));
         }
 
+        // Consensus path: if Raft is wired, every config write has to
+        // commit through the log. Non-leader nodes reject with a leader
+        // hint so the client (gateway) can retry against the right pod.
+        if let Some(raft) = self.raft_handle() {
+            match raft
+                .client_write(objectio_meta_store::MetaCommand::SetConfig {
+                    key: req.key.clone(),
+                    value: req.value.clone(),
+                    updated_by: req.updated_by.clone(),
+                })
+                .await
+            {
+                Ok(resp) => {
+                    // The state machine wrote to the CONFIG redb table
+                    // with a monotonic version inside apply. Mirror that
+                    // entry into the in-memory map on the leader so
+                    // local reads see the new value without a redb hit.
+                    // Followers pick it up via apply on their own copy,
+                    // but their in-memory map is not updated until R1's
+                    // follow-up adds an apply listener.
+                    let version = match resp.data {
+                        objectio_meta_store::MetaResponse::ConfigSet { version } => version,
+                        _ => 0,
+                    };
+                    let now = Self::current_timestamp();
+                    let entry = ConfigEntry {
+                        key: req.key.clone(),
+                        value: req.value.clone(),
+                        updated_at: now,
+                        updated_by: req.updated_by.clone(),
+                        version,
+                    };
+                    self.config.write().insert(req.key.clone(), entry.clone());
+                    self.config_version
+                        .store(version, std::sync::atomic::Ordering::SeqCst);
+
+                    // License hot-swap mirrors the pre-Raft behavior:
+                    // applying a new `license/active` value refreshes the
+                    // in-memory license used by `register_osd` caps.
+                    if req.key == "license/active" {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        match objectio_license::License::load_from_bytes(
+                            &entry.value,
+                            now_secs,
+                        ) {
+                            Ok(l) => {
+                                info!(
+                                    "meta license reloaded: tier={} licensee={} max_nodes={} max_raw_capacity_bytes={}",
+                                    l.tier,
+                                    l.licensee,
+                                    l.max_nodes,
+                                    l.max_raw_capacity_bytes
+                                );
+                                *self.license.write() = Arc::new(l);
+                            }
+                            Err(e) => {
+                                warn!("license/active rejected on set_config: {}", e);
+                            }
+                        }
+                    }
+
+                    info!(
+                        "Config set via Raft: key={} version={} log_id={:?}",
+                        req.key, version, resp.log_id
+                    );
+                    return Ok(Response::new(SetConfigResponse { entry: Some(entry) }));
+                }
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        }
+
+        // Legacy direct-redb path — tests without a Raft handle fall
+        // through here; production deployments always have Raft set.
         let version = self
             .config_version
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -3980,24 +4110,17 @@ impl MetadataService for MetaService {
             version,
         };
 
-        // Persist
         if let Some(store) = &self.store {
             store.put_config(&req.key, &entry.encode_to_vec());
         }
-
-        // Update in-memory
         self.config.write().insert(req.key.clone(), entry.clone());
 
-        // License hot-swap. When the admin installs a new license via
-        // `PUT /_admin/license`, the gateway forwards that to `set_config`
-        // with key `license/active`. Meta verifies the signature + expiry
-        // here so `register_osd` picks up the new caps immediately.
         if req.key == "license/active" {
-            let now = std::time::SystemTime::now()
+            let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            match objectio_license::License::load_from_bytes(&entry.value, now) {
+            match objectio_license::License::load_from_bytes(&entry.value, now_secs) {
                 Ok(l) => {
                     info!(
                         "meta license reloaded: tier={} licensee={} max_nodes={} max_raw_capacity_bytes={}",
@@ -4008,9 +4131,7 @@ impl MetadataService for MetaService {
                 Err(e) => warn!("license/active rejected on set_config: {}", e),
             }
         }
-
-        info!("Config set: key={}, version={}", req.key, version);
-
+        info!("Config set (legacy path): key={}, version={}", req.key, version);
         Ok(Response::new(SetConfigResponse { entry: Some(entry) }))
     }
 
@@ -4019,8 +4140,39 @@ impl MetadataService for MetaService {
         request: Request<DeleteConfigRequest>,
     ) -> Result<Response<DeleteConfigResponse>, Status> {
         let req = request.into_inner();
-        let removed = self.config.write().remove(&req.key).is_some();
 
+        if let Some(raft) = self.raft_handle() {
+            match raft
+                .client_write(objectio_meta_store::MetaCommand::DeleteConfig {
+                    key: req.key.clone(),
+                })
+                .await
+            {
+                Ok(resp) => {
+                    let existed = matches!(
+                        resp.data,
+                        objectio_meta_store::MetaResponse::ConfigDeleted { existed: true }
+                    );
+                    if existed {
+                        self.config.write().remove(&req.key);
+                        if req.key == "license/active" {
+                            info!("meta license removed — reverting to Community tier");
+                            *self.license.write() =
+                                Arc::new(objectio_license::License::community());
+                        }
+                        info!(
+                            "Config deleted via Raft: key={} log_id={:?}",
+                            req.key, resp.log_id
+                        );
+                    }
+                    return Ok(Response::new(DeleteConfigResponse { success: existed }));
+                }
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        }
+
+        // Legacy direct path.
+        let removed = self.config.write().remove(&req.key).is_some();
         if removed {
             if let Some(store) = &self.store {
                 store.delete_config(&req.key);
@@ -4029,7 +4181,7 @@ impl MetadataService for MetaService {
                 info!("meta license removed — reverting to Community tier");
                 *self.license.write() = Arc::new(objectio_license::License::community());
             }
-            info!("Config deleted: key={}", req.key);
+            info!("Config deleted (legacy path): key={}", req.key);
         }
 
         Ok(Response::new(DeleteConfigResponse { success: removed }))

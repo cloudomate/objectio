@@ -255,6 +255,9 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("raft init: {e}"))?;
     let raft = Arc::new(raft);
+    // Hand the handle to MetaService so set_config / delete_config
+    // route through Raft (R1.5).
+    meta_service.set_raft(raft.clone());
     info!(
         "Raft node id={} advertise={} (call POST /init on :{} to bootstrap)",
         node_id, self_addr, args.admin_port
