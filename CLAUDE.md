@@ -72,13 +72,6 @@ docker build --target cli     -t objectio-cli .
 docker build --target all     -t objectio .       # all-in-one
 ```
 
-### CI
-
-GitHub Actions (`.github/workflows/ci.yml`) runs on a self-hosted runner:
-
-1. **CI job**: Builds the `deps` Dockerfile stage, then runs `cargo fmt`, `cargo clippy`, `cargo test` inside Docker containers.
-2. **Build & Push job** (main branch only): Builds all 5 Docker targets, tags `:latest` + `:$SHA_SHORT`, pushes to the container registry.
-
 ### Deploy directory layout
 
 ```
