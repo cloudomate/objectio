@@ -1,8 +1,15 @@
 # ObjectIO
 
-**Software-Defined Storage with S3 and Block interfaces, built in Rust.**
+**Unified software-defined storage: S3, Iceberg tables, Delta Sharing, and block volumes on one erasure-coded backend. Built in Rust.**
 
-ObjectIO is a high-performance software-defined storage (SDS) platform that provides both S3-compatible object storage and distributed block storage from a single unified infrastructure. Erasure coding protects data across failure domains, CRUSH placement distributes shards deterministically, and a Raft-ready metadata service persists state via redb.
+ObjectIO delivers four storage paradigms on a single cluster — S3 object
+storage, an Iceberg REST Catalog with Delta Sharing, and distributed block
+volumes — backed by erasure-coded OSDs, topology-aware CRUSH placement, and
+a Raft-ready metadata service. Community features (S3, block, replication,
+SSE-S3) are Apache-2.0 licensed; Enterprise features (Iceberg, Delta
+Sharing, SSE-KMS external backends, multi-tenancy, OIDC registration, LRC)
+are source-available under BUSL-1.1 and gated at runtime by a signed
+license.
 
 ## Key Features
 
@@ -10,6 +17,7 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 - Full S3 API compatibility — works with AWS CLI, SDKs, boto3, s3cmd
 - AWS Signature V4 authentication with IAM users and bucket policies
 - Multipart uploads, range reads, copy operations
+- Versioning, object lock (WORM), lifecycle rules
 - Streaming upload/download with per-stripe erasure coding
 - Server-side encryption at rest — SSE-S3, SSE-KMS, and SSE-C; bucket defaults via `?encryption`; per-request headers honored; on-disk shards are always ciphertext when SSE is enabled
 
@@ -43,9 +51,33 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 - Bearer token authentication for recipients
 - Presigned S3 URLs for direct data access
 
+**Multi-Tenancy & Identity** *(Enterprise)*
+- Tenants with per-tenant quotas, allowed pools, and admin users
+- Tenant-scoped buckets, users, access keys, warehouses, shares
+- Tenant-admin role: delegated admin within a tenant without system privileges
+- OIDC / external SSO (Keycloak, Entra, Okta, Google) via `identity/openid/*` config
+
+**Topology & Locality**
+- 5-level failure domain model: region → zone → datacenter → rack → host
+- Hard-enforced placement constraints (refuse writes when spread can't be satisfied)
+- Locality-aware EC reads: gateway pulls shards from nearest OSDs first
+- `objectio_read_locality_bytes_total` counter — see multi-DC bandwidth at a glance
+- Interactive topology diagram in the web console
+
+**Licensing**
+- Ed25519-signed license files distinguish Community and Enterprise tiers
+- Per-license node + raw-capacity caps enforced at meta `register_osd` (scale-up block on new hardware only)
+- Runtime hot-swap: `PUT /_admin/license` activates Enterprise features without restart
+
+**Web Console**
+- React + Vite SPA at `/_console/` with 14 pages (Dashboard, Buckets, Objects, Users, Tenants, Identity, Tables, Table Sharing, Monitoring, Nodes & Drives, Policies, Encryption, Topology, License)
+- Tenant-aware — admin-only pages hidden for tenant users
+- Session cookies with HMAC, OIDC SSO support
+
 **Monitoring**
 - Prometheus metrics on all services (`/metrics` endpoint)
 - Per-operation counters and latency histograms for S3, Iceberg, and block storage
+- Locality metrics breaking reads down by topology distance (same-rack / same-zone / remote)
 - Grafana dashboards for cluster overview, S3 operations, OSD detail, block storage, and disk health
 
 **Architecture**
@@ -95,7 +127,7 @@ ObjectIO is a high-performance software-defined storage (SDS) platform that prov
 ### Docker Compose
 
 ```bash
-git clone https://github.com/objectio/objectio.git
+git clone https://github.com/cloudomate/objectio.git
 cd objectio
 
 # Start a local cluster (3 meta + 6 OSD + 1 gateway, 4+2 EC)
@@ -219,10 +251,12 @@ objectio-cli -e http://localhost:9100 key create <user-id>
 
 | Component | Binary | Port | Description |
 |-----------|--------|------|-------------|
-| **Gateway** | `objectio-gateway` | 9000 | S3 API + Iceberg REST Catalog + Delta Sharing + block gateway (stateless, horizontally scalable) |
-| **Meta** | `objectio-meta` | 9100 | Metadata cluster — buckets, objects, volumes, IAM, CRUSH placement (Raft + redb) |
+| **Gateway** | `objectio-gateway` | 9000 | S3 API + Iceberg REST Catalog + Delta Sharing + web console (stateless, horizontally scalable) |
+| **Meta** | `objectio-meta` | 9100 | Metadata cluster — buckets, objects, volumes, IAM, tenants, CRUSH placement, license cap enforcement (Raft + redb) |
 | **OSD** | `objectio-osd` | 9200 | Storage daemon — shard storage, block I/O, raw disk with WAL |
-| **CLI** | `objectio-cli` | - | Admin CLI for user, volume, and cluster management |
+| **Block Gateway** | `objectio-block-gateway` | 9300 (gRPC) / 10809 (NBD) | Block service + NBD target; erasure-encodes block writes to OSDs |
+| **CLI** | `objectio-cli` | — | Admin CLI (users, tenants, keys, volumes, snapshots, topology, license) |
+| **Install** | `objectio-install` | — | Installation helper |
 
 ## S3 Compatibility
 
@@ -328,18 +362,46 @@ Secure cross-organization data sharing via the [Delta Sharing](https://delta.io/
 
 ## Admin API
 
-Gateway admin endpoints at `/_admin/*` for user and access key management.
+Gateway admin endpoints at `/_admin/*`. All accept either SigV4 or the
+console session cookie. System-admin-only endpoints are enforced in
+code; tenant admins have a separate scope-limited variant.
+
+**Identity**
 
 | Endpoint | Description |
-|----------|-------------|
+|---|---|
+| `GET/POST /_admin/users` | List / create users |
+| `DELETE /_admin/users/{id}` | Delete user |
+| `GET/POST /_admin/users/{id}/access-keys` | List / create keys |
+| `DELETE /_admin/access-keys/{id}` | Delete key |
+| `GET/POST/PUT/DELETE /_admin/tenants[/{name}]` | Tenant CRUD *(Enterprise)* |
+| `POST /_admin/tenants/{name}/admins` | Grant tenant-admin role *(Enterprise)* |
+| `DELETE /_admin/tenants/{name}/admins/{user}` | Revoke tenant-admin *(Enterprise)* |
+| `GET/POST/PUT/DELETE /_admin/policies[/{name}]` | IAM policy CRUD |
+| `POST /_admin/policies/attach` \| `/detach` | Attach / detach policy |
+
+**Cluster**
+
+| Endpoint | Description |
+|---|---|
 | `GET /health` | Health check |
 | `GET /metrics` | Prometheus metrics |
-| `GET /_admin/users` | List users |
-| `POST /_admin/users` | Create user |
-| `DELETE /_admin/users/{user_id}` | Delete user |
-| `GET /_admin/users/{user_id}/access-keys` | List access keys |
-| `POST /_admin/users/{user_id}/access-keys` | Create access key |
-| `DELETE /_admin/access-keys/{access_key_id}` | Delete access key |
+| `GET /_admin/cluster-info` | Gateway self-topology + per-OSD distance |
+| `GET /_admin/topology` | Aggregated region→zone→dc→rack→host→OSDs tree |
+| `GET /_admin/placement/validate?pool=NAME` | Is pool's failure_domain satisfiable? |
+| `GET /_admin/nodes` | OSD / disk status |
+| `GET/POST/PUT/DELETE /_admin/pools[/{name}]` | Storage pool CRUD |
+
+**KMS & License**
+
+| Endpoint | Description |
+|---|---|
+| `GET /_admin/kms/status` \| `GET /_admin/kms/keys` | KMS backend + key list |
+| `POST /_admin/kms/keys` \| `DELETE /_admin/kms/keys/{id}` | Key lifecycle |
+| `GET/PUT/DELETE /_admin/kms/config` | Select/swap KMS backend (local \| vault) |
+| `GET /_admin/license` | Tier + features + live usage (nodes, raw capacity) |
+| `PUT /_admin/license` | Install a signed license (hot-swap) |
+| `DELETE /_admin/license` | Revert to Community |
 
 ## CLI Reference
 
@@ -351,11 +413,14 @@ The `objectio-cli` connects to the Meta service for cluster administration.
 | **node** | `list`, `show`, `drain` |
 | **disk** | `list`, `show` |
 | **bucket** | `list`, `show` |
-| **user** | `list`, `create`, `delete` |
+| **user** | `list`, `create`, `delete` (with `--tenant`) |
 | **key** | `list`, `create`, `delete` |
 | **group** | `list`, `create`, `delete`, `add-user`, `remove-user`, `user-groups` |
+| **tenant** | `list`, `create`, `show`, `delete`, `admin add` / `remove` / `list` |
 | **volume** | `list`, `create`, `show`, `resize`, `delete` |
 | **snapshot** | `list`, `create`, `show`, `delete`, `clone` |
+| **topology** | `show`, `validate <pool>` |
+| **license** | `show`, `install <file>`, `verify <file>`, `remove` |
 
 ## Data Protection Modes
 
@@ -399,11 +464,12 @@ make lint             # Clippy with -D warnings
 make fmt              # Check formatting
 make ci               # Full CI: fmt + lint + test
 
-# Docker images
-docker build --target gateway -t objectio-gateway .
-docker build --target meta    -t objectio-meta .
-docker build --target osd     -t objectio-osd .
-docker build --target cli     -t objectio-cli .
+# Docker images — `all` is the unified image used by helm
+docker build --target all     -t objectio .              # one image, per-service entrypoints
+docker build --target gateway -t objectio-gateway .      # gateway only
+docker build --target meta    -t objectio-meta .         # meta only
+docker build --target osd     -t objectio-osd .          # osd only
+docker build --target cli     -t objectio-cli .          # admin CLI only
 ```
 
 ## Requirements
@@ -413,6 +479,34 @@ docker build --target cli     -t objectio-cli .
 - ISA-L build deps for x86: nasm, autoconf, automake, libtool, libclang-dev
 - On ARM, omit `--features isal` (uses portable pure-Rust EC backend)
 
-## License
+## Licensing
 
-[Apache License 2.0](LICENSE)
+Dual-licensed:
+
+- Everything outside `enterprise/` — [Apache License 2.0](./LICENSE)
+- `enterprise/crates/objectio-iceberg/` + `enterprise/crates/objectio-delta-sharing/` — [Business Source License 1.1](./enterprise/LICENSE); converts to Apache-2.0 on **2030-04-18** under the BUSL change-license clause
+
+BUSL permits reading, self-hosting, and modifying the code — it only
+restricts offering the Enterprise features as a paid managed service that
+competes with ObjectIO's own offerings. See the [NOTICE](./NOTICE) file
+for the full split.
+
+Enterprise features (Iceberg catalog, Delta Sharing, SSE-KMS external
+backends, multi-tenancy, OIDC registration, LRC erasure coding) are also
+gated at runtime by an Ed25519-signed license file. Without a valid
+Enterprise license installed, those endpoints return `403
+EnterpriseLicenseRequired`. See
+[docs/FEATURES.md](docs/FEATURES.md#10-licensing--tiering) for the full
+tier matrix and gate details.
+
+## Roadmap
+
+See [docs/TOPOLOGY-ROADMAP.md](docs/TOPOLOGY-ROADMAP.md) for the
+multi-phase topology and maintenance-ergonomics roadmap:
+
+- **Phase 1 ✓** — 5-level failure domains, hard-enforced placement, console topology page
+- **Phase 2 ✓** — locality-aware EC reads, `/_admin/cluster-info`, cross-zone metrics
+- **Phase 3** — domain drain, node-by-node rolling upgrade, repair throttling
+- **Phase 4** — network fabric awareness, rack-local LRC, client-side hints
+- **Phase 5** — cross-site async replication
+- **Future (Enterprise track)** — immutable OS with A/B partitions + TPM-measured boot
