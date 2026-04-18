@@ -8,10 +8,18 @@ metadata:
 spec:
   type: ClusterIP
   clusterIP: None
+  # Publish not-ready addresses so the Raft bootstrap Job can reach meta-0
+  # while it's still starting up (readiness fires only once gRPC is
+  # listening, which can be after init() can legitimately be called).
+  publishNotReadyAddresses: true
   ports:
     - name: grpc
       port: {{ .Values.meta.service.port }}
       targetPort: grpc
+      protocol: TCP
+    - name: admin
+      port: {{ .Values.meta.service.adminPort }}
+      targetPort: admin
       protocol: TCP
   selector:
     {{- include "objectio.selectorLabels" . | nindent 4 }}

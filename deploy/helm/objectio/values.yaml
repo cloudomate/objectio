@@ -73,10 +73,15 @@ meta:
   image:
     repository: objectio-meta
     tag: latest
+  # Meta runs a Raft cluster. Single-pod = single-voter cluster
+  # (no election drama, same operational behavior as pre-Raft meta).
+  # 3+ pods = real quorum; survives (N-1)/2 pod losses.
+  # Post-install Job bootstraps the cluster automatically.
   replicas: 1
   service:
-    port: 9100
-    metricsPort: 9101
+    port: 9100          # gRPC (MetadataService + RaftRpc)
+    metricsPort: 9101   # Prometheus
+    adminPort: 9102     # Raft bootstrap + membership admin (HTTP)
   logLevel: info
   persistence:
     size: 10Gi

@@ -1,0 +1,134 @@
+{{- /*
+Raft cluster bootstrap Job.
+
+Helm runs this once after the meta StatefulSet is up. It:
+  1. Calls POST :9102/init on meta-0 (single-voter cluster with node_id=1)
+  2. For each of meta-1..N: POST :9102/add-learner { node_id, addr }
+  3. POST :9102/change-membership { voters: [1..N] } to promote them
+
+Idempotent: a second /init fails with "already initialized", which we
+swallow. Re-running the Job is safe — useful after a helm upgrade that
+doesn't change replicas but does need to ensure the cluster is live.
+
+Re-run after scaling up replicas: helm re-applies the Job (same manifest)
+and it adds the new learners. Scaling DOWN is not safe via this Job —
+for that operators call /change-membership with the reduced voter set
+manually, then scale the StatefulSet down.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "objectio.meta.fullname" . }}-raft-bootstrap
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meta-raft-bootstrap
+  annotations:
+    # Runs after the StatefulSet is deployed; a failed Job doesn't
+    # block the install, and `helm uninstall` removes it.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "objectio.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: meta-raft-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: curlimages/curl:8.10.1
+          command: ["/bin/sh", "-c"]
+          env:
+            - name: REPLICAS
+              value: "{{ .Values.meta.replicas }}"
+            - name: HEADLESS
+              value: "{{ include "objectio.meta.headless" . }}"
+            - name: ADMIN_PORT
+              value: "{{ .Values.meta.service.adminPort }}"
+            - name: GRPC_PORT
+              value: "{{ .Values.meta.service.port }}"
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            - |
+              set -u
+              FULLNAME='{{ include "objectio.meta.fullname" . }}'
+              META0="${FULLNAME}-0.${HEADLESS}.${NAMESPACE}.svc.cluster.local"
+              echo "Bootstrapping Raft cluster with ${REPLICAS} replicas via ${META0}:${ADMIN_PORT}"
+
+              # 1. Wait for meta-0 to accept connections on its admin port.
+              #    headless service has publishNotReadyAddresses so we can
+              #    reach it before readiness flips true.
+              i=0
+              until curl -sf -m 3 "http://${META0}:${ADMIN_PORT}/status" > /dev/null 2>&1; do
+                i=$((i+1))
+                if [ $i -gt 120 ]; then
+                  echo "FATAL: meta-0 never became reachable at http://${META0}:${ADMIN_PORT}"
+                  exit 2
+                fi
+                echo "waiting for meta-0 ($i/120)..."
+                sleep 2
+              done
+
+              # 2. /init (idempotent: ignore if already initialized).
+              resp=$(curl -s -w "\n%{http_code}" -X POST "http://${META0}:${ADMIN_PORT}/init" || true)
+              code=$(echo "$resp" | tail -n1)
+              body=$(echo "$resp" | sed '$d')
+              if [ "$code" = "200" ]; then
+                echo "meta-0 initialized as single-voter cluster"
+              else
+                case "$body" in
+                  *"already initialized"*|*NotAllowed*|*"InProgress"*)
+                    echo "meta-0 already initialized (ok): $body"
+                    ;;
+                  *)
+                    echo "FATAL: init failed ($code): $body"
+                    exit 3
+                    ;;
+                esac
+              fi
+
+              # 3. For each replica > 0, add as learner, then change-membership
+              #    to promote the full voter set. Single-replica deployments
+              #    skip this loop entirely — the /init above gave us a
+              #    working cluster with voter={1}.
+              voters="1"
+              if [ "$REPLICAS" -gt 1 ]; then
+                n=1
+                while [ "$n" -lt "$REPLICAS" ]; do
+                  node_id=$((n + 1))
+                  addr="${FULLNAME}-${n}.${HEADLESS}.${NAMESPACE}.svc.cluster.local:${GRPC_PORT}"
+                  body="{\"node_id\": ${node_id}, \"addr\": \"${addr}\"}"
+                  echo "Adding learner node_id=${node_id} at ${addr}"
+                  curl -sf -m 30 -X POST -H 'Content-Type: application/json' \
+                    -d "${body}" \
+                    "http://${META0}:${ADMIN_PORT}/add-learner" \
+                    || { echo "add-learner failed for node_id=${node_id}"; exit 4; }
+                  voters="${voters},${node_id}"
+                  n=$((n + 1))
+                done
+
+                echo "Promoting voters=[${voters}]"
+                curl -sf -m 60 -X POST -H 'Content-Type: application/json' \
+                  -d "{\"voters\": [${voters}]}" \
+                  "http://${META0}:${ADMIN_PORT}/change-membership" \
+                  || { echo "change-membership failed"; exit 5; }
+              fi
+
+              echo "Final cluster status:"
+              curl -s "http://${META0}:${ADMIN_PORT}/status"
+              echo
+              echo "Raft bootstrap complete."
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

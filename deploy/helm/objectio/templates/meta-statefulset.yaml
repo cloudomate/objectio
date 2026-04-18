@@ -27,9 +27,14 @@ spec:
             - |
               ORDINAL=$(echo "$HOSTNAME" | rev | cut -d- -f1 | rev)
               NODE_ID=$((ORDINAL + 1))
+              # Advertise address peers dial for Raft — stable pod DNS
+              # from the headless service. `$HOSTNAME` is the pod name.
+              ADVERTISE="$HOSTNAME.{{ include "objectio.meta.headless" . }}:{{ .Values.meta.service.port }}"
               exec objectio-meta \
                 --node-id "$NODE_ID" \
                 --listen "0.0.0.0:{{ .Values.meta.service.port }}" \
+                --raft-advertise "$ADVERTISE" \
+                --admin-port {{ .Values.meta.service.adminPort }} \
                 --peers "{{ include "objectio.metaPeers" . }}" \
                 --data-dir /var/lib/objectio/meta \
                 --ec-k "{{ .Values.ec.k }}" \
@@ -41,6 +46,9 @@ spec:
               protocol: TCP
             - name: metrics
               containerPort: {{ .Values.meta.service.metricsPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.meta.service.adminPort }}
               protocol: TCP
           livenessProbe:
             tcpSocket:
