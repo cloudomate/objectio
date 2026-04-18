@@ -199,15 +199,23 @@ export default function Topology() {
     };
   }, [refreshKey]);
 
-  // Fast lookup from host name → OSDs on that host. Used both to size
-  // tree nodes and to populate the detail drawer.
+  // Fast lookup from host name → OSDs on that host. The topology tree
+  // identifies hosts by the failure-domain `host` field, which in k8s
+  // deployments maps to `spec.nodeName` (the worker node). Fall back
+  // through alternative identifiers to cover bare-metal or legacy
+  // registrations where only hostname / pod name is populated.
   const osdsByHost = useMemo(() => {
     const m = new Map<string, NodeInfo[]>();
     for (const osd of osdNodes) {
-      const key =
-        osd.hostname || osd.kubernetes_node || osd.node_name || "(unknown)";
-      if (!m.has(key)) m.set(key, []);
-      m.get(key)!.push(osd);
+      const candidates = [
+        osd.kubernetes_node,
+        osd.hostname,
+        osd.node_name,
+      ].filter(Boolean) as string[];
+      for (const key of candidates) {
+        if (!m.has(key)) m.set(key, []);
+        m.get(key)!.push(osd);
+      }
     }
     return m;
   }, [osdNodes]);

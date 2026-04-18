@@ -21,11 +21,13 @@ data:
     {{- end }}
     datacenter = {{ .Values.osd.failureDomain.datacenter | quote }}
     rack = {{ .Values.osd.failureDomain.rack | quote }}
-    # Each pod is its own host. Without this, every OSD registers under an
-    # empty host name and the meta groups them into a single "(none)"
-    # bucket — which breaks per-host topology views and host-scoped CRUSH
-    # rules.
-    host = "__NODE_NAME__"
+    # The k8s worker node the pod is scheduled on — not the pod name.
+    # Host failure domain tolerates a machine going down, so "host" must
+    # map to the real machine. Multiple OSD pods scheduled on the same
+    # node share a host and CRUSH spreads shards across the actual
+    # hardware. The statefulset init container computes this from the
+    # downward API (spec.nodeName) and substitutes __HOST_NAME__.
+    host = "__HOST_NAME__"
 
     [storage]
     disks = ["/data/disk0/{{ .Values.osd.storage.diskFile }}"]
