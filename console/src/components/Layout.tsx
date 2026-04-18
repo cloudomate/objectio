@@ -18,6 +18,7 @@ import {
   Lock,
 } from "lucide-react";
 import { useLicense, allows, type FeatureKey } from "../lib/license";
+import wordmark from "../assets/brand/wordmark-light.svg";
 
 interface NavItem {
   to: string;
@@ -65,13 +66,15 @@ export default function Layout({ user, tenant, onLogout }: Props) {
       <aside className="w-52 bg-white border-r border-gray-200 flex flex-col">
         <div className="px-3 py-3 border-b border-gray-200">
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-blue-600 rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-xs">O</span>
-            </div>
-            <div>
-              <h1 className="text-[13px] font-semibold text-gray-900">ObjectIO</h1>
-              <p className="text-[10px] text-gray-400">Console</p>
-            </div>
+            <img
+              src={wordmark}
+              alt="objectio"
+              className="h-6 w-auto select-none"
+              draggable={false}
+            />
+            <span className="text-[10px] text-gray-400 uppercase tracking-wider">
+              Console
+            </span>
           </div>
         </div>
         <nav className="flex-1 p-2 space-y-px overflow-y-auto">

@@ -1,10 +1,18 @@
 @import "tailwindcss";
+@import "./brand-tokens.css";
 
 body {
   @apply bg-gray-50 text-gray-900 antialiased m-0;
-  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-family: var(--objectio-font-sans);
   font-size: 13px;
   line-height: 1.5;
+}
+
+code,
+pre,
+kbd,
+.font-mono {
+  font-family: var(--objectio-font-mono);
 }
 
 #root {

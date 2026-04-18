@@ -1,0 +1,93 @@
+/* ==========================================================================
+   OBJECTIO — Brand tokens (CSS)
+   Drop this into your site and reference the variables below.
+   ========================================================================== */
+
+:root {
+  /* Brand colors ------------------------------------------------------------ */
+  --objectio-teal:        #00E0B8;   /* primary accent */
+  --objectio-teal-600:    #00B093;   /* on light bg */
+  --objectio-indigo:      #5B8CFF;   /* secondary accent */
+  --objectio-indigo-600:  #1F6AFF;   /* on light bg */
+
+  /* Neutrals --------------------------------------------------------------- */
+  --objectio-ink:         #0B0F14;   /* darkest surface / primary text on light */
+  --objectio-ink-raised:  #11161D;   /* cards on dark */
+  --objectio-ink-line:    #1C2430;   /* 1px lines on dark */
+  --objectio-paper:       #F7F8FB;   /* primary surface on light */
+  --objectio-paper-line:  #E3E7EF;   /* 1px lines on light */
+  --objectio-fog:         #CFD5E0;   /* muted surface */
+  --objectio-mute:        #8A95A5;   /* secondary text */
+  --objectio-snow:        #E7ECF3;   /* primary text on dark */
+
+  /* Gradients -------------------------------------------------------------- */
+  --objectio-gradient:    linear-gradient(90deg, #00E0B8 0%, #5B8CFF 100%);
+  --objectio-gradient-l:  linear-gradient(90deg, #00B093 0%, #1F6AFF 100%);
+  --objectio-bg-hero:     radial-gradient(1200px 400px at 50% 0%, #17202C 0%, #0B0F14 70%);
+
+  /* Typography ------------------------------------------------------------- */
+  --objectio-font-sans:   "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+                          Roboto, Helvetica, Arial, sans-serif;
+  --objectio-font-mono:   "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Type scale (fluid-ish) ------------------------------------------------- */
+  --objectio-fs-display:  clamp(48px, 6vw, 96px);
+  --objectio-fs-h1:       clamp(36px, 4vw, 56px);
+  --objectio-fs-h2:       clamp(28px, 3vw, 40px);
+  --objectio-fs-h3:       clamp(20px, 2vw, 24px);
+  --objectio-fs-body:     16px;
+  --objectio-fs-small:    13px;
+  --objectio-fs-caption:  11px;
+
+  /* Radii & elevation ------------------------------------------------------ */
+  --objectio-radius-sm:   6px;
+  --objectio-radius-md:   12px;
+  --objectio-radius-lg:   16px;
+  --objectio-radius-xl:   24px;
+  --objectio-shadow-1:    0 1px 2px rgba(0,0,0,.2), 0 0 0 1px rgba(255,255,255,.04) inset;
+  --objectio-shadow-2:    0 8px 24px rgba(0,0,0,.35);
+  --objectio-shadow-glow: 0 0 0 2px rgba(0,224,184,.25), 0 8px 24px rgba(0,224,184,.15);
+
+  /* Spacing (4pt scale) ---------------------------------------------------- */
+  --objectio-space-1:     4px;
+  --objectio-space-2:     8px;
+  --objectio-space-3:     12px;
+  --objectio-space-4:     16px;
+  --objectio-space-5:     24px;
+  --objectio-space-6:     32px;
+  --objectio-space-7:     48px;
+  --objectio-space-8:     64px;
+
+  /* Motion ----------------------------------------------------------------- */
+  --objectio-ease:        cubic-bezier(.2,.8,.2,1);
+  --objectio-dur-fast:    120ms;
+  --objectio-dur-med:     240ms;
+  --objectio-dur-slow:    480ms;
+}
+
+/* Utility classes (optional) -------------------------------------------------- */
+.objectio-gradient-text {
+  background: var(--objectio-gradient);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+.objectio-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 16px;
+  font: 600 14px/1 var(--objectio-font-sans);
+  color: var(--objectio-ink);
+  background: var(--objectio-teal);
+  border: 0;
+  border-radius: var(--objectio-radius-md);
+  cursor: pointer;
+  transition: transform var(--objectio-dur-fast) var(--objectio-ease),
+              box-shadow var(--objectio-dur-med) var(--objectio-ease);
+}
+.objectio-btn:hover { box-shadow: var(--objectio-shadow-glow); }
+.objectio-btn:active { transform: translateY(1px); }
+.objectio-btn--ghost {
+  background: transparent;
+  color: var(--objectio-snow);
+  box-shadow: inset 0 0 0 1px var(--objectio-ink-line);
+}

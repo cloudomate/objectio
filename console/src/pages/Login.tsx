@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { KeyRound, LogIn } from "lucide-react";
+import wordmark from "../assets/brand/wordmark-light.svg";
 
 interface Props {
   onLogin: (user: string, tenant: string) => void;
@@ -72,15 +73,15 @@ export default function Login({ onLogin }: Props) {
       <div className="w-full max-w-xs">
         <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center gap-2.5 mb-5">
-            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-sm">O</span>
-            </div>
-            <div>
-              <h1 className="text-[14px] font-semibold text-gray-900">
-                ObjectIO
-              </h1>
-              <p className="text-[11px] text-gray-400">Console</p>
-            </div>
+            <img
+              src={wordmark}
+              alt="objectio"
+              className="h-7 w-auto select-none"
+              draggable={false}
+            />
+            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+              Console
+            </span>
           </div>
 
           {error && (
