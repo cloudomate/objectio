@@ -5,7 +5,7 @@
 ObjectIO delivers four storage paradigms on a single cluster — S3 object
 storage, an Iceberg REST Catalog with Delta Sharing, and distributed block
 volumes — backed by erasure-coded OSDs, topology-aware CRUSH placement, and
-a Raft-ready metadata service. Community features (S3, block, replication,
+a Raft-consensus metadata service (openraft 0.9). Community features (S3, block, replication,
 SSE-S3) are Apache-2.0 licensed; Enterprise features (Iceberg, Delta
 Sharing, SSE-KMS external backends, multi-tenancy, OIDC registration, LRC)
 are source-available under BUSL-1.1 and gated at runtime by a signed
@@ -82,7 +82,7 @@ license.
 
 **Architecture**
 - Stateless gateways — scale horizontally behind a load balancer
-- Raft-ready metadata cluster with redb persistence
+- openraft 0.9 metadata cluster with redb persistence; single-pod or 3+-pod HA via `meta.replicas`
 - Raw disk I/O (O_DIRECT / F_NOCACHE) with WAL, B-tree index, and ARC cache
 - Pure Rust — no C/C++ dependencies for core functionality
 

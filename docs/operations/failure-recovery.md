@@ -162,101 +162,94 @@ objectio-cli osd status osd3
 
 ## Metadata Service Failures
 
-### Raft Consensus
+### Raft consensus (openraft 0.9)
 
-The metadata service uses Raft for consensus:
+The metadata service runs openraft. Every meta pod is a Raft member;
+cluster size is a deployment decision via `meta.replicas` in the helm
+chart:
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Raft Cluster (3 nodes)                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   meta1 (Leader)  ←───────→  meta2 (Follower)                   │
-│         ↕                          ↕                             │
-│         └────────────→ meta3 (Follower)                         │
-│                                                                  │
-│   Quorum: 2/3 nodes required for writes                         │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+| `meta.replicas` | Semantics | Survives |
+|---|---|---|
+| 1 | Single-voter cluster | Pod restart with PVC intact |
+| 3 | 3-voter quorum | 1 pod loss |
+| 5 | 5-voter quorum | 2 pod losses |
 
-### Single Node Failure
+Phase R1 routes cluster config mutations (`SetConfig` / `DeleteConfig`)
+through the Raft log. Other mutations (users, buckets, tenants, etc.)
+still write to redb directly pending the R2+ migration — those are
+quorum-safe only because they're leader-only in practice.
 
-Cluster continues operating with 2/3 nodes:
+### Admin API
 
-```bash
-# Check Raft status
-objectio-cli meta status
-
-# Output:
-# RAFT CLUSTER STATUS
-# Leader:     meta1 (term: 42)
-# Committed:  log index 1,234,567
-#
-# NODE    ROLE       STATE    LOG_INDEX   BEHIND
-# meta1   Leader     Healthy  1,234,567   -
-# meta2   Follower   Healthy  1,234,567   0
-# meta3   Follower   Down     1,234,500   67 (5m ago)
-```
-
-### Leader Failover
-
-If the leader fails, election occurs automatically:
-
-```
-1. Followers detect leader timeout (default: 1s)
-   │
-   ▼
-2. Follower with most up-to-date log starts election
-   │
-   ▼
-3. Majority vote elects new leader
-   │
-   ▼
-4. New leader begins accepting writes
-   │
-   ▼
-5. (Typically < 5 seconds total)
-```
-
-### Recovering a Failed Metadata Node
+All endpoints are plain HTTP on the meta admin port (default 9102).
+They're meta-local and not exposed via the gateway.
 
 ```bash
-# Check why node failed
-journalctl -u objectio-meta@meta3 -n 100
+# Cluster state (leader id, term, voters, learners, last_log_index)
+curl http://meta-0:9102/status | jq
 
-# Restart the node
-sudo systemctl restart objectio-meta@meta3
+# Force a node into the cluster as a learner (non-voting, catches up
+# via log replication):
+curl -X POST http://meta-0:9102/add-learner \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id": 4, "addr": "meta-3.meta-headless:9100"}'
 
-# The node will:
-# 1. Rejoin cluster as follower
-# 2. Receive missing log entries from leader
-# 3. Apply entries to catch up
-# 4. Begin participating in consensus
+# Promote learners to voters (pass the full voter list, not a delta):
+curl -X POST http://meta-0:9102/change-membership \
+  -H 'Content-Type: application/json' \
+  -d '{"voters": [1,2,3,4]}'
 ```
 
-### Complete Metadata Cluster Failure
+### Single pod failure in a 3-node cluster
 
-**Scenario:** All 3 metadata nodes fail simultaneously.
-
-**Recovery procedure:**
+Cluster continues with 2/3 nodes. Election is automatic; the old
+leader's clients see `failed_precondition "not the raft leader —
+forward to node X"` on the next write and retry there.
 
 ```bash
-# 1. Identify node with latest data
-# Check Raft log files for highest index
-ls -la /var/lib/objectio/meta/raft/
+# Simulate a leader crash
+kubectl delete pod meta-0 -n objectio
 
-# 2. Bootstrap from most recent node
-objectio-meta --node-id 1 --bootstrap-single
+# Watch followers elect a new leader (usually < 1s)
+kubectl logs -n objectio meta-1 | grep -E "state_change|leader"
 
-# 3. Once leader is stable, add other nodes
-objectio-cli meta add-peer meta2:9101
-objectio-cli meta add-peer meta3:9101
-
-# 4. Start other nodes in recovery mode
-objectio-meta --node-id 2 --join meta1:9101
-objectio-meta --node-id 3 --join meta1:9101
+# New leader visible in status
+curl http://meta-1:9102/status | jq .leader_id
 ```
+
+When meta-0 comes back, it rejoins as a follower, catches up via
+AppendEntries replication, and starts participating again.
+
+### Complete metadata cluster failure
+
+**Scenario:** all meta pods lose their PVCs simultaneously (rare —
+typically requires a storage-layer incident).
+
+```bash
+# If all pods still have their PVCs, just wait — each pod's redb log
+# is durable, so restarting the StatefulSet recovers the cluster.
+kubectl rollout restart statefulset/objectio-meta -n objectio
+
+# If PVCs are lost, the cluster is lost — there's no quorum to recover
+# from. Treat it like a fresh install:
+kubectl delete statefulset/objectio-meta pvc -l app.kubernetes.io/component=meta
+helm upgrade objectio ./deploy/helm/objectio -f values.yaml
+# Helm's post-install Job re-runs /init + /add-learner + /change-membership
+# against the new meta-0.
+```
+
+### Network partitions
+
+Raft's quorum requirement prevents split-brain. In a 3-node cluster
+partitioned 1 + 2:
+
+- Minority side (1 pod): can't elect a leader, refuses writes with
+  `RaftError::Fatal("not ready")`.
+- Majority side (2 pods): re-elects a leader if the old one was on the
+  minority side; continues serving writes.
+
+When the partition heals, the minority catches up via AppendEntries
+and resumes as follower. No manual intervention needed.
 
 ---
 
@@ -292,21 +285,9 @@ server {
 
 ## Network Partitions
 
-### Split-Brain Prevention
-
-Raft prevents split-brain by requiring majority quorum:
-
-```
-Partition scenario:
-┌─────────────┐     X     ┌─────────────┐
-│   meta1     │     X     │   meta2     │
-│   (alone)   │     X     │   meta3     │
-└─────────────┘     X     └─────────────┘
-                    X
-Minority (1/3)      X     Majority (2/3)
-Cannot elect        X     Can elect leader
-leader              X     and accept writes
-```
+Meta-side partition behavior is covered in the Metadata Service
+Failures section above. Gateway/OSD partitions are handled by
+client-side retry.
 
 ### Client Retry Logic
 

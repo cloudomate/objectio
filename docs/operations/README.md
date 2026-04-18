@@ -170,14 +170,19 @@ objectio-cli osd remove osd7
 
 ### Metadata Backup
 
-Raft snapshots are automatic. For manual backup:
+Raft log + state are persisted in each meta pod's redb database on its
+PVC. Log compaction (snapshotting) is on the Raft roadmap; until then
+logs grow without bound on long-lived clusters, so periodically
+back up the PVC contents:
 
 ```bash
-# Export metadata
-objectio-cli meta export --output /backup/meta-$(date +%Y%m%d).json
+# Snapshot each meta pod's PVC (use your storage class's snapshot
+# mechanism — VolumeSnapshot API, CSI snapshotter, etc.)
+kubectl get pvc -n objectio -l app.kubernetes.io/component=meta
 
-# Import metadata (disaster recovery)
-objectio-cli meta import --input /backup/meta-20240115.json
+# For disaster recovery, restore the PVCs before redeploying — a fresh
+# helm install against empty PVCs starts a new cluster with no
+# history.
 ```
 
 ### Object Recovery
@@ -199,7 +204,7 @@ objectio-cli object repair bucket/key --force
 | Symptom | Check | Solution |
 |---------|-------|----------|
 | Slow uploads | Network, OSD load | Scale gateways, add OSDs |
-| High latency | Metadata service | Check Raft leader, disk I/O |
+| High latency | Metadata service | Check Raft leader via `curl meta-N:9102/status`, disk I/O |
 | Objects missing | OSD health | Check repair status |
 | Auth failures | User credentials | Verify access keys |
 | Connection refused | Service status | Restart services |
@@ -210,13 +215,20 @@ objectio-cli object repair bucket/key --force
 
 ### Complete Cluster Recovery
 
-If all metadata nodes fail:
+If all metadata nodes fail but their PVCs survive:
 
-1. Stop all services
-2. Identify node with latest Raft log
-3. Bootstrap from that node
-4. Bring up remaining metadata nodes
-5. Start OSDs and gateways
+1. `kubectl rollout restart statefulset/objectio-meta` — each pod
+   restarts, reads its persisted Raft log from redb, and re-joins.
+   openraft handles log alignment and re-election automatically.
+2. OSDs + gateways keep running throughout.
+
+If the PVCs are lost (unrecoverable storage-layer failure):
+
+1. Restore PVCs from the latest snapshot if you have one.
+2. Otherwise: `kubectl delete statefulset/objectio-meta` + PVCs, then
+   `helm upgrade` — the post-install Job bootstraps a fresh cluster.
+   Pre-Raft cluster state is lost; tenants, users, buckets, etc. need
+   to be recreated.
 
 ### Data Recovery from Raw Disks
 

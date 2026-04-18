@@ -101,23 +101,19 @@ histogram_quantile(0.99, rate(objectio_iceberg_request_duration_seconds_bucket[5
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `objectio_meta_raft_term` | Gauge | Current Raft term |
-| `objectio_meta_raft_commit_index` | Gauge | Committed log index |
-| `objectio_meta_raft_is_leader` | Gauge | 1 if leader, 0 otherwise |
-| `objectio_meta_raft_peers` | Gauge | Number of peers |
 | `objectio_meta_buckets_total` | Gauge | Total buckets |
 | `objectio_meta_objects_total` | Gauge | Total objects |
 | `objectio_meta_operations_total` | Counter | Metadata operations |
 
+Raft-specific metrics (`meta_raft_term`, `meta_raft_is_leader`,
+`meta_raft_commit_index`, `meta_raft_peers`) are on the roadmap — for
+now, poll `GET :9102/status` on each meta pod to observe leader,
+term, voters, learners, `last_log_index`, and `last_applied`. A
+follow-up task will export these as Prometheus gauges.
+
 **Example queries:**
 
 ```promql
-# Check for leader
-objectio_meta_raft_is_leader == 1
-
-# Log replication lag
-objectio_meta_raft_commit_index{instance="meta1"} - ignoring(instance) objectio_meta_raft_commit_index
-
 # Metadata operation rate
 rate(objectio_meta_operations_total[5m])
 ```
@@ -203,14 +199,11 @@ groups:
           summary: "ObjectIO cluster has degraded objects"
           description: "{{ $value }} objects are missing shards"
 
-      - alert: ObjectIONoLeader
-        expr: sum(objectio_meta_raft_is_leader) == 0
-        for: 30s
-        labels:
-          severity: critical
-        annotations:
-          summary: "No Raft leader in metadata cluster"
-          description: "Metadata cluster has no leader - writes will fail"
+      # TODO: replace with a Prometheus-native alert once meta exports
+      # `objectio_meta_raft_is_leader`. Until then, operators should
+      # watch the /status endpoint via blackbox-exporter or a scripted
+      # probe — a cluster with no leader for > 30s means writes fail
+      # with `not the raft leader`.
 
       - alert: ObjectIOOSDDown
         expr: up{job="objectio-osd"} == 0
@@ -274,7 +267,8 @@ groups:
 
 1. **Cluster Health** (Stat)
    - Number of healthy OSDs
-   - Raft leader status
+   - Raft leader status (read from `GET :9102/status` until the Prom
+     exporter lands; see Metadata Service Metrics note)
    - Degraded object count
 
 2. **Request Rate** (Graph)

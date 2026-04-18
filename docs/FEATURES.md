@@ -398,9 +398,22 @@ File storage provides POSIX-compatible access to ObjectIO buckets via standard f
 
 ### Architecture
 - **Gateway** (stateless, horizontally scalable): S3 API, Iceberg REST Catalog, Delta Sharing, Admin API, Console
-- **Meta** (Raft cluster): Bucket/object metadata, placement (CRUSH 2.0), IAM, tenant config
+- **Meta** (openraft 0.9 cluster): Bucket/object metadata, placement (CRUSH 2.0), IAM, tenant config. One code path; deployment picks single-voter (`replicas=1`) or HA quorum (`replicas=3+`).
 - **OSD** (one per disk): Erasure-coded shard storage with Direct I/O, WAL
 - **Block Gateway** (optional): Block storage over gRPC + NBD
+
+### Meta HA (openraft 0.9)
+- **Real consensus, not a placeholder**: `RaftStorage` implemented over redb (log + vote + state in `raft_logs`, `raft_vote`, `raft_state` tables); `RaftNetwork` over tonic gRPC on the existing meta port, JSON-encoded envelopes
+- **Cluster size is a deployment choice**: `meta.replicas=1` boots a single-voter cluster (no election drama, same operational behavior as pre-Raft meta); `meta.replicas=3+` gets true quorum, leader election, log replication. Same binary, same code path
+- **Bootstrap automated via helm**: post-install Job calls `/init` on meta-0, adds peers as learners, promotes the voter set. Re-runs safely on upgrade
+- **Admin API** at `:9102` per meta pod:
+  - `POST /init` — bootstrap a single-voter cluster (idempotent)
+  - `POST /add-learner {node_id, addr}` — onboard a peer non-voting
+  - `POST /change-membership {voters}` — promote the voter set
+  - `GET /status` — leader id, term, voters, learners, `last_log_index`, `last_applied`
+- **Config entries are fully replicated**: `SetConfig` / `DeleteConfig` route through `Raft::client_write`. Non-leader writes return `FailedPrecondition` with a leader hint so the gateway/CLI can retry against the right pod
+- **Pending Raft migration** (Phase R2+): users, access keys, groups, policies, buckets, objects, multipart, tenants, pools, warehouses, shares, KMS keys, license, lifecycle, versioning, object lock, SSE configs, Iceberg tables, Delta shares. Those handlers still write to redb directly; they're quorum-safe only because they're leader-only in practice. Each subsystem migrates variant-by-variant in subsequent phases
+- **Snapshot support**: stub in R1 — `get_current_snapshot → None`, `build_snapshot` returns empty, `install_snapshot` updates markers only. Log compaction arrives in a later phase
 
 ### Deployment
 - **Kubernetes (Helm)**: Production-grade Helm chart with StatefulSets, PVCs, Ingress
