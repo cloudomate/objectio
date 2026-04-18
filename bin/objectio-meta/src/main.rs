@@ -4,6 +4,7 @@
 //! object storage and block storage.
 
 mod block_service;
+mod drain_observer;
 mod raft_admin;
 mod raft_rpc;
 mod service;
@@ -259,6 +260,11 @@ async fn main() -> Result<()> {
     // Hand the handle to MetaService so set_config / delete_config
     // route through Raft (R1.5).
     meta_service.set_raft(raft.clone());
+
+    // Drain observer — every replica runs the task, only the leader
+    // issues client_writes. Kick it off once the Raft handle is wired
+    // so `is_raft_leader` returns a meaningful answer.
+    drain_observer::spawn(meta_service.clone());
     info!(
         "Raft node id={} advertise={} (call POST /init on :{} to bootstrap)",
         node_id, self_addr, args.admin_port

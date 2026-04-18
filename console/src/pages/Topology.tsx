@@ -179,6 +179,16 @@ export default function Topology() {
       );
   }, []);
 
+  // If any OSD is Draining, auto-refresh every 15 s so the operator
+  // sees the shard count drop toward zero (and the auto-finalise to Out
+  // when it hits zero) without manually clicking Refresh.
+  useEffect(() => {
+    const someDraining = osdNodes.some((n) => n.admin_state === "draining");
+    if (!someDraining) return;
+    const t = setInterval(() => setRefreshKey((k) => k + 1), 15000);
+    return () => clearInterval(t);
+  }, [osdNodes]);
+
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -562,6 +572,12 @@ function HostDrawerBody({
     : osds.some((o) => o.admin_state === "draining")
       ? "draining"
       : "in";
+  // Sum shards across Draining OSDs so the drawer can render drain
+  // progress. Meta's leader-only observer flips Draining → Out
+  // automatically once a given OSD's count reaches 0.
+  const drainingShardsRemaining = osds
+    .filter((o) => o.admin_state === "draining")
+    .reduce((s, o) => s + (o.shard_count ?? 0), 0);
 
   const applyToAll = async (target: OsdAdminState) => {
     setBusy(target);
@@ -619,6 +635,25 @@ function HostDrawerBody({
         </div>
         <CapacityBar used={used} total={total} showLabel layout="stacked" />
       </div>
+
+      {effective === "draining" && (
+        <div className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] font-semibold text-amber-800">
+              Draining
+            </div>
+            <div className="text-[11px] text-amber-800 tabular-nums">
+              {drainingShardsRemaining.toLocaleString()} shards remaining
+            </div>
+          </div>
+          <p className="mt-1 text-[10px] text-amber-700/80">
+            The meta leader polls this host every 30 s and auto-finalises it to
+            Out when the shard count reaches zero. Real shard migration is
+            Phase&nbsp;3b; for now the count drops only as data ages out or
+            an external migrator moves it.
+          </p>
+        </div>
+      )}
 
       <div>
         <div className="flex items-center justify-between mb-1.5">

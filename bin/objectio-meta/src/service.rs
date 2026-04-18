@@ -506,6 +506,72 @@ impl MetaService {
         self.raft.read().clone()
     }
 
+    /// True iff this replica is the current Raft leader. Used by
+    /// leader-only background tasks (drain observer, future migrator)
+    /// so every replica can run the task definition while only one
+    /// actually mutates state.
+    ///
+    /// Returns `false` when Raft isn't wired (in-memory tests), which
+    /// is the correct answer — there's no leader to issue writes to.
+    #[must_use]
+    pub fn is_raft_leader(&self) -> bool {
+        self.raft_handle()
+            .map(|r| {
+                let m = r.metrics().borrow().clone();
+                m.current_leader == Some(m.id)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Read-only snapshot of the registered OSD list. Exposed for
+    /// internal background tasks (drain observer) that need to
+    /// iterate without acquiring the lock for an async scope.
+    pub fn osd_nodes_read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<OsdNode>> {
+        self.osd_nodes.read()
+    }
+
+    /// Invoke `SetOsdAdminState` from internal code (background tasks,
+    /// not from an incoming RPC). Same Raft-routed path as the public
+    /// gRPC handler; just skips the request-parsing / authz layer and
+    /// always supplies `requested_by` so the audit log shows which
+    /// subsystem triggered the change.
+    ///
+    /// # Errors
+    /// Propagates any Raft `client_write` error (leader loss, timeout,
+    /// shutdown).
+    pub async fn internal_set_osd_admin_state(
+        &self,
+        node_id: [u8; 16],
+        state: objectio_common::OsdAdminState,
+        requested_by: String,
+    ) -> anyhow::Result<()> {
+        let raft = self
+            .raft_handle()
+            .ok_or_else(|| anyhow::anyhow!("raft handle unavailable"))?;
+        raft.client_write(objectio_meta_store::MetaCommand::SetOsdAdminState {
+            node_id,
+            state,
+            requested_by,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("client_write: {e}"))?;
+
+        // Mirror into in-memory osd_nodes so the next get_listing_nodes
+        // response reflects the new state immediately on this leader.
+        let mut nodes = self.osd_nodes.write();
+        if let Some(n) = nodes.iter_mut().find(|n| n.node_id == node_id) {
+            n.admin_state = state;
+        }
+        // Rebuild placement topology to apply the change to CRUSH
+        // without waiting for the next registration.
+        let snapshot = nodes.clone();
+        drop(nodes);
+        for osd in &snapshot {
+            self.update_topology_with_node(osd);
+        }
+        Ok(())
+    }
+
     /// Load all data from the persistent store into in-memory maps.
     fn load_from_store(&self) {
         let Some(store) = &self.store else { return };
