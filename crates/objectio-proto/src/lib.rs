@@ -22,3 +22,11 @@ pub mod cluster {
 pub mod block {
     tonic::include_proto!("objectio.block");
 }
+
+/// Raft consensus transport (meta ↔ meta, openraft 0.9).
+/// `RaftEnvelope` carries a JSON-encoded openraft request/response as an
+/// opaque byte payload so proto schema changes aren't needed when
+/// openraft's struct shapes evolve.
+pub mod raft {
+    tonic::include_proto!("objectio.raft");
+}

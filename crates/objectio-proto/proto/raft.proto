@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package objectio.raft;
+
+// gRPC transport for openraft 0.9 inter-meta consensus RPCs.
+//
+// Payloads are JSON-encoded openraft types:
+//   - AppendEntries:  AppendEntriesRequest<MetaTypeConfig>  -> AppendEntriesResponse<u64>
+//   - Vote:           VoteRequest<u64>                      -> VoteResponse<u64>
+//   - InstallSnapshot: InstallSnapshotRequest<MetaTypeConfig> -> InstallSnapshotResponse<u64>
+//
+// Using an opaque bytes payload (rather than a proto mirror of openraft's
+// types) keeps the wire compatible as openraft's structs evolve — only
+// the serde Serialize/Deserialize contract on both ends needs to match.
+// We use JSON to match the storage layer's on-disk format; if RPC
+// throughput becomes a bottleneck later we can swap to bincode without
+// changing this proto.
+service RaftRpc {
+    rpc AppendEntries(RaftEnvelope) returns (RaftEnvelope);
+    rpc Vote(RaftEnvelope) returns (RaftEnvelope);
+    rpc InstallSnapshot(RaftEnvelope) returns (RaftEnvelope);
+}
+
+message RaftEnvelope {
+    // Source node id of the sender — carried for logging / debugging.
+    uint64 from = 1;
+    // JSON-encoded openraft request or response body.
+    bytes payload = 2;
+}
