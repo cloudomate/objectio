@@ -1,0 +1,61 @@
+{{- /*
+ServiceAccount + Role + RoleBinding for the gateway's K8sHostProvider.
+Only rendered when `gateway.hostProvider.enabled=true` AND `kind=k8s`.
+The namespace-scoped Role grants just enough to:
+  - read/patch the OSD StatefulSet (Add Host, Remove Host),
+  - list/delete the OSD's pods (Reboot).
+Scope is intentionally tight — it does NOT grant cluster-wide access,
+cannot touch other namespaces, cannot touch PVCs (drain-driven remove
+lands in a later phase).
+*/ -}}
+{{- if and .Values.gateway.hostProvider.enabled (eq .Values.gateway.hostProvider.kind "k8s") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "objectio.gateway.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "objectio.gateway.fullname" . }}-host-provider
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    # Resource names restricted to the OSD sts by name — the gateway
+    # cannot scale meta or the gateway itself, and cannot touch any
+    # other StatefulSet in the namespace (e.g. Vault, monitoring).
+    resourceNames:
+      - {{ include "objectio.osd.fullname" . }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    # Pod verbs are unrestricted by name because pod names include the
+    # ordinal and can't be pre-listed. The provider validates the pod
+    # name prefix (objectio-osd-*) before calling delete, so non-OSD
+    # pods in the namespace are safe — but if you want tighter control,
+    # layer a ResourceQuota or an admission webhook; K8s Role
+    # resourceNames don't support prefixes.
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "objectio.gateway.fullname" . }}-host-provider
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "objectio.gateway.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "objectio.gateway.fullname" . }}-host-provider
+{{- end }}

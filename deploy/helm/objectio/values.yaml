@@ -23,6 +23,15 @@ gateway:
     zone: ""
     datacenter: ""
     rack: ""
+  # Host lifecycle provider for the admin Add Host / Reboot endpoints.
+  # When `enabled: true` and `kind: k8s`, the chart renders a
+  # ServiceAccount + Role granting patch-scale on the OSD StatefulSet
+  # and delete-pod in this namespace, and the gateway container mounts
+  # that SA. Leave disabled for BYO-Linux or Appliance deployments
+  # (future providers supply their own auth mechanism).
+  hostProvider:
+    enabled: true
+    kind: k8s
   # Delta Sharing presigned URL config. Set externalEndpoint + credentials to enable.
   deltaSharing:
     externalEndpoint: ""

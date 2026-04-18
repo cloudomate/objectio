@@ -7,6 +7,7 @@ mod admin;
 mod auth_middleware;
 mod chunked_decode;
 mod console_auth;
+mod host_provider;
 mod iceberg_auth;
 mod kms;
 mod license_gate;
@@ -269,6 +270,30 @@ struct Args {
     topology_rack: String,
     #[arg(long, env = "OBJECTIO_TOPOLOGY_HOST", default_value = "")]
     topology_host: String,
+
+    /// Host lifecycle backend for /_admin/hosts and /_admin/osds/*/reboot.
+    /// `noop` (default) refuses those actions; `k8s` talks to the
+    /// in-cluster Kubernetes API (requires a ServiceAccount with
+    /// patch-scale on the OSD StatefulSet + delete-pod). Future values:
+    /// `linux-ssh`, `appliance`.
+    #[arg(long, env = "OBJECTIO_HOST_PROVIDER", default_value = "noop")]
+    host_provider: String,
+
+    /// Namespace the OSD StatefulSet lives in. Only read when
+    /// `--host-provider=k8s`. Defaults to POD_NAMESPACE (downward API
+    /// set by the helm chart) or "default" if unset.
+    #[arg(long, env = "POD_NAMESPACE", default_value = "default")]
+    host_provider_namespace: String,
+
+    /// Name of the OSD StatefulSet — the chart's `objectio.osd.fullname`
+    /// helper renders this as `{release}-osd` (e.g. `objectio-osd`).
+    /// Override if you've customised the release name.
+    #[arg(
+        long,
+        env = "OBJECTIO_HOST_PROVIDER_OSD_STS",
+        default_value = "objectio-osd"
+    )]
+    host_provider_osd_sts: String,
 
     /// Log level
     #[arg(long, default_value = "info")]
@@ -640,6 +665,46 @@ async fn main() -> Result<()> {
         info!("Gateway topology: unconfigured — locality-aware read routing disabled");
     }
 
+    // Host provider selection. `noop` means /_admin/hosts and Reboot
+    // return 501 — safe default for dev clusters with no platform to
+    // talk to. `k8s` connects to the in-cluster API; startup fails
+    // fast if the ServiceAccount isn't wired.
+    let host_provider: Arc<dyn host_provider::HostProvider> =
+        match args.host_provider.as_str() {
+            "noop" => Arc::new(host_provider::NoopHostProvider),
+            "k8s" => {
+                info!(
+                    "Host provider: k8s (namespace={}, osd_sts={})",
+                    args.host_provider_namespace, args.host_provider_osd_sts
+                );
+                match host_provider::K8sHostProvider::try_new(
+                    args.host_provider_namespace.clone(),
+                    args.host_provider_osd_sts.clone(),
+                )
+                .await
+                {
+                    Ok(p) => Arc::new(p),
+                    Err(e) => {
+                        // Don't hard-fail boot — if the k8s API is
+                        // briefly unreachable (CNI still starting, RBAC
+                        // propagation) we'd rather serve S3 + return 503
+                        // on host-action endpoints than refuse traffic
+                        // entirely. Startup logs will flag the config
+                        // for ops to check.
+                        warn!("k8s host provider init failed, falling back to noop: {e}");
+                        Arc::new(host_provider::NoopHostProvider)
+                    }
+                }
+            }
+            other => {
+                warn!(
+                    "unknown --host-provider={:?}; falling back to noop. Accepted: noop, k8s",
+                    other
+                );
+                Arc::new(host_provider::NoopHostProvider)
+            }
+        };
+
     // Create application state. KMS fields are held behind RwLocks so
     // `PUT /_admin/kms/config` can hot-swap the backend at runtime; we seed
     // them here with whatever the CLI flag + env / meta config resolved to.
@@ -655,6 +720,7 @@ async fn main() -> Result<()> {
         kms_local: parking_lot::RwLock::new(kms_local),
         license: parking_lot::RwLock::new(Arc::new(license)),
         self_topology,
+        host_provider,
     });
 
     // Build router
@@ -734,6 +800,12 @@ async fn main() -> Result<()> {
             "/_admin/osds/{node_id}/admin-state",
             put(admin::admin_set_osd_state),
         )
+        .route(
+            "/_admin/osds/{node_id}/reboot",
+            post(admin::admin_reboot_osd),
+        )
+        .route("/_admin/hosts", post(admin::admin_add_hosts))
+        .route("/_admin/host-provider", get(admin::admin_host_provider_info))
         .route("/_admin/cluster-info", get(admin::admin_cluster_info))
         .route("/_admin/topology", get(admin::admin_get_topology))
         .route(

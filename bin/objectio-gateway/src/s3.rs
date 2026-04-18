@@ -123,6 +123,11 @@ pub struct AppState {
     /// are tried first. Fully-empty when not configured — routing then
     /// falls back to round-robin and this struct is inert.
     pub self_topology: objectio_placement::FailureDomainInfo,
+    /// Platform-specific host lifecycle. `NoopHostProvider` by default;
+    /// a k8s / ssh / appliance provider gets wired in via `--host-provider`
+    /// at startup. Behind an `Arc<dyn>` so handlers can clone into async
+    /// tasks without bound-lifetime issues.
+    pub host_provider: Arc<dyn crate::host_provider::HostProvider>,
 }
 
 impl AppState {

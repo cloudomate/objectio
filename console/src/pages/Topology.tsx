@@ -19,7 +19,13 @@ import Drawer from "../components/Drawer";
 import CapacityBar from "../components/CapacityBar";
 import BreadcrumbPath from "../components/BreadcrumbPath";
 import StatusDot from "../components/StatusDot";
-import { nodes as nodesApi, type NodeInfo, type OsdAdminState } from "../api/client";
+import {
+  nodes as nodesApi,
+  hostProvider as hostProviderApi,
+  type NodeInfo,
+  type OsdAdminState,
+  type HostProviderInfo,
+} from "../api/client";
 
 interface HostNode { host: string; osds: string[]; }
 interface RackNode { rack: string; hosts: HostNode[]; }
@@ -158,6 +164,20 @@ export default function Topology() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedHost, setSelectedHost] = useState<string | null>(null);
+  const [provider, setProvider] = useState<HostProviderInfo | null>(null);
+
+  useEffect(() => {
+    hostProviderApi
+      .info()
+      .then(setProvider)
+      .catch(() =>
+        setProvider({
+          provider: "noop",
+          supports_add_host: false,
+          supports_reboot: false,
+        }),
+      );
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -488,6 +508,7 @@ export default function Topology() {
         >
           <HostDrawerBody
             osds={selectedOsds}
+            provider={provider}
             onChanged={() => setRefreshKey((k) => k + 1)}
           />
         </Drawer>
@@ -498,13 +519,34 @@ export default function Topology() {
 
 function HostDrawerBody({
   osds,
+  provider,
   onChanged,
 }: {
   osds: NodeInfo[];
+  provider: HostProviderInfo | null;
   onChanged: () => void;
 }) {
-  const [busy, setBusy] = useState<null | OsdAdminState>(null);
+  const [busy, setBusy] = useState<null | OsdAdminState | "reboot">(null);
   const [error, setError] = useState<string | null>(null);
+
+  const reboot = async () => {
+    setBusy("reboot");
+    setError(null);
+    try {
+      // Rebooting one OSD pod is enough in k8s — the StatefulSet's
+      // other pods stay up. For BYO-Linux / appliance hosts with
+      // multiple OSDs per host, the provider itself decides whether
+      // to recycle the whole host or just one OSD service.
+      const first = osds[0];
+      if (!first) return;
+      await nodesApi.reboot(first.node_id);
+      setTimeout(onChanged, 6000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const upCount = osds.filter((o) => o.online).length;
   const total = osds.reduce((s, o) => s + o.total_capacity, 0);
@@ -629,9 +671,18 @@ function HostDrawerBody({
         <div className="grid grid-cols-2 gap-1.5">
           <HostActionButton
             icon={Power}
-            label="Reboot"
-            disabled
-            title="Reboot needs a K8sHostProvider (Phase 2)"
+            label={busy === "reboot" ? "Rebooting…" : "Reboot"}
+            disabled={
+              busy !== null ||
+              osds.length === 0 ||
+              !(provider?.supports_reboot ?? false)
+            }
+            onClick={reboot}
+            title={
+              provider?.supports_reboot
+                ? `Delete the first OSD's pod (${provider.provider})`
+                : "Requires a host provider. Set --host-provider=k8s on the gateway."
+            }
           />
           <HostActionButton
             icon={Shuffle}
@@ -659,9 +710,9 @@ function HostDrawerBody({
           />
         </div>
         <p className="mt-2 text-[10px] text-gray-400">
-          Mark Out / Mark In / Drain apply to every OSD on this host and
-          persist through Raft. Reboot and Add Host need a platform
-          provider (K8s / Linux / Appliance) — coming next.
+          Mark Out / Mark In / Drain persist through Raft. Reboot uses
+          the configured platform provider ({provider?.provider ?? "…"}).
+          Real shard migration for Drain is Phase 3.
         </p>
       </div>
     </>

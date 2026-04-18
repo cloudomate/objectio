@@ -16,7 +16,12 @@ import CapacityBar from "../components/CapacityBar";
 import BreadcrumbPath from "../components/BreadcrumbPath";
 import ExpandableRow from "../components/ExpandableRow";
 import Tabs from "../components/Tabs";
-import { nodes as nodesApi, type NodeInfo } from "../api/client";
+import {
+  nodes as nodesApi,
+  hostProvider as hostProviderApi,
+  type NodeInfo,
+  type HostProviderInfo,
+} from "../api/client";
 
 function formatBytes(b: number): string {
   if (b === 0) return "0 B";
@@ -61,6 +66,9 @@ export default function Drives() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "issues">("all");
   const [groupByRack, setGroupByRack] = useState(false);
+  const [provider, setProvider] = useState<HostProviderInfo | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -79,6 +87,37 @@ export default function Drives() {
   };
 
   useEffect(load, []);
+  // Fetch host-provider capabilities once; used to enable/disable the
+  // Add Host / + Add OSDs buttons. Tolerant of failure (older meta /
+  // pre-Phase-2 gateways return 404 here — treat as "noop").
+  useEffect(() => {
+    hostProviderApi
+      .info()
+      .then(setProvider)
+      .catch(() =>
+        setProvider({
+          provider: "noop",
+          supports_add_host: false,
+          supports_reboot: false,
+        }),
+      );
+  }, []);
+
+  const addHost = async () => {
+    setActionError(null);
+    setAdding(true);
+    try {
+      await hostProviderApi.addHosts(1);
+      // New OSD pod takes 5-15s to register; poll once after a short
+      // delay so the user sees the additional host appear without a
+      // manual refresh.
+      setTimeout(load, 8000);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAdding(false);
+    }
+  };
 
   const hosts: Host[] = useMemo(() => {
     const grouped = new Map<string, NodeInfo[]>();
@@ -141,15 +180,23 @@ export default function Drives() {
               <RefreshCw size={13} /> Refresh
             </button>
             <button
-              disabled
-              title="Cluster onboarding UI coming soon"
+              onClick={addHost}
+              disabled={
+                adding ||
+                !provider?.supports_add_host
+              }
+              title={
+                provider?.supports_add_host
+                  ? "Scale the OSD StatefulSet by +1 (k8s)"
+                  : "Requires a host provider (k8s / linux / appliance). Set --host-provider on the gateway."
+              }
               className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-[12px] font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Plus size={13} /> Add Host
+              <Plus size={13} /> {adding ? "Adding…" : "Add Host"}
             </button>
             <button
               disabled
-              title="OSD provisioning UI coming soon"
+              title="Per-host OSD provisioning (multiple OSDs on one host) is a later phase; Add Host covers single-OSD-per-pod today."
               className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Plus size={13} /> Add OSDs
@@ -157,6 +204,12 @@ export default function Drives() {
           </div>
         }
       />
+
+      {actionError && (
+        <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
+          {actionError}
+        </div>
+      )}
 
       {/* Controls bar — search, All / Has Issues pill, filters, group-by-rack */}
       <div className="flex items-center gap-3 mb-4">

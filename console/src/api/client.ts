@@ -205,4 +205,30 @@ export const nodes = {
       `/_admin/osds/${nodeId}/admin-state`,
       { state },
     ),
+  reboot: (nodeId: string) =>
+    request<{ provider: string; pod: string; requested: boolean }>(
+      "POST",
+      `/_admin/osds/${nodeId}/reboot`,
+    ),
+};
+
+/// Host-lifecycle provider that the gateway is wired to. `provider` is
+/// one of "noop" (default — button renders disabled with a hint),
+/// "k8s", "linux-ssh", "appliance".
+export interface HostProviderInfo {
+  provider: string;
+  supports_add_host: boolean;
+  supports_reboot: boolean;
+}
+
+export const hostProvider = {
+  info: (): Promise<HostProviderInfo> =>
+    request("GET", "/_admin/host-provider"),
+  addHosts: (count: number) =>
+    request<{
+      provider: string;
+      previous_replicas: number;
+      new_replicas: number;
+      pods_added: string[];
+    }>("POST", "/_admin/hosts", { count }),
 };

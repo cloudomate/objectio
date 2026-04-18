@@ -1926,6 +1926,184 @@ pub async fn admin_set_osd_state(
 }
 
 // ============================================================================
+// Host lifecycle — /_admin/hosts (Add Host) and /_admin/osds/{id}/reboot
+// ============================================================================
+
+/// Map a `HostProviderError` to an axum `Response` with the right
+/// HTTP status. Unsupported → 501, InvalidRequest → 400,
+/// Unavailable → 503, Other → 500. Shared by every host endpoint.
+fn host_provider_error_to_response(e: crate::host_provider::HostProviderError) -> Response {
+    use crate::host_provider::HostProviderError;
+    let (code, msg) = match e {
+        HostProviderError::Unsupported(m) => (StatusCode::NOT_IMPLEMENTED, m.to_string()),
+        HostProviderError::InvalidRequest(m) => (StatusCode::BAD_REQUEST, m),
+        HostProviderError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
+        HostProviderError::Other(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+    };
+    (code, msg).into_response()
+}
+
+/// `POST /_admin/hosts`
+///
+/// Body: `{"count": N}` (N ≥ 1; default 1 if missing).
+///
+/// Asks the configured host provider to add N more OSD hosts. On k8s
+/// this scales the OSD StatefulSet; each new pod self-registers
+/// against meta when it comes up.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct AddHostPayload {
+    #[serde(default = "AddHostPayload::default_count")]
+    pub count: i32,
+}
+
+impl AddHostPayload {
+    const fn default_count() -> i32 {
+        1
+    }
+}
+
+pub async fn admin_add_hosts(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    body: Option<Json<AddHostPayload>>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let payload = body.map(|Json(p)| p).unwrap_or_default();
+    match state.host_provider.add_hosts(payload.count).await {
+        Ok(outcome) => Json(serde_json::json!({
+            "provider": state.host_provider.name(),
+            "previous_replicas": outcome.previous_replicas,
+            "new_replicas": outcome.new_replicas,
+            "pods_added": outcome.pods_added,
+        }))
+        .into_response(),
+        Err(e) => host_provider_error_to_response(e),
+    }
+}
+
+/// `POST /_admin/osds/{node_id}/reboot`
+///
+/// Reboots the pod / machine hosting the given OSD. Resolves the OSD
+/// to its hostname / pod-name by looking it up in the meta's node
+/// list; the host provider then acts on that. Without a platform
+/// provider, returns 501.
+pub async fn admin_reboot_osd(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    axum::extract::Path(node_id_hex): axum::extract::Path<String>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+
+    // Resolve node_id → pod/hostname via meta + the OSD's get_status.
+    // We need a concrete hostname to hand to the platform provider;
+    // `host_provider.reboot("objectio-osd-2")` is how the k8s
+    // implementation knows which pod to delete.
+    let mut meta = state.meta_client.clone();
+    let nodes = match meta
+        .get_listing_nodes(GetListingNodesRequest {
+            bucket: String::new(),
+            include_all_states: true,
+        })
+        .await
+    {
+        Ok(resp) => resp.into_inner().nodes,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
+        }
+    };
+
+    // Parse hex once so we can byte-compare to each listing's node_id.
+    let node_id_bytes = match hex::decode(&node_id_hex) {
+        Ok(b) if b.len() == 16 => b,
+        _ => {
+            return (StatusCode::BAD_REQUEST, "node_id must be 32 hex chars")
+                .into_response();
+        }
+    };
+
+    // Find the matching node's address, then fetch the OSD's pod_name
+    // from its status RPC. Pod name is what k8s delete-pod needs.
+    let addr = match nodes.iter().find(|n| n.node_id == node_id_bytes) {
+        Some(n) => n.address.clone(),
+        None => {
+            return (StatusCode::NOT_FOUND, format!("no OSD {node_id_hex}"))
+                .into_response();
+        }
+    };
+    let osd_addr = if addr.starts_with("http") {
+        addr
+    } else {
+        format!("http://{addr}")
+    };
+    let pod_name = match StorageServiceClient::connect(osd_addr.clone()).await {
+        Ok(mut client) => match client
+            .get_status(objectio_proto::storage::GetStatusRequest {})
+            .await
+        {
+            Ok(r) => r.into_inner().pod_name,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("osd unreachable at {osd_addr}: {e}"),
+                )
+                    .into_response();
+            }
+        },
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("osd connect failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if pod_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "osd did not report a pod_name (not running under k8s?)",
+        )
+            .into_response();
+    }
+
+    match state.host_provider.reboot(&pod_name).await {
+        Ok(outcome) => Json(serde_json::json!({
+            "provider": state.host_provider.name(),
+            "pod": outcome.pod,
+            "requested": outcome.requested,
+        }))
+        .into_response(),
+        Err(e) => host_provider_error_to_response(e),
+    }
+}
+
+/// `GET /_admin/host-provider`
+///
+/// Returns the provider name — used by the console to decide whether
+/// to render Add Host / Reboot buttons as active, or show a hint that
+/// a platform provider needs configuring.
+pub async fn admin_host_provider_info(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    Json(serde_json::json!({
+        "provider": state.host_provider.name(),
+        "supports_add_host": state.host_provider.name() != "noop",
+        "supports_reboot": state.host_provider.name() != "noop",
+    }))
+    .into_response()
+}
+
+// ============================================================================
 // License management
 // ============================================================================
 
