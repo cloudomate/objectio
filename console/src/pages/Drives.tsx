@@ -1,25 +1,33 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Server,
   HardDrive,
-  ChevronDown,
-  ChevronRight,
   RefreshCw,
   Container,
+  Search,
+  SlidersHorizontal,
+  Rows3,
+  Plus,
+  MoreVertical,
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
-import StatusBadge from "../components/StatusBadge";
+import StatusDot from "../components/StatusDot";
+import CapacityBar from "../components/CapacityBar";
+import BreadcrumbPath from "../components/BreadcrumbPath";
+import ExpandableRow from "../components/ExpandableRow";
+import Tabs from "../components/Tabs";
 import { nodes as nodesApi, type NodeInfo } from "../api/client";
 
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
+function formatBytes(b: number): string {
+  if (b === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+  const i = Math.min(units.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+  const v = b / Math.pow(1024, i);
+  return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
 function formatUptime(seconds: number): string {
-  if (seconds === 0) return "-";
+  if (!seconds) return "-";
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -28,24 +36,7 @@ function formatUptime(seconds: number): string {
   return `${m}m`;
 }
 
-function UsageBar({ used, total }: { used: number; total: number }) {
-  const pct = total === 0 ? 0 : Math.round((used / total) * 100);
-  const color =
-    pct > 90 ? "bg-red-500" : pct > 70 ? "bg-yellow-500" : "bg-blue-500";
-  return (
-    <div className="flex items-center gap-2">
-      <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
-        <div
-          className={`h-full ${color} rounded-full`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span className="text-[10px] text-gray-500 w-8 text-right">{pct}%</span>
-    </div>
-  );
-}
-
-interface K8sNode {
+interface Host {
   name: string;
   osds: NodeInfo[];
   totalCapacity: number;
@@ -55,12 +46,21 @@ interface K8sNode {
   memoryBytes: number;
   osInfo: string;
   allOnline: boolean;
+  /// All OSDs report the same k8s node — use it as the rack / host label
+  /// when no explicit topology is configured upstream.
+  k8sNode: string;
 }
 
+/// Node & OSD Management page — expandable host rows → OSD children, with
+/// capacity, topology path, and status per row. Mirrors the layout from
+/// the product mock.
 export default function Drives() {
   const [nodeList, setNodeList] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "issues">("all");
+  const [groupByRack, setGroupByRack] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -69,9 +69,8 @@ export default function Drives() {
       .then((data) => {
         const nodes = data.nodes || [];
         setNodeList(nodes);
-        // Auto-expand all K8s nodes
         const k8sNames = new Set(
-          nodes.map((n) => n.kubernetes_node || n.hostname || n.node_name)
+          nodes.map((n) => n.kubernetes_node || n.hostname || n.node_name),
         );
         setExpanded(k8sNames);
       })
@@ -81,27 +80,43 @@ export default function Drives() {
 
   useEffect(load, []);
 
-  // Group OSDs by K8s node
-  const k8sNodes: K8sNode[] = [];
-  const grouped = new Map<string, NodeInfo[]>();
-  for (const osd of nodeList) {
-    const key = osd.kubernetes_node || osd.hostname || osd.node_name;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key)!.push(osd);
-  }
-  for (const [name, osds] of grouped) {
-    k8sNodes.push({
-      name,
-      osds,
-      totalCapacity: osds.reduce((s, n) => s + n.total_capacity, 0),
-      usedCapacity: osds.reduce((s, n) => s + n.used_capacity, 0),
-      totalShards: osds.reduce((s, n) => s + n.shard_count, 0),
-      cpuCores: osds[0]?.cpu_cores || 0,
-      memoryBytes: osds[0]?.memory_bytes || 0,
-      osInfo: osds[0]?.os_info || "",
-      allOnline: osds.every((n) => n.online),
-    });
-  }
+  const hosts: Host[] = useMemo(() => {
+    const grouped = new Map<string, NodeInfo[]>();
+    for (const osd of nodeList) {
+      const key = osd.kubernetes_node || osd.hostname || osd.node_name;
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key)!.push(osd);
+    }
+    const out: Host[] = [];
+    for (const [name, osds] of grouped) {
+      out.push({
+        name,
+        osds,
+        totalCapacity: osds.reduce((s, n) => s + n.total_capacity, 0),
+        usedCapacity: osds.reduce((s, n) => s + n.used_capacity, 0),
+        totalShards: osds.reduce((s, n) => s + n.shard_count, 0),
+        cpuCores: osds[0]?.cpu_cores || 0,
+        memoryBytes: osds[0]?.memory_bytes || 0,
+        osInfo: osds[0]?.os_info || "",
+        allOnline: osds.every((n) => n.online),
+        k8sNode: osds[0]?.kubernetes_node || name,
+      });
+    }
+    return out;
+  }, [nodeList]);
+
+  const issuesCount = hosts.filter((h) => !h.allOnline).length;
+
+  const visibleHosts = hosts
+    .filter((h) =>
+      query
+        ? h.name.toLowerCase().includes(query.toLowerCase()) ||
+          h.osds.some((o) =>
+            (o.pod_name || o.node_name).toLowerCase().includes(query.toLowerCase()),
+          )
+        : true,
+    )
+    .filter((h) => (filter === "issues" ? !h.allOnline : true));
 
   const toggleExpand = (name: string) => {
     setExpanded((prev) => {
@@ -112,77 +127,97 @@ export default function Drives() {
     });
   };
 
-  const totalOsds = nodeList.length;
-  const onlineOsds = nodeList.filter((n) => n.online).length;
-  const totalCapacity = nodeList.reduce((s, n) => s + n.total_capacity, 0);
-  const totalUsed = nodeList.reduce((s, n) => s + n.used_capacity, 0);
-  const totalShards = nodeList.reduce((s, n) => s + n.shard_count, 0);
-
   return (
     <div className="p-6">
       <PageHeader
-        title="Nodes & Drives"
-        description="Physical nodes, OSD instances, and disk health"
+        title="Node & OSD Management"
+        description="Manage physical hosts and storage daemons across the cluster topology."
         action={
-          <button
-            onClick={load}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
-          >
-            <RefreshCw size={13} /> Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={load}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
+            >
+              <RefreshCw size={13} /> Refresh
+            </button>
+            <button
+              disabled
+              title="Cluster onboarding UI coming soon"
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-[12px] font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus size={13} /> Add Host
+            </button>
+            <button
+              disabled
+              title="OSD provisioning UI coming soon"
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus size={13} /> Add OSDs
+            </button>
+          </div>
         }
       />
 
-      {/* Summary */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-        <div className="bg-white rounded-xl border border-gray-200 p-3">
-          <p className="text-[10px] text-gray-500 uppercase font-medium">
-            Nodes
-          </p>
-          <p className="text-xl font-semibold mt-0.5">{k8sNodes.length}</p>
+      {/* Controls bar — search, All / Has Issues pill, filters, group-by-rack */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="relative flex-1 max-w-xs">
+          <Search
+            size={13}
+            className="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400"
+          />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search hosts or OSDs..."
+            className="w-full pl-7 pr-2 py-1.5 border border-gray-200 rounded-lg text-[12px] focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
         </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-3">
-          <p className="text-[10px] text-gray-500 uppercase font-medium">
-            OSDs
-          </p>
-          <p className="text-xl font-semibold mt-0.5">
-            {onlineOsds}
-            <span className="text-[12px] text-gray-400 font-normal">
-              /{totalOsds}
-            </span>
-          </p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-3">
-          <p className="text-[10px] text-gray-500 uppercase font-medium">
-            Total Disks
-          </p>
-          <p className="text-xl font-semibold mt-0.5">
-            {nodeList.reduce((s, n) => s + n.disks.length, 0)}
-          </p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-3">
-          <p className="text-[10px] text-gray-500 uppercase font-medium">
-            Capacity
-          </p>
-          <p className="text-xl font-semibold mt-0.5">
-            {formatBytes(totalCapacity)}
-          </p>
-          <UsageBar used={totalUsed} total={totalCapacity} />
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-3">
-          <p className="text-[10px] text-gray-500 uppercase font-medium">
-            Shards
-          </p>
-          <p className="text-xl font-semibold mt-0.5">
-            {totalShards.toLocaleString()}
-          </p>
-        </div>
+        <Tabs
+          variant="pill"
+          active={filter}
+          onChange={(k) => setFilter(k)}
+          tabs={[
+            { key: "all" as const, label: "All Nodes" },
+            { key: "issues" as const, label: "Has Issues", count: issuesCount },
+          ]}
+        />
+        <div className="flex-1" />
+        <button
+          disabled
+          title="Advanced filters coming soon"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 text-gray-600 rounded-lg text-[12px] font-medium hover:bg-gray-50 disabled:opacity-50"
+        >
+          <SlidersHorizontal size={12} /> Filters
+        </button>
+        <button
+          onClick={() => setGroupByRack((v) => !v)}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 border rounded-lg text-[12px] font-medium ${
+            groupByRack
+              ? "border-blue-200 bg-blue-50 text-blue-700"
+              : "border-gray-200 text-gray-600 hover:bg-gray-50"
+          }`}
+          title="Topology grouping requires region/zone/dc/rack on the OSD — showing flat list until then"
+        >
+          <Rows3 size={12} /> Group by Rack
+        </button>
       </div>
 
-      {/* Node list */}
-      <div className="space-y-3">
+      {/* Table */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        {/* Header */}
+        <div className="grid grid-cols-[28px_1fr_120px_260px_220px_140px_40px] items-center gap-2 px-3 py-2 border-b border-gray-200 bg-gray-50 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
+          <div />
+          <div>Host / OSD</div>
+          <div>Status</div>
+          <div>Topology (Reg/Zone/DC/Rack)</div>
+          <div>Capacity</div>
+          <div>Labels</div>
+          <div />
+        </div>
+
         {loading ? (
-          <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+          <div className="p-8 text-center">
             <div className="flex items-center justify-center gap-3">
               <div className="w-16 h-0.5 bg-gray-200 rounded-full overflow-hidden">
                 <div className="h-full w-1/2 bg-blue-400 rounded-full animate-loading-bar" />
@@ -190,158 +225,159 @@ export default function Drives() {
               <span className="text-[12px] text-gray-400">Loading</span>
             </div>
           </div>
-        ) : k8sNodes.length === 0 ? (
-          <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-[12px] text-gray-400">
-            No nodes found
+        ) : visibleHosts.length === 0 ? (
+          <div className="p-8 text-center text-[12px] text-gray-400">
+            {hosts.length === 0 ? "No hosts registered" : "No matches"}
           </div>
         ) : (
-          k8sNodes.map((k8s) => (
-            <div
-              key={k8s.name}
-              className="bg-white rounded-xl border border-gray-200 overflow-hidden"
-            >
-              {/* K8s Node header */}
-              <button
-                onClick={() => toggleExpand(k8s.name)}
-                className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  {expanded.has(k8s.name) ? (
-                    <ChevronDown size={14} className="text-gray-400" />
-                  ) : (
-                    <ChevronRight size={14} className="text-gray-400" />
-                  )}
-                  <Server size={15} className="text-blue-500" />
-                  <div className="text-left">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[13px] font-medium">
-                        {k8s.name}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-3 text-[11px] text-gray-400 mt-0.5">
-                      {k8s.osInfo && <span>{k8s.osInfo}</span>}
-                      {k8s.cpuCores > 0 && <span>{k8s.cpuCores} CPU</span>}
-                      {k8s.memoryBytes > 0 && (
-                        <span>{formatBytes(k8s.memoryBytes)} RAM</span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <div className="text-[11px] text-gray-500">
-                    <span className="font-medium text-gray-700">
-                      {k8s.osds.length}
-                    </span>{" "}
-                    OSD{k8s.osds.length !== 1 ? "s" : ""}
-                  </div>
-                  <div className="text-[11px] text-gray-500">
-                    {formatBytes(k8s.usedCapacity)} /{" "}
-                    {formatBytes(k8s.totalCapacity)}
-                  </div>
-                  <StatusBadge
-                    status={k8s.allOnline ? "healthy" : "error"}
-                    label={k8s.allOnline ? "Online" : "Degraded"}
-                  />
-                </div>
-              </button>
-
-              {/* OSD list under this node */}
-              {expanded.has(k8s.name) && (
-                <div className="border-t border-gray-100">
-                  {k8s.osds.map((osd) => (
-                    <div key={osd.node_id} className="border-b border-gray-50 last:border-0">
-                      {/* OSD row */}
-                      <div className="px-4 py-2.5 pl-12 flex items-center justify-between">
-                        <div className="flex items-center gap-2.5">
-                          <Container size={14} className="text-orange-500" />
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-[12px] font-medium">
-                                {osd.pod_name || osd.node_name}
-                              </span>
-                              {osd.version && (
-                                <span className="text-[10px] text-gray-400">
-                                  v{osd.version}
-                                </span>
-                              )}
-                            </div>
-                            <span className="text-[10px] text-gray-400 font-mono">
-                              {osd.address.replace("http://", "")}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-4">
-                          <div className="text-[11px] text-gray-500">
-                            {osd.disks.length} disk{osd.disks.length !== 1 ? "s" : ""}
-                          </div>
-                          <div className="text-[11px] text-gray-500">
-                            {formatBytes(osd.used_capacity)} / {formatBytes(osd.total_capacity)}
-                          </div>
-                          <div className="text-[11px] text-gray-500">
-                            {formatUptime(osd.uptime_seconds)}
-                          </div>
-                          <StatusBadge
-                            status={osd.online ? "healthy" : "error"}
-                            label={osd.online ? "Online" : "Offline"}
-                          />
-                        </div>
+          visibleHosts.map((host) => (
+            <ExpandableRow
+              key={host.name}
+              open={expanded.has(host.name)}
+              onToggle={() => toggleExpand(host.name)}
+              header={
+                <div className="grid grid-cols-[1fr_120px_260px_220px_140px_40px] items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Server size={15} className="text-blue-500 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-[13px] font-medium text-gray-900 truncate">
+                        {host.name}
                       </div>
-
-                      {/* Disks under this OSD */}
-                      {osd.disks.length > 0 && (
-                        <div className="pl-20 pr-4 pb-2">
-                          {osd.disks.map((disk) => (
-                            <div
-                              key={disk.disk_id}
-                              className="flex items-center justify-between py-1.5 text-[11px]"
-                            >
-                              <div className="flex items-center gap-2">
-                                <HardDrive
-                                  size={12}
-                                  className={
-                                    disk.status === "healthy"
-                                      ? "text-green-500"
-                                      : "text-red-500"
-                                  }
-                                />
-                                <span className="font-mono text-gray-600">
-                                  {disk.path || disk.disk_id.slice(0, 8)}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-4">
-                                <span className="text-gray-500">
-                                  {formatBytes(disk.total_capacity)}
-                                </span>
-                                <div className="w-24">
-                                  <UsageBar
-                                    used={disk.used_capacity}
-                                    total={disk.total_capacity}
-                                  />
-                                </div>
-                                <span className="text-gray-500 w-12 text-right">
-                                  {disk.shard_count} shards
-                                </span>
-                                <StatusBadge
-                                  status={
-                                    disk.status === "healthy"
-                                      ? "healthy"
-                                      : "error"
-                                  }
-                                  label={disk.status}
-                                />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      <div className="text-[11px] text-gray-400 font-mono truncate">
+                        {host.osInfo || host.k8sNode}
+                      </div>
                     </div>
-                  ))}
+                  </div>
+                  <StatusDot
+                    status={host.allOnline ? "healthy" : "error"}
+                    label={host.allOnline ? "Online" : "Degraded"}
+                  />
+                  <BreadcrumbPath
+                    segments={["—", "—", "—", host.k8sNode]}
+                  />
+                  <CapacityBar
+                    used={host.usedCapacity}
+                    total={host.totalCapacity}
+                    caption={`${host.osds.length} OSD${host.osds.length !== 1 ? "s" : ""}${issuesCount && !host.allOnline ? ` (${host.osds.filter((o) => !o.online).length} Down)` : ""}`}
+                    layout="stacked"
+                  />
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {host.cpuCores > 0 && (
+                      <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
+                        {host.cpuCores}c
+                      </span>
+                    )}
+                    {host.memoryBytes > 0 && (
+                      <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
+                        {formatBytes(host.memoryBytes)}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={(e) => e.stopPropagation()}
+                    className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700 justify-self-end"
+                    title="More actions (not yet wired)"
+                  >
+                    <MoreVertical size={14} />
+                  </button>
                 </div>
-              )}
-            </div>
+              }
+            >
+              {/* Expanded: OSD rows for this host */}
+              {host.osds.map((osd) => (
+                <OsdRow key={osd.node_id} osd={osd} />
+              ))}
+            </ExpandableRow>
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+function OsdRow({ osd }: { osd: NodeInfo }) {
+  return (
+    <div className="border-b border-gray-100 last:border-0 pl-9">
+      <div className="grid grid-cols-[1fr_120px_260px_220px_140px_40px] items-center gap-2 py-2 pr-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <Container size={13} className="text-orange-500 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-[12px] font-medium text-gray-800 truncate">
+              {osd.pod_name || osd.node_name}
+            </div>
+            <div className="text-[10px] text-gray-400 font-mono truncate">
+              {osd.address.replace("http://", "")}
+              {osd.version && ` · v${osd.version}`}
+            </div>
+          </div>
+        </div>
+        <StatusDot
+          status={osd.online ? "healthy" : "error"}
+          label={osd.online ? "In / Up" : "Offline"}
+        />
+        <div className="text-[11px] text-gray-400 font-mono">
+          up {formatUptime(osd.uptime_seconds)}
+        </div>
+        <CapacityBar
+          used={osd.used_capacity}
+          total={osd.total_capacity}
+          caption={`${osd.disks.length} disk${osd.disks.length !== 1 ? "s" : ""}, ${osd.shard_count.toLocaleString()} shards`}
+          layout="stacked"
+        />
+        <div className="flex items-center gap-1">
+          {osd.disks[0]?.status && (
+            <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
+              {osd.disks[0].status}
+            </span>
+          )}
+        </div>
+        <button
+          disabled
+          title="OSD management actions coming soon"
+          className="px-2 py-1 text-[11px] font-medium text-gray-400 border border-gray-200 rounded justify-self-end disabled:cursor-not-allowed"
+        >
+          Manage
+        </button>
+      </div>
+
+      {/* Disks under this OSD */}
+      {osd.disks.length > 0 && (
+        <div className="pl-6 pr-3 pb-2 space-y-1">
+          {osd.disks.map((disk) => (
+            <div
+              key={disk.disk_id}
+              className="grid grid-cols-[1fr_120px_260px_220px_140px_40px] items-center gap-2 text-[11px] text-gray-500"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <HardDrive
+                  size={11}
+                  className={
+                    disk.status === "healthy" ? "text-emerald-500" : "text-red-500"
+                  }
+                />
+                <span className="font-mono truncate">
+                  {disk.path || disk.disk_id.slice(0, 8)}
+                </span>
+              </div>
+              <StatusDot
+                status={disk.status === "healthy" ? "healthy" : "error"}
+                label={disk.status}
+              />
+              <div />
+              <CapacityBar
+                used={disk.used_capacity}
+                total={disk.total_capacity}
+                layout="inline"
+                showLabel
+              />
+              <div className="tabular-nums">
+                {disk.shard_count.toLocaleString()} shards
+              </div>
+              <div />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

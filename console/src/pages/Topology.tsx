@@ -6,13 +6,20 @@ import {
   Layers3,
   Server,
   HardDrive,
-  CheckCircle2,
-  AlertTriangle,
   ChevronRight,
   ChevronDown,
+  RefreshCw,
+  Power,
+  Shuffle,
+  Ban,
 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import Card from "../components/Card";
+import Drawer from "../components/Drawer";
+import CapacityBar from "../components/CapacityBar";
+import BreadcrumbPath from "../components/BreadcrumbPath";
+import StatusDot from "../components/StatusDot";
+import { nodes as nodesApi, type NodeInfo } from "../api/client";
 
 interface HostNode { host: string; osds: string[]; }
 interface RackNode { rack: string; hosts: HostNode[]; }
@@ -32,73 +39,109 @@ interface TopologyData {
   tree: RegionNode[];
 }
 
-interface Pool { name: string; failure_domain: string; ec_k: number; ec_m: number; }
-
-interface ValidationResult {
-  pool: string;
-  required_level: string;
-  required_count: number;
-  available_count: number;
-  satisfiable: boolean;
-  reason: string;
+function formatBytes(b: number): string {
+  if (b === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+  const v = b / Math.pow(1024, i);
+  return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
 }
 
-// Color + icon per topology level so the diagram reads at a glance.
+// Per-level pill styling — lets every tree node read at a glance.
 const LEVEL_META = {
-  region:     { color: "bg-indigo-100 text-indigo-800 border-indigo-300",  icon: Globe2,    ringColor: "ring-indigo-200" },
-  zone:       { color: "bg-sky-100 text-sky-800 border-sky-300",           icon: Compass,   ringColor: "ring-sky-200" },
-  datacenter: { color: "bg-teal-100 text-teal-800 border-teal-300",        icon: Building2, ringColor: "ring-teal-200" },
-  rack:       { color: "bg-amber-100 text-amber-800 border-amber-300",     icon: Layers3,   ringColor: "ring-amber-200" },
-  host:       { color: "bg-gray-100 text-gray-700 border-gray-300",        icon: Server,    ringColor: "ring-gray-200" },
-  osd:        { color: "bg-white text-gray-700 border-gray-200",           icon: HardDrive, ringColor: "ring-gray-200" },
+  region:     { color: "bg-indigo-50 text-indigo-800 border-indigo-200",  icon: Globe2    },
+  zone:       { color: "bg-sky-50 text-sky-800 border-sky-200",           icon: Compass   },
+  datacenter: { color: "bg-teal-50 text-teal-800 border-teal-200",        icon: Building2 },
+  rack:       { color: "bg-amber-50 text-amber-800 border-amber-200",     icon: Layers3   },
+  host:       { color: "bg-gray-50 text-gray-800 border-gray-200",        icon: Server    },
 } as const;
 
 type LevelKey = keyof typeof LEVEL_META;
 
-/**
- * Single tree row. SVG-ish rendering via nested flex boxes so every level
- * gets its own color-coded pill and a chevron that opens/closes the
- * subtree. A single vertical line (absolute-positioned ::before) connects
- * a node to its children for the "diagram" feel without pulling in d3.
- */
-function TreeNode({
-  level,
-  label,
-  badge,
-  defaultOpen = true,
-  children,
-}: {
+interface TreeRowProps {
   level: LevelKey;
   label: string;
   badge?: string;
-  defaultOpen?: boolean;
+  rightAccessory?: React.ReactNode;
+  path: string;
+  expanded: Set<string>;
+  setExpanded: React.Dispatch<React.SetStateAction<Set<string>>>;
+  hasChildren: boolean;
   children?: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
+  onSelect?: () => void;
+  selected?: boolean;
+}
+
+/// Single row in the topology tree. Opens/closes via the chevron; the
+/// label area is optionally clickable (used on host rows to open the
+/// detail drawer). Expansion state is lifted so callers can collapse
+/// everything at once or deep-link to a specific host.
+function TreeRow({
+  level,
+  label,
+  badge,
+  rightAccessory,
+  path,
+  expanded,
+  setExpanded,
+  hasChildren,
+  children,
+  onSelect,
+  selected,
+}: TreeRowProps) {
+  const open = expanded.has(path);
   const meta = LEVEL_META[level];
   const Icon = meta.icon;
-  const hasChildren = Boolean(children);
-
+  const toggle = () => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
   return (
     <div className="relative">
       <div
-        onClick={() => hasChildren && setOpen(!open)}
-        className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border ${meta.color} text-[12px] font-medium select-none ${
-          hasChildren ? "cursor-pointer hover:ring-2 " + meta.ringColor : ""
-        } transition-shadow`}
+        className={`group flex items-center gap-1.5 text-[12px] rounded-lg border px-2 py-1 ${
+          meta.color
+        } ${selected ? "ring-2 ring-blue-400" : ""} ${
+          onSelect ? "cursor-pointer hover:ring-1 hover:ring-blue-200" : ""
+        }`}
       >
-        {hasChildren && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
+        {hasChildren ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              toggle();
+            }}
+            className="text-current opacity-60 hover:opacity-100"
+            aria-label={open ? "Collapse" : "Expand"}
+          >
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+        ) : (
+          <span className="w-3" />
+        )}
         <Icon size={12} />
-        <span className="text-[10px] uppercase tracking-wider opacity-60">{level}</span>
-        <span className="font-mono">{label || "(none)"}</span>
+        <span className="text-[10px] uppercase tracking-wider opacity-60">
+          {level}
+        </span>
+        <span
+          onClick={onSelect}
+          className={`font-mono font-medium ${onSelect ? "flex-1 truncate" : ""}`}
+        >
+          {label || "(none)"}
+        </span>
         {badge && (
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-white/60 border border-current/20 font-normal">
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/70 border border-current/10 opacity-80 font-normal">
             {badge}
           </span>
         )}
+        {rightAccessory}
       </div>
       {hasChildren && open && (
-        <div className="relative ml-3 pl-4 mt-1.5 border-l border-dashed border-gray-300 space-y-1.5">
+        <div className="relative ml-3 pl-4 mt-1.5 border-l border-dashed border-gray-200 space-y-1.5">
           {children}
         </div>
       )}
@@ -106,147 +149,46 @@ function TreeNode({
   );
 }
 
-/** Single OSD leaf: compact pill with the 8-char short id. */
-function OsdPill({ id }: { id: string }) {
-  return (
-    <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-gray-200 bg-white text-[10px] font-mono text-gray-600 shadow-sm">
-      <HardDrive size={10} className="text-gray-400" />
-      {id.slice(0, 8)}
-    </div>
-  );
-}
-
-/** Tree renderer — walks the topology and lays it out with collapsible nodes. */
-function TreeView({ tree }: { tree: RegionNode[] }) {
-  if (tree.length === 0) {
-    return <div className="text-[12px] text-gray-400 italic py-6 text-center">No OSDs registered.</div>;
-  }
-  return (
-    <div className="space-y-3 overflow-x-auto py-2">
-      {tree.map((r) => {
-        const regionOsdCount = r.zones.reduce(
-          (n, z) =>
-            n +
-            z.datacenters.reduce(
-              (dn, d) => dn + d.racks.reduce(
-                (rn, rk) => rn + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0),
-                0,
-              ),
-              0,
-            ),
-          0,
-        );
-        return (
-          <TreeNode key={r.region} level="region" label={r.region} badge={`${regionOsdCount} osds`}>
-            {r.zones.map((z) => {
-              const zoneCount = z.datacenters.reduce(
-                (n, d) =>
-                  n + d.racks.reduce((rn, rk) => rn + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0), 0),
-                0,
-              );
-              return (
-                <TreeNode key={z.zone} level="zone" label={z.zone} badge={`${zoneCount} osds`}>
-                  {z.datacenters.map((d) => {
-                    const dcCount = d.racks.reduce(
-                      (n, rk) => n + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0),
-                      0,
-                    );
-                    return (
-                      <TreeNode
-                        key={d.datacenter}
-                        level="datacenter"
-                        label={d.datacenter}
-                        badge={`${dcCount} osds`}
-                      >
-                        {d.racks.map((rk) => {
-                          const rackCount = rk.hosts.reduce((n, h) => n + h.osds.length, 0);
-                          return (
-                            <TreeNode
-                              key={rk.rack}
-                              level="rack"
-                              label={rk.rack}
-                              badge={`${rackCount} osds`}
-                            >
-                              {rk.hosts.map((h) => (
-                                <TreeNode
-                                  key={h.host}
-                                  level="host"
-                                  label={h.host}
-                                  badge={`${h.osds.length} osds`}
-                                >
-                                  <div className="flex flex-wrap gap-1">
-                                    {h.osds.map((o) => (
-                                      <OsdPill key={o} id={o} />
-                                    ))}
-                                  </div>
-                                </TreeNode>
-                              ))}
-                            </TreeNode>
-                          );
-                        })}
-                      </TreeNode>
-                    );
-                  })}
-                </TreeNode>
-              );
-            })}
-          </TreeNode>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Top stat tile. Clicking the tile doesn't do anything yet — reserved for
- *  a future filter action that pivots the tree to show only that level. */
-function StatTile({
-  level,
-  count,
-  label,
-}: {
-  level: LevelKey;
-  count: number;
-  label: string;
-}) {
-  const meta = LEVEL_META[level];
-  const Icon = meta.icon;
-  return (
-    <div className={`rounded-lg border px-3 py-2.5 ${meta.color.replace("text-", "border-")}`}>
-      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider opacity-70">
-        <Icon size={11} /> {label}
-      </div>
-      <div className="text-[20px] font-semibold mt-0.5">{count}</div>
-    </div>
-  );
-}
-
+/// Cluster Topology — hierarchical tree + selectable host rows with a
+/// right-side detail drawer (mirrors the mock's Cluster Topology screen).
 export default function Topology() {
   const [topology, setTopology] = useState<TopologyData | null>(null);
-  const [pools, setPools] = useState<Pool[]>([]);
-  const [validations, setValidations] = useState<Record<string, ValidationResult>>({});
+  const [osdNodes, setOsdNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selectedHost, setSelectedHost] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       setLoading(true);
       try {
-        const t = await fetch("/_admin/topology").then((r) => r.json());
-        const p = await fetch("/_admin/pools").then((r) => r.json());
+        const [t, n] = await Promise.all([
+          fetch("/_admin/topology").then((r) => r.json()),
+          nodesApi.list(),
+        ]);
         if (cancelled) return;
         setTopology(t);
-        const poolList: Pool[] = Array.isArray(p) ? p : p.pools || [];
-        setPools(poolList);
-        const entries = await Promise.all(
-          poolList.map(async (pool) => {
-            const r = await fetch(
-              `/_admin/placement/validate?pool=${encodeURIComponent(pool.name)}`,
-            );
-            return [pool.name, await r.json()] as const;
-          }),
-        );
-        if (!cancelled) setValidations(Object.fromEntries(entries));
+        setOsdNodes(n.nodes || []);
+        // Auto-expand everything so the tree reads as a diagram on first
+        // view. Users can collapse anything they don't care about.
+        const paths = new Set<string>();
+        for (const r of (t.tree || []) as RegionNode[]) {
+          paths.add(`r:${r.region}`);
+          for (const z of r.zones) {
+            paths.add(`r:${r.region}/z:${z.zone}`);
+            for (const d of z.datacenters) {
+              paths.add(`r:${r.region}/z:${z.zone}/d:${d.datacenter}`);
+              for (const rk of d.racks) {
+                paths.add(
+                  `r:${r.region}/z:${z.zone}/d:${d.datacenter}/rk:${rk.rack}`,
+                );
+              }
+            }
+          }
+        }
+        setExpanded(paths);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -257,101 +199,436 @@ export default function Topology() {
     };
   }, [refreshKey]);
 
-  // Sort pools: unsatisfiable first so operators see problems at a glance.
-  const sortedPools = useMemo(() => {
-    return [...pools].sort((a, b) => {
-      const sa = validations[a.name]?.satisfiable ?? true;
-      const sb = validations[b.name]?.satisfiable ?? true;
-      if (sa === sb) return a.name.localeCompare(b.name);
-      return sa ? 1 : -1;
-    });
-  }, [pools, validations]);
+  // Fast lookup from host name → OSDs on that host. Used both to size
+  // tree nodes and to populate the detail drawer.
+  const osdsByHost = useMemo(() => {
+    const m = new Map<string, NodeInfo[]>();
+    for (const osd of osdNodes) {
+      const key =
+        osd.hostname || osd.kubernetes_node || osd.node_name || "(unknown)";
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(osd);
+    }
+    return m;
+  }, [osdNodes]);
+
+  // Derived host health summary for the top strip.
+  const hostSummary = useMemo(() => {
+    let up = 0,
+      warn = 0,
+      down = 0;
+    for (const osds of osdsByHost.values()) {
+      const allUp = osds.every((o) => o.online);
+      const allDown = osds.every((o) => !o.online);
+      if (allDown) down += 1;
+      else if (allUp) up += 1;
+      else warn += 1;
+    }
+    return { up, warn, down };
+  }, [osdsByHost]);
+
+  const selectedOsds =
+    selectedHost != null ? (osdsByHost.get(selectedHost) ?? []) : [];
+
+  // Discover the topology path to the selected host for the drawer
+  // breadcrumb — walk the tree so region/zone/dc/rack match what's
+  // actually drawn on the left.
+  const selectedPath = useMemo(() => {
+    if (!selectedHost || !topology) return null;
+    for (const r of topology.tree) {
+      for (const z of r.zones) {
+        for (const d of z.datacenters) {
+          for (const rk of d.racks) {
+            for (const h of rk.hosts) {
+              if (h.host === selectedHost) {
+                return {
+                  region: r.region,
+                  zone: z.zone,
+                  datacenter: d.datacenter,
+                  rack: rk.rack,
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }, [selectedHost, topology]);
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Cluster Topology"
-        description="Physical layout and placement health. Click a node to collapse/expand its subtree."
-        action={
-          <button
-            onClick={() => setRefreshKey((k) => k + 1)}
-            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
-          >
-            Refresh
-          </button>
-        }
-      />
+    <div className="flex h-screen bg-gray-50">
+      {/* Main tree area */}
+      <div className="flex-1 overflow-y-auto p-6 min-w-0">
+        <PageHeader
+          title="Cluster Topology"
+          description="Visual hierarchy and status of physical storage resources."
+          action={
+            <div className="flex items-center gap-2">
+              <StatusDot status="healthy" label={`${hostSummary.up} Hosts Up`} size="md" />
+              <StatusDot status="warning" label={`${hostSummary.warn} Warn`} size="md" />
+              <StatusDot status="error" label={`${hostSummary.down} Down`} size="md" />
+              <button
+                onClick={() => setRefreshKey((k) => k + 1)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
+              >
+                <RefreshCw size={13} /> Refresh
+              </button>
+            </div>
+          }
+        />
 
-      {loading && !topology && (
-        <div className="text-[12px] text-gray-400">Loading topology…</div>
-      )}
+        {loading && !topology && (
+          <div className="text-[12px] text-gray-400">Loading topology…</div>
+        )}
 
-      {topology && (
-        <>
-          {/* Summary tiles */}
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4">
-            <StatTile level="region" count={topology.distinct.region} label="regions" />
-            <StatTile level="zone" count={topology.distinct.zone} label="zones" />
-            <StatTile level="datacenter" count={topology.distinct.datacenter} label="datacenters" />
-            <StatTile level="rack" count={topology.distinct.rack} label="racks" />
-            <StatTile level="host" count={topology.distinct.host} label="hosts" />
-            <StatTile level="osd" count={topology.osd_count} label="osds" />
-          </div>
-
-          {/* Pool satisfiability strip */}
-          {pools.length > 0 && (
-            <Card
-              title={
-                <div className="flex items-center gap-2">
-                  <Layers3 size={13} className="text-amber-600" />
-                  <span>Placement satisfiability</span>
-                </div>
-              }
-              className="mb-4"
-            >
-              <ul className="divide-y divide-gray-100 -my-1">
-                {sortedPools.map((pool) => {
-                  const v = validations[pool.name];
-                  const ok = v?.satisfiable ?? true;
+        {topology && (
+          <Card title="Topology tree">
+            {topology.tree.length === 0 ? (
+              <div className="text-[12px] text-gray-400 italic py-6 text-center">
+                No OSDs registered.
+              </div>
+            ) : (
+              <div className="space-y-3 overflow-x-auto py-2">
+                {topology.tree.map((r) => {
+                  const regionOsds = r.zones.reduce(
+                    (n, z) =>
+                      n +
+                      z.datacenters.reduce(
+                        (dn, d) =>
+                          dn +
+                          d.racks.reduce(
+                            (rn, rk) =>
+                              rn + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0),
+                            0,
+                          ),
+                        0,
+                      ),
+                    0,
+                  );
+                  const rKey = `r:${r.region}`;
                   return (
-                    <li key={pool.name} className="flex items-start gap-2.5 py-2">
-                      {ok ? (
-                        <CheckCircle2 size={14} className="text-green-600 mt-0.5 shrink-0" />
-                      ) : (
-                        <AlertTriangle size={14} className="text-amber-600 mt-0.5 shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center flex-wrap gap-1.5">
-                          <span className="text-[13px] font-medium text-gray-900">{pool.name}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">
-                            {pool.ec_k}+{pool.ec_m} / {pool.failure_domain}
-                          </span>
-                        </div>
-                        {v && (
-                          <div
-                            className={`text-[11px] mt-0.5 ${ok ? "text-gray-500" : "text-amber-700"}`}
+                    <TreeRow
+                      key={rKey}
+                      level="region"
+                      label={r.region}
+                      badge={`${r.zones.length} Zone${r.zones.length !== 1 ? "s" : ""}  ${regionOsds} OSDs`}
+                      path={rKey}
+                      expanded={expanded}
+                      setExpanded={setExpanded}
+                      hasChildren
+                    >
+                      {r.zones.map((z) => {
+                        const zKey = `${rKey}/z:${z.zone}`;
+                        const zoneOsds = z.datacenters.reduce(
+                          (n, d) =>
+                            n +
+                            d.racks.reduce(
+                              (rn, rk) =>
+                                rn + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0),
+                              0,
+                            ),
+                          0,
+                        );
+                        return (
+                          <TreeRow
+                            key={zKey}
+                            level="zone"
+                            label={z.zone}
+                            badge={`${zoneOsds} OSDs`}
+                            path={zKey}
+                            expanded={expanded}
+                            setExpanded={setExpanded}
+                            hasChildren
                           >
-                            {v.reason}
-                          </div>
-                        )}
-                      </div>
-                    </li>
+                            {z.datacenters.map((d) => {
+                              const dKey = `${zKey}/d:${d.datacenter}`;
+                              const dcOsds = d.racks.reduce(
+                                (n, rk) =>
+                                  n + rk.hosts.reduce((hn, h) => hn + h.osds.length, 0),
+                                0,
+                              );
+                              return (
+                                <TreeRow
+                                  key={dKey}
+                                  level="datacenter"
+                                  label={d.datacenter}
+                                  badge={`${dcOsds} OSDs`}
+                                  path={dKey}
+                                  expanded={expanded}
+                                  setExpanded={setExpanded}
+                                  hasChildren
+                                >
+                                  {d.racks.map((rk) => {
+                                    const rkKey = `${dKey}/rk:${rk.rack}`;
+                                    const rackOsds = rk.hosts.reduce(
+                                      (n, h) => n + h.osds.length,
+                                      0,
+                                    );
+                                    return (
+                                      <TreeRow
+                                        key={rkKey}
+                                        level="rack"
+                                        label={rk.rack}
+                                        badge={`${rk.hosts.length} Hosts, ${rackOsds} OSDs`}
+                                        path={rkKey}
+                                        expanded={expanded}
+                                        setExpanded={setExpanded}
+                                        hasChildren
+                                      >
+                                        {rk.hosts.map((h) => {
+                                          const hostOsds = osdsByHost.get(h.host) ?? [];
+                                          const allUp = hostOsds.every((o) => o.online);
+                                          const someUp = hostOsds.some((o) => o.online);
+                                          const status =
+                                            hostOsds.length === 0
+                                              ? "unknown"
+                                              : allUp
+                                                ? "healthy"
+                                                : someUp
+                                                  ? "warning"
+                                                  : "error";
+                                          const total = hostOsds.reduce(
+                                            (s, o) => s + o.total_capacity,
+                                            0,
+                                          );
+                                          const used = hostOsds.reduce(
+                                            (s, o) => s + o.used_capacity,
+                                            0,
+                                          );
+                                          const pct =
+                                            total === 0
+                                              ? 0
+                                              : Math.round((used / total) * 100);
+                                          return (
+                                            <TreeRow
+                                              key={h.host}
+                                              level="host"
+                                              label={h.host}
+                                              badge={`${h.osds.length} OSDs · ${pct}% util`}
+                                              path={`${rkKey}/h:${h.host}`}
+                                              expanded={expanded}
+                                              setExpanded={setExpanded}
+                                              hasChildren={false}
+                                              onSelect={() => setSelectedHost(h.host)}
+                                              selected={selectedHost === h.host}
+                                              rightAccessory={
+                                                <StatusDot status={status} />
+                                              }
+                                            />
+                                          );
+                                        })}
+                                      </TreeRow>
+                                    );
+                                  })}
+                                </TreeRow>
+                              );
+                            })}
+                          </TreeRow>
+                        );
+                      })}
+                    </TreeRow>
                   );
                 })}
-              </ul>
-            </Card>
-          )}
-
-          {/* The tree itself */}
-          <Card title="Topology tree">
-            <TreeView tree={topology.tree} />
+              </div>
+            )}
           </Card>
+        )}
 
-          <p className="mt-3 text-[11px] text-gray-400">
-            Hierarchy: region → zone → datacenter → rack → host → OSDs. Empty values collapse to <code>(none)</code>.
-          </p>
-        </>
+        <p className="mt-3 text-[11px] text-gray-400">
+          Hierarchy: region → zone → datacenter → rack → host → OSDs. Click a
+          host to inspect OSDs and host actions.
+        </p>
+      </div>
+
+      {/* Right-side detail drawer */}
+      {selectedHost != null && (
+        <Drawer
+          title={selectedHost}
+          eyebrow={
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-semibold uppercase tracking-wider">
+                Host
+              </span>
+              <StatusDot
+                status={
+                  selectedOsds.length === 0
+                    ? "unknown"
+                    : selectedOsds.every((o) => o.online)
+                      ? "healthy"
+                      : selectedOsds.some((o) => o.online)
+                        ? "warning"
+                        : "error"
+                }
+              />
+            </div>
+          }
+          subtitle={
+            selectedPath && (
+              <BreadcrumbPath
+                segments={[
+                  selectedPath.region,
+                  selectedPath.zone,
+                  selectedPath.datacenter,
+                  selectedPath.rack,
+                ]}
+              />
+            )
+          }
+          onClose={() => setSelectedHost(null)}
+          width="w-[22rem]"
+        >
+          <HostDrawerBody osds={selectedOsds} />
+        </Drawer>
       )}
     </div>
+  );
+}
+
+function HostDrawerBody({ osds }: { osds: NodeInfo[] }) {
+  const upCount = osds.filter((o) => o.online).length;
+  const total = osds.reduce((s, o) => s + o.total_capacity, 0);
+  const used = osds.reduce((s, o) => s + o.used_capacity, 0);
+  const allUp = osds.length > 0 && upCount === osds.length;
+
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <StatTile
+          label="Status"
+          value={
+            osds.length === 0 ? "–" : allUp ? "Up / In" : `${upCount}/${osds.length} Up`
+          }
+          tone={osds.length === 0 ? "muted" : allUp ? "good" : "warn"}
+        />
+        <StatTile
+          label="OSDs"
+          value={`${osds.length} Total`}
+          tone="muted"
+        />
+      </div>
+
+      <div>
+        <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">
+          Storage Utilization
+        </div>
+        <CapacityBar used={used} total={total} showLabel layout="stacked" />
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="text-[10px] text-gray-500 uppercase tracking-wider">
+            OSD Inventory
+          </div>
+          <div className="text-[10px] text-gray-400">
+            Showing {osds.length} of {osds.length}
+          </div>
+        </div>
+        <ul className="space-y-1">
+          {osds.map((osd) => (
+            <li
+              key={osd.node_id}
+              className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded-md px-2 py-1.5"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <HardDrive size={12} className="text-gray-400 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-medium text-gray-800 truncate">
+                    {osd.pod_name || osd.node_name}
+                  </div>
+                  <div className="text-[10px] text-gray-400 font-mono">
+                    {osd.online ? "up / in" : "down"}
+                  </div>
+                </div>
+              </div>
+              <div className="text-[11px] text-gray-500 tabular-nums">
+                {formatBytes(osd.total_capacity)}
+              </div>
+            </li>
+          ))}
+          {osds.length === 0 && (
+            <li className="text-[11px] text-gray-400 italic py-2 text-center">
+              No OSDs on this host.
+            </li>
+          )}
+        </ul>
+      </div>
+
+      <div>
+        <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">
+          Host Actions
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          <HostActionButton icon={Power} label="Reboot" disabled />
+          <HostActionButton icon={Shuffle} label="Drain" disabled />
+        </div>
+        <div className="mt-1.5">
+          <HostActionButton icon={Ban} label="Mark Out" disabled tone="danger" />
+        </div>
+        <p className="mt-2 text-[10px] text-gray-400">
+          Host actions require CLI integration and are not yet wired to the
+          console.
+        </p>
+      </div>
+    </>
+  );
+}
+
+function StatTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone: "good" | "warn" | "muted";
+}) {
+  const ring =
+    tone === "good"
+      ? "border-emerald-200 bg-emerald-50"
+      : tone === "warn"
+        ? "border-amber-200 bg-amber-50"
+        : "border-gray-200 bg-gray-50";
+  const valueColor =
+    tone === "good"
+      ? "text-emerald-700"
+      : tone === "warn"
+        ? "text-amber-700"
+        : "text-gray-800";
+  return (
+    <div className={`rounded-lg border px-2.5 py-2 ${ring}`}>
+      <div className="text-[10px] text-gray-500 uppercase tracking-wider">
+        {label}
+      </div>
+      <div className={`text-[13px] font-semibold mt-0.5 ${valueColor}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function HostActionButton({
+  icon: Icon,
+  label,
+  disabled,
+  tone = "default",
+}: {
+  icon: typeof Power;
+  label: string;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+}) {
+  const palette =
+    tone === "danger"
+      ? "border-red-200 text-red-600 bg-red-50/30 hover:bg-red-50"
+      : "border-gray-200 text-gray-700 hover:bg-gray-50";
+  return (
+    <button
+      disabled={disabled}
+      className={`w-full flex items-center justify-center gap-1.5 border rounded-md px-2 py-1.5 text-[11px] font-medium ${palette} disabled:opacity-50 disabled:cursor-not-allowed`}
+    >
+      <Icon size={12} />
+      {label}
+    </button>
   );
 }
