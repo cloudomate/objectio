@@ -16,8 +16,16 @@ data:
 
     [osd.failure_domain]
     region = {{ .Values.osd.failureDomain.region | quote }}
+    {{- if .Values.osd.failureDomain.zone }}
+    zone = {{ .Values.osd.failureDomain.zone | quote }}
+    {{- end }}
     datacenter = {{ .Values.osd.failureDomain.datacenter | quote }}
     rack = {{ .Values.osd.failureDomain.rack | quote }}
+    # Each pod is its own host. Without this, every OSD registers under an
+    # empty host name and the meta groups them into a single "(none)"
+    # bucket — which breaks per-host topology views and host-scoped CRUSH
+    # rules.
+    host = "__NODE_NAME__"
 
     [storage]
     disks = ["/data/disk0/{{ .Values.osd.storage.diskFile }}"]

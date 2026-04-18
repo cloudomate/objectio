@@ -244,7 +244,9 @@ export default function Drives() {
                         {host.name}
                       </div>
                       <div className="text-[11px] text-gray-400 font-mono truncate">
-                        {host.osInfo || host.k8sNode}
+                        {host.osds[0]?.address
+                          ?.replace("http://", "")
+                          .replace(/:\d+$/, "") || host.k8sNode}
                       </div>
                     </div>
                   </div>
@@ -262,6 +264,11 @@ export default function Drives() {
                     layout="stacked"
                   />
                   <div className="flex items-center gap-1 flex-wrap">
+                    {host.osInfo && (
+                      <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
+                        {host.osInfo.split(" ")[0].toLowerCase()}
+                      </span>
+                    )}
                     {host.cpuCores > 0 && (
                       <span className="px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] font-medium">
                         {host.cpuCores}c
