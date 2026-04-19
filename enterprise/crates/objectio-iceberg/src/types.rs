@@ -110,6 +110,15 @@ pub struct CommitTableRequest {
     pub updates: Vec<TableUpdate>,
 }
 
+/// Body of `POST /v1/transactions/commit` — a list of per-table commits
+/// that apply atomically. Every table's requirements must hold or the
+/// whole transaction aborts.
+#[derive(Debug, Deserialize)]
+pub struct CommitTransactionRequest {
+    #[serde(rename = "table-changes", default)]
+    pub table_changes: Vec<CommitTableRequest>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 #[allow(clippy::enum_variant_names)]

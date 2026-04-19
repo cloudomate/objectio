@@ -513,6 +513,48 @@ impl MetaStore {
         Ok(swapped)
     }
 
+    /// Atomic multi-key CAS across Iceberg tables in a single redb
+    /// write-txn. Either every op's expected value matches and every
+    /// write lands, or none of them do. On conflict returns the indices
+    /// (positions in `ops`) whose expected value didn't match. On Raft
+    /// deployments the MultiCas log command is the canonical path; this
+    /// helper exists for single-pod / test builds that don't spin up the
+    /// Raft state machine.
+    pub fn cas_iceberg_tables_multi(
+        &self,
+        ops: &[(String, Vec<u8>, Vec<u8>)],
+    ) -> MetaStoreResult<Vec<usize>> {
+        let write_txn = self.db.begin_write()?;
+        let mut failed: Vec<usize> = Vec::new();
+
+        // Pass 1: verify every expected. Each open_table call is scoped
+        // to this single write-txn so the read+write see the same state.
+        {
+            let table = write_txn.open_table(tables::ICEBERG_TABLES)?;
+            for (i, (key, expected, _)) in ops.iter().enumerate() {
+                let actual = table.get(key.as_str())?.map(|v| v.value().to_vec());
+                if actual.as_deref() != Some(expected.as_slice()) {
+                    failed.push(i);
+                }
+            }
+        }
+
+        if !failed.is_empty() {
+            // Drop the txn without commit → no writes land.
+            return Ok(failed);
+        }
+
+        // Pass 2: apply every write.
+        {
+            let mut table = write_txn.open_table(tables::ICEBERG_TABLES)?;
+            for (key, _, new) in ops {
+                table.insert(key.as_str(), new.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(failed)
+    }
+
     // ---- Data Filters (bincode) ----
 
     pub fn put_data_filter(&self, filter_id: &str, filter: &StoredDataFilter) {

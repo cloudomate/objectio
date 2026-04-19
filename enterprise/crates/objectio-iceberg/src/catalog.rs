@@ -292,6 +292,50 @@ impl IcebergCatalog {
         Ok((resp.metadata_location, resp.metadata_json))
     }
 
+    /// Atomically commit metadata updates to multiple tables in a single
+    /// Raft log entry. Either every change lands or none do — on any
+    /// conflict the whole transaction aborts. Each input tuple mirrors
+    /// the per-table shape of `commit_table`: (namespace_levels,
+    /// table_name, current_location, new_location, new_metadata_json).
+    ///
+    /// # Errors
+    /// Returns `IcebergError` on `failed_precondition` if any change's
+    /// current_location is stale; callers retry after refreshing.
+    pub async fn commit_transaction(
+        &self,
+        changes: Vec<(Vec<String>, String, String, String, Vec<u8>)>,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        use objectio_proto::metadata::{
+            IcebergCommitTableChange, IcebergCommitTransactionRequest,
+        };
+        let table_changes = changes
+            .into_iter()
+            .map(
+                |(ns, name, curr_loc, new_loc, new_json)| IcebergCommitTableChange {
+                    namespace_levels: ns,
+                    table_name: name,
+                    current_metadata_location: curr_loc,
+                    new_metadata_location: new_loc,
+                    new_metadata_json: new_json,
+                },
+            )
+            .collect();
+        let resp = self
+            .meta_client
+            .clone()
+            .iceberg_commit_transaction(IcebergCommitTransactionRequest {
+                warehouse: self.warehouse.clone(),
+                table_changes,
+            })
+            .await?
+            .into_inner();
+        Ok(resp
+            .committed
+            .into_iter()
+            .map(|r| (r.metadata_location, r.metadata_json))
+            .collect())
+    }
+
     /// Drop a table from the catalog.
     ///
     /// # Errors

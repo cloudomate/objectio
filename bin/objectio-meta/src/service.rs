@@ -153,6 +153,8 @@ use objectio_proto::metadata::{
     // Iceberg types
     IcebergCommitTableRequest,
     IcebergCommitTableResponse,
+    IcebergCommitTransactionRequest,
+    IcebergCommitTransactionResponse,
     IcebergCreateNamespaceRequest,
     IcebergCreateNamespaceResponse,
     IcebergCreateTableRequest,
@@ -3652,6 +3654,150 @@ impl MetadataService for MetaService {
             metadata_location: req.new_metadata_location,
             metadata_json: req.new_metadata_json,
         }))
+    }
+
+    async fn iceberg_commit_transaction(
+        &self,
+        request: Request<IcebergCommitTransactionRequest>,
+    ) -> Result<Response<IcebergCommitTransactionResponse>, Status> {
+        let req = request.into_inner();
+        if req.table_changes.is_empty() {
+            return Err(Status::invalid_argument("table_changes is empty"));
+        }
+
+        // Stage 1 — validate every change's expected location and encode the
+        // new entries. Held behind a read-lock so concurrent single-table
+        // commits on other tables aren't serialized behind this one. A
+        // failed expected location aborts the whole transaction before
+        // any Raft round-trip.
+        struct Prepared {
+            table_key: String,
+            old_bytes: Vec<u8>,
+            new_entry: IcebergTableEntry,
+            new_bytes: Vec<u8>,
+            resp: IcebergCommitTableResponse,
+        }
+        let prepared: Vec<Prepared> = {
+            let tables = self.iceberg_tables.read();
+            let now = Self::current_timestamp();
+            let mut prepared = Vec::with_capacity(req.table_changes.len());
+            for (i, ch) in req.table_changes.iter().enumerate() {
+                let table_key = Self::iceberg_table_key_wh(
+                    &req.warehouse,
+                    &ch.namespace_levels,
+                    &ch.table_name,
+                );
+                let entry = tables
+                    .get(&table_key)
+                    .ok_or_else(|| Status::not_found(format!("table_changes[{i}]: not found")))?;
+                if entry.metadata_location != ch.current_metadata_location {
+                    return Err(Status::failed_precondition(format!(
+                        "table_changes[{i}]: metadata location mismatch: expected '{}', actual '{}'",
+                        ch.current_metadata_location, entry.metadata_location
+                    )));
+                }
+                let new_entry = IcebergTableEntry {
+                    metadata_location: ch.new_metadata_location.clone(),
+                    created_at: entry.created_at,
+                    updated_at: now,
+                    metadata_json: ch.new_metadata_json.clone(),
+                    policy_json: entry.policy_json.clone(),
+                };
+                let old_bytes = entry.encode_to_vec();
+                let new_bytes = new_entry.encode_to_vec();
+                let resp = IcebergCommitTableResponse {
+                    metadata_location: ch.new_metadata_location.clone(),
+                    metadata_json: ch.new_metadata_json.clone(),
+                };
+                prepared.push(Prepared {
+                    table_key,
+                    old_bytes,
+                    new_entry,
+                    new_bytes,
+                    resp,
+                });
+            }
+            prepared
+        };
+
+        // Stage 2 — one Raft MultiCas for the whole batch. All ops land
+        // atomically or none do; a stale expected on any row rolls the
+        // whole transaction back.
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let ops: Vec<CasOp> = prepared
+                .iter()
+                .map(|p| CasOp {
+                    table: CasTable::IcebergTables,
+                    key: p.table_key.clone(),
+                    expected: Some(p.old_bytes.clone()),
+                    new_value: Some(p.new_bytes.clone()),
+                })
+                .collect();
+            let cmd = MetaCommand::MultiCas {
+                ops,
+                requested_by: "iceberg-transaction".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::failed_precondition(format!(
+                            "concurrent metadata update detected on table_changes {failed_indices:?}"
+                        )));
+                    }
+                    other => {
+                        error!(
+                            "unexpected raft response for iceberg transaction: {:?}",
+                            other
+                        );
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            // Non-Raft test path: emulate atomicity via the store's
+            // multi-key CAS helper (one redb write-txn across all ops).
+            // Not replicated; production deployments always take the
+            // Raft branch above.
+            let ops: Vec<(String, Vec<u8>, Vec<u8>)> = prepared
+                .iter()
+                .map(|p| (p.table_key.clone(), p.old_bytes.clone(), p.new_bytes.clone()))
+                .collect();
+            match store.cas_iceberg_tables_multi(&ops) {
+                Ok(failed) if failed.is_empty() => {}
+                Ok(failed) => {
+                    return Err(Status::failed_precondition(format!(
+                        "concurrent metadata update detected on table_changes {failed:?}"
+                    )));
+                }
+                Err(e) => {
+                    error!("cas_iceberg_tables_multi failed: {e}");
+                    return Err(Status::internal("failed to commit transaction"));
+                }
+            }
+        }
+
+        // Stage 3 — mirror every successful commit into the in-memory
+        // cache on this leader. `committed` vector mirrors the request
+        // `table_changes` order so the caller can match results 1:1.
+        let mut committed = Vec::with_capacity(prepared.len());
+        {
+            let mut tables = self.iceberg_tables.write();
+            for p in prepared {
+                tables.insert(p.table_key.clone(), p.new_entry);
+                committed.push(p.resp);
+            }
+        }
+
+        debug!(
+            "Committed iceberg transaction: warehouse={} changes={}",
+            req.warehouse,
+            committed.len()
+        );
+
+        Ok(Response::new(IcebergCommitTransactionResponse { committed }))
     }
 
     async fn iceberg_drop_table(

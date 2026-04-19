@@ -12,7 +12,7 @@ use crate::filters;
 use crate::metadata;
 use crate::roles::IcebergRole;
 use crate::types::{
-    CatalogConfig, CommitTableRequest, CommitTableResponse,
+    CatalogConfig, CommitTableRequest, CommitTableResponse, CommitTransactionRequest,
     CreateDataFilterRequest as CreateDataFilterRestRequest, CreateNamespaceRequest,
     CreateNamespaceResponse, CreateTableRequest, DataFilterResponse, EffectivePolicyEntry,
     EffectivePolicyParams, EffectivePolicyResponse, GetEncryptionPolicyResponse, GetQuotaResponse,
@@ -794,6 +794,156 @@ pub async fn update_table(
         metadata_location: committed_location,
         metadata: md,
     }))
+}
+
+/// `POST /v1/transactions/commit` — atomic multi-table commit.
+///
+/// Iceberg REST spec endpoint. Every entry in `table-changes` goes
+/// through the same requirements-then-updates path as `update_table`,
+/// but all per-table CAS ops land as a single Raft MultiCas at the meta
+/// layer — if any requirement fails, or any current metadata location
+/// is stale, every change in the batch aborts with no writes. The
+/// response mirrors the request order.
+///
+/// # Errors
+/// Returns `IcebergError::FailedPrecondition` on requirements mismatch
+/// or stale current location; the client retries after a re-load.
+pub async fn commit_transaction(
+    State(state): State<Arc<IcebergState>>,
+    auth: Option<Extension<AuthResult>>,
+    Query(wh): Query<WarehouseParam>,
+    Json(req): Json<CommitTransactionRequest>,
+) -> Result<Json<Vec<CommitTableResponse>>> {
+    if req.table_changes.is_empty() {
+        return Err(IcebergError::bad_request("table-changes is empty"));
+    }
+
+    let catalog = state.catalog.with_warehouse(&wh.warehouse);
+
+    struct Prepared {
+        levels: Vec<String>,
+        table: String,
+        current_location: String,
+        new_location: String,
+        new_bytes: Vec<u8>,
+        new_metadata: serde_json::Value,
+    }
+
+    let mut prepared: Vec<Prepared> = Vec::with_capacity(req.table_changes.len());
+
+    for (idx, change) in req.table_changes.iter().enumerate() {
+        let identifier = change.identifier.as_ref().ok_or_else(|| {
+            IcebergError::bad_request(format!(
+                "table-changes[{idx}]: identifier is required"
+            ))
+        })?;
+        let table = identifier.name.clone();
+        let levels: Vec<String> = identifier.namespace.clone();
+        let namespace_joined = levels.join(".");
+        let arn = build_iceberg_arn(&levels, Some(&table));
+        check_table_policy(
+            &state,
+            auth.as_ref(),
+            &levels,
+            &table,
+            "iceberg:UpdateTable",
+            &arn,
+        )
+        .await?;
+
+        // Per-table: same load → validate requirements → apply updates →
+        // assemble new metadata blob pipeline as the single-table
+        // update_table handler. Done before any CAS proposal so the
+        // whole batch either prepares or aborts cleanly.
+        let (current_location, metadata_bytes) =
+            catalog.load_table(levels.clone(), &table).await?;
+        if metadata_bytes.is_empty() {
+            return Err(IcebergError::internal(format!(
+                "table-changes[{idx}] ({namespace_joined}.{table}): metadata is empty"
+            )));
+        }
+        let mut md: serde_json::Value = serde_json::from_slice(&metadata_bytes).map_err(|e| {
+            IcebergError::internal(format!(
+                "table-changes[{idx}]: failed to deserialize metadata: {e}"
+            ))
+        })?;
+
+        metadata::validate_requirements(&md, &change.requirements)?;
+        metadata::apply_updates(&mut md, &change.updates)?;
+
+        let seq = md
+            .get("last-sequence-number")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            + 1;
+        md["last-sequence-number"] = json!(seq);
+        md["last-updated-ms"] = json!(chrono_now_ms());
+        if let Some(log) = md
+            .get_mut("metadata-log")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            log.push(json!({
+                "metadata-file": current_location,
+                "timestamp-ms": chrono_now_ms()
+            }));
+        }
+
+        let new_location = format!(
+            "{}/metadata/{:05}-{}.metadata.json",
+            md.get("location")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+            seq,
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0")
+        );
+        let new_bytes = serde_json::to_vec(&md).map_err(|e| {
+            IcebergError::internal(format!(
+                "table-changes[{idx}]: failed to serialize metadata: {e}"
+            ))
+        })?;
+
+        prepared.push(Prepared {
+            levels,
+            table,
+            current_location,
+            new_location,
+            new_bytes,
+            new_metadata: md,
+        });
+    }
+
+    // Atomic commit at the meta layer.
+    let committed = catalog
+        .commit_transaction(
+            prepared
+                .iter()
+                .map(|p| {
+                    (
+                        p.levels.clone(),
+                        p.table.clone(),
+                        p.current_location.clone(),
+                        p.new_location.clone(),
+                        p.new_bytes.clone(),
+                    )
+                })
+                .collect(),
+        )
+        .await?;
+
+    // Zip the meta-side response (authoritative committed location +
+    // stored bytes) with the client-side metadata JSON we just built.
+    let mut out = Vec::with_capacity(prepared.len());
+    for (p, (committed_location, _)) in prepared.into_iter().zip(committed.into_iter()) {
+        out.push(CommitTableResponse {
+            metadata_location: committed_location,
+            metadata: p.new_metadata,
+        });
+    }
+    Ok(Json(out))
 }
 
 /// `HEAD /v1/namespaces/{namespace}/tables/{table}` — check if table exists.

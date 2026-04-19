@@ -94,6 +94,11 @@ pub fn router(
             "/v1/namespaces/{namespace}/tables/{table}",
             delete(handlers::drop_table),
         )
+        // Multi-table atomic transactions (Iceberg REST spec).
+        .route(
+            "/v1/transactions/commit",
+            post(handlers::commit_transaction),
+        )
         // Table policy management
         .route(
             "/v1/namespaces/{namespace}/tables/{table}/policy",
