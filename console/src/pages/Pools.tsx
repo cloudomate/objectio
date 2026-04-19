@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Layers,
   Plus,
@@ -113,6 +114,7 @@ interface PoolsProps {
 }
 
 export default function Pools({ embedded = false }: PoolsProps = {}) {
+  const navigate = useNavigate();
   const [pools, setPools] = useState<Pool[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState(emptyPool);
@@ -272,6 +274,7 @@ export default function Pools({ embedded = false }: PoolsProps = {}) {
           pools={pools}
           onEdit={startEdit}
           onDelete={remove}
+          onViewPlacement={(name) => navigate(`/cluster/pools/${encodeURIComponent(name)}`)}
         />
       )}
     </div>
@@ -939,11 +942,13 @@ function PoolList({
   pools,
   onEdit,
   onDelete,
+  onViewPlacement,
 }: {
   loading: boolean;
   pools: Pool[];
   onEdit: (p: Pool) => void;
   onDelete: (name: string) => void;
+  onViewPlacement?: (name: string) => void;
 }) {
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -1036,12 +1041,16 @@ function PoolList({
                 </td>
                 <td className="px-4 py-2 text-[12px] font-mono text-gray-500">
                   {p.pg_count && p.pg_count > 0 ? (
-                    <span
-                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-medium"
-                      title="Placement-group routed"
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onViewPlacement?.(p.name);
+                      }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-medium hover:bg-indigo-100 transition-colors"
+                      title="Show placement-group distribution"
                     >
                       {p.pg_count.toLocaleString()}
-                    </span>
+                    </button>
                   ) : (
                     <span className="text-gray-400 text-[10px]">legacy</span>
                   )}
@@ -1057,6 +1066,15 @@ function PoolList({
                 </td>
                 <td className="px-4 py-2 text-right">
                   <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {p.pg_count && p.pg_count > 0 && onViewPlacement && (
+                      <button
+                        onClick={() => onViewPlacement(p.name)}
+                        className="text-gray-400 hover:text-indigo-600 p-1"
+                        title="View placement groups"
+                      >
+                        <Layers size={14} />
+                      </button>
+                    )}
                     <button
                       onClick={() => onEdit(p)}
                       className="text-gray-400 hover:text-blue-600 p-1"

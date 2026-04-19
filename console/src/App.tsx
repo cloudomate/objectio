@@ -16,6 +16,7 @@ import Policies from "./pages/Policies";
 import Encryption from "./pages/Encryption";
 import LicensePage from "./pages/License";
 import Cluster from "./pages/Cluster";
+import PoolPlacement from "./pages/PoolPlacement";
 import MyAccount from "./pages/MyAccount";
 import { Navigate } from "react-router-dom";
 
@@ -86,6 +87,9 @@ export default function App() {
         {/* Unified cluster page — Topology / Nodes & Drives / Pools /
             Balancing tabs. Old routes redirect so deep links stay live. */}
         {isSystemAdmin && <Route path="cluster" element={<Cluster />} />}
+        {isSystemAdmin && (
+          <Route path="cluster/pools/:name" element={<PoolPlacement />} />
+        )}
         {isSystemAdmin && <Route path="cluster/:tab" element={<Cluster />} />}
         {isSystemAdmin && (
           <Route path="pools" element={<Navigate to="/cluster/pools" replace />} />
