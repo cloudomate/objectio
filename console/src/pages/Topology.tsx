@@ -234,20 +234,55 @@ export default function Topology() {
   // deployments maps to `spec.nodeName` (the worker node). Fall back
   // through alternative identifiers to cover bare-metal or legacy
   // registrations where only hostname / pod name is populated.
+  //
+  // Two independent dedup concerns:
+  //
+  //  1. The same OSD can match multiple candidate keys (hostname and
+  //     node_name are usually identical on k8s pods), so we track a
+  //     per-key Set of node_ids and skip repeats.
+  //  2. Stale registrations: if an OSD pod restarted with a fresh
+  //     persistent state, meta keeps the old entry until it re-roles
+  //     the address. Prefer the online one (online=true over false),
+  //     then the most recent — since meta appends newer entries at the
+  //     end, a later duplicate wins.
   const osdsByHost = useMemo(() => {
-    const m = new Map<string, NodeInfo[]>();
+    const m = new Map<string, Map<string, NodeInfo>>();
     for (const osd of osdNodes) {
-      const candidates = [
-        osd.kubernetes_node,
-        osd.hostname,
-        osd.node_name,
-      ].filter(Boolean) as string[];
+      const candidates = Array.from(
+        new Set(
+          [osd.kubernetes_node, osd.hostname, osd.node_name].filter(
+            Boolean,
+          ) as string[],
+        ),
+      );
       for (const key of candidates) {
-        if (!m.has(key)) m.set(key, []);
-        m.get(key)!.push(osd);
+        if (!m.has(key)) m.set(key, new Map());
+        const byId = m.get(key)!;
+        const existing = byId.get(osd.node_id);
+        // Keep the newer/online entry when IDs collide. Typically
+        // node_ids ARE unique per OSD registration, so this branch
+        // only fires on literal duplicates emitted by meta.
+        if (!existing || (!existing.online && osd.online)) {
+          byId.set(osd.node_id, osd);
+        }
       }
     }
-    return m;
+    // Collapse to arrays and also dedupe by address as a last-resort
+    // guard against stale same-address / different-node_id ghosts —
+    // meta evicts those on re-registration but they survive briefly
+    // between heartbeats.
+    const out = new Map<string, NodeInfo[]>();
+    for (const [host, byId] of m) {
+      const seenAddr = new Set<string>();
+      const list: NodeInfo[] = [];
+      for (const osd of byId.values()) {
+        if (seenAddr.has(osd.address)) continue;
+        seenAddr.add(osd.address);
+        list.push(osd);
+      }
+      out.set(host, list);
+    }
+    return out;
   }, [osdNodes]);
 
   // Derived host health summary for the top strip.
@@ -562,6 +597,17 @@ function HostDrawerBody({
   const total = osds.reduce((s, o) => s + o.total_capacity, 0);
   const used = osds.reduce((s, o) => s + o.used_capacity, 0);
   const allUp = osds.length > 0 && upCount === osds.length;
+  // Split by operator intent. The topology tree shows only In OSDs,
+  // which is how the rack/host "5 OSDs" count is derived. Without a
+  // breakdown, a host that has 5 In + 4 Out reads as "9 Total" in the
+  // drawer — confusing. Display In / Draining / Out explicitly so
+  // the numbers reconcile with the tree at a glance.
+  const inOsds = osds.filter((o) => (o.admin_state ?? "in") === "in");
+  const drainingOsds = osds.filter((o) => o.admin_state === "draining");
+  const outOsds = osds.filter((o) => o.admin_state === "out");
+  // Sort the inventory: In first, Draining next, Out last — matches
+  // the operational priority an operator triaging the host cares about.
+  const orderedOsds = [...inOsds, ...drainingOsds, ...outOsds];
 
   // Host-level state summary: the drawer acts on ALL OSDs on the host
   // at once. Show the most restrictive state (Out > Draining > In) so
@@ -624,7 +670,17 @@ function HostDrawerBody({
         />
         <StatTile
           label="OSDs"
-          value={`${osds.length} Total`}
+          value={
+            outOsds.length + drainingOsds.length === 0
+              ? `${inOsds.length} In`
+              : [
+                  inOsds.length && `${inOsds.length} In`,
+                  drainingOsds.length && `${drainingOsds.length} Drn`,
+                  outOsds.length && `${outOsds.length} Out`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+          }
           tone="muted"
         />
       </div>
@@ -661,32 +717,47 @@ function HostDrawerBody({
             OSD Inventory
           </div>
           <div className="text-[10px] text-gray-400">
-            Showing {osds.length} of {osds.length}
+            {orderedOsds.length} total
           </div>
         </div>
         <ul className="space-y-1">
-          {osds.map((osd) => (
-            <li
-              key={osd.node_id}
-              className="flex items-center justify-between bg-gray-50 border border-gray-100 rounded-md px-2 py-1.5"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <HardDrive size={12} className="text-gray-400 shrink-0" />
-                <div className="min-w-0">
-                  <div className="text-[12px] font-medium text-gray-800 truncate">
-                    {osd.pod_name || osd.node_name}
-                  </div>
-                  <div className="text-[10px] text-gray-400 font-mono">
-                    {osd.online ? "up" : "down"} / {osd.admin_state ?? "in"}
+          {orderedOsds.map((osd) => {
+            const adminState = osd.admin_state ?? "in";
+            const muted = adminState !== "in";
+            return (
+              <li
+                key={osd.node_id}
+                className={`flex items-center justify-between border rounded-md px-2 py-1.5 ${
+                  muted
+                    ? "bg-gray-50/50 border-gray-100 opacity-70"
+                    : "bg-gray-50 border-gray-100"
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <HardDrive
+                    size={12}
+                    className={muted ? "text-gray-300 shrink-0" : "text-gray-400 shrink-0"}
+                  />
+                  <div className="min-w-0">
+                    <div
+                      className={`text-[12px] font-medium truncate ${
+                        muted ? "text-gray-500" : "text-gray-800"
+                      }`}
+                    >
+                      {osd.pod_name || osd.node_name}
+                    </div>
+                    <div className="text-[10px] text-gray-400 font-mono">
+                      {osd.online ? "up" : "down"} / {adminState}
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="text-[11px] text-gray-500 tabular-nums">
-                {formatBytes(osd.total_capacity)}
-              </div>
-            </li>
-          ))}
-          {osds.length === 0 && (
+                <div className="text-[11px] text-gray-500 tabular-nums">
+                  {formatBytes(osd.total_capacity)}
+                </div>
+              </li>
+            );
+          })}
+          {orderedOsds.length === 0 && (
             <li className="text-[11px] text-gray-400 italic py-2 text-center">
               No OSDs on this host.
             </li>
