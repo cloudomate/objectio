@@ -6282,12 +6282,8 @@ impl MetadataService for MetaService {
         request: Request<PutBucketVersioningRequest>,
     ) -> Result<Response<PutBucketVersioningResponse>, Status> {
         let req = request.into_inner();
-        let mut buckets = self.buckets.write();
-        let bucket = buckets
-            .get_mut(&req.bucket)
-            .ok_or_else(|| Status::not_found(format!("bucket '{}' not found", req.bucket)))?;
 
-        // Object-locked buckets cannot have versioning suspended
+        // Object-locked buckets cannot have versioning suspended.
         if req.state() == VersioningState::VersioningSuspended {
             let lock_configs = self.object_lock_configs.read();
             if lock_configs.get(&req.bucket).is_some_and(|c| c.enabled) {
@@ -6297,10 +6293,48 @@ impl MetadataService for MetaService {
             }
         }
 
-        bucket.versioning = req.state;
-        if let Some(store) = &self.store {
-            store.put_bucket(&req.bucket, bucket);
+        let (expected_bytes, new_bucket, new_bytes) = {
+            let buckets = self.buckets.read();
+            let current = buckets
+                .get(&req.bucket)
+                .cloned()
+                .ok_or_else(|| Status::not_found(format!("bucket '{}' not found", req.bucket)))?;
+            let expected = current.encode_to_vec();
+            let mut new_bucket = current;
+            new_bucket.versioning = req.state;
+            let new_bytes = new_bucket.encode_to_vec();
+            (expected, new_bucket, new_bytes)
+        };
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Buckets,
+                    key: req.bucket.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "put-bucket-versioning".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("bucket changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for put_bucket_versioning: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_bucket(&req.bucket, &new_bucket);
         }
+
+        self.buckets.write().insert(req.bucket.clone(), new_bucket);
         info!(
             "Set versioning for bucket '{}' to {:?}",
             req.bucket,
@@ -6345,12 +6379,43 @@ impl MetadataService for MetaService {
         }
 
         let bytes = config.encode_to_vec();
+        let expected = self
+            .object_lock_configs
+            .read()
+            .get(&req.bucket)
+            .map(|c| c.encode_to_vec());
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Named("object_lock_configs".into()),
+                    key: req.bucket.clone(),
+                    expected,
+                    new_value: Some(bytes.clone()),
+                }],
+                requested_by: "put-object-lock-config".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("object lock config changed; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for put_object_lock_config: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_object_lock_config(&req.bucket, &bytes);
+        }
+
         self.object_lock_configs
             .write()
             .insert(req.bucket.clone(), config);
-        if let Some(store) = &self.store {
-            store.put_object_lock_config(&req.bucket, &bytes);
-        }
         info!("Set object lock config for bucket '{}'", req.bucket);
         Ok(Response::new(PutObjectLockConfigResponse { success: true }))
     }
@@ -6394,12 +6459,43 @@ impl MetadataService for MetaService {
         }
 
         let bytes = config.encode_to_vec();
+        let expected = self
+            .lifecycle_configs
+            .read()
+            .get(&req.bucket)
+            .map(|c| c.encode_to_vec());
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Named("lifecycle_configs".into()),
+                    key: req.bucket.clone(),
+                    expected,
+                    new_value: Some(bytes.clone()),
+                }],
+                requested_by: "put-bucket-lifecycle".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("lifecycle config changed; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for put_bucket_lifecycle: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_lifecycle_config(&req.bucket, &bytes);
+        }
+
         self.lifecycle_configs
             .write()
             .insert(req.bucket.clone(), config);
-        if let Some(store) = &self.store {
-            store.put_lifecycle_config(&req.bucket, &bytes);
-        }
         info!(
             "Set lifecycle config for bucket '{}' ({} rules)",
             req.bucket,
@@ -6431,16 +6527,48 @@ impl MetadataService for MetaService {
         request: Request<DeleteBucketLifecycleRequest>,
     ) -> Result<Response<DeleteBucketLifecycleResponse>, Status> {
         let bucket = request.into_inner().bucket;
-        let removed = self.lifecycle_configs.write().remove(&bucket).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_lifecycle_config(&bucket);
-            }
-            info!("Deleted lifecycle config for bucket '{}'", bucket);
+        let expected = self
+            .lifecycle_configs
+            .read()
+            .get(&bucket)
+            .map(|c| c.encode_to_vec());
+        if expected.is_none() {
+            return Ok(Response::new(DeleteBucketLifecycleResponse {
+                success: false,
+            }));
         }
-        Ok(Response::new(DeleteBucketLifecycleResponse {
-            success: removed,
-        }))
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Named("lifecycle_configs".into()),
+                    key: bucket.clone(),
+                    expected,
+                    new_value: None,
+                }],
+                requested_by: "delete-bucket-lifecycle".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("lifecycle changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_bucket_lifecycle: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_lifecycle_config(&bucket);
+        }
+
+        self.lifecycle_configs.write().remove(&bucket);
+        info!("Deleted lifecycle config for bucket '{}'", bucket);
+        Ok(Response::new(DeleteBucketLifecycleResponse { success: true }))
     }
 
     // ============================================================
@@ -6464,12 +6592,43 @@ impl MetadataService for MetaService {
         }
 
         let bytes = config.encode_to_vec();
+        let expected = self
+            .bucket_encryption_configs
+            .read()
+            .get(&req.bucket)
+            .map(|c| c.encode_to_vec());
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Named("bucket_encryption_configs".into()),
+                    key: req.bucket.clone(),
+                    expected,
+                    new_value: Some(bytes.clone()),
+                }],
+                requested_by: "put-bucket-encryption".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("encryption config changed; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for put_bucket_encryption: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_bucket_encryption_config(&req.bucket, &bytes);
+        }
+
         self.bucket_encryption_configs
             .write()
             .insert(req.bucket.clone(), config);
-        if let Some(store) = &self.store {
-            store.put_bucket_encryption_config(&req.bucket, &bytes);
-        }
         info!("Set bucket encryption config for bucket '{}'", req.bucket);
         Ok(Response::new(PutBucketEncryptionResponse { success: true }))
     }
@@ -6497,20 +6656,48 @@ impl MetadataService for MetaService {
         request: Request<DeleteBucketEncryptionRequest>,
     ) -> Result<Response<DeleteBucketEncryptionResponse>, Status> {
         let bucket = request.into_inner().bucket;
-        let removed = self
+        let expected = self
             .bucket_encryption_configs
-            .write()
-            .remove(&bucket)
-            .is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_bucket_encryption_config(&bucket);
-            }
-            info!("Deleted bucket encryption config for bucket '{}'", bucket);
+            .read()
+            .get(&bucket)
+            .map(|c| c.encode_to_vec());
+        if expected.is_none() {
+            return Ok(Response::new(DeleteBucketEncryptionResponse {
+                success: false,
+            }));
         }
-        Ok(Response::new(DeleteBucketEncryptionResponse {
-            success: removed,
-        }))
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Named("bucket_encryption_configs".into()),
+                    key: bucket.clone(),
+                    expected,
+                    new_value: None,
+                }],
+                requested_by: "delete-bucket-encryption".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("encryption config changed; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_bucket_encryption: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_bucket_encryption_config(&bucket);
+        }
+
+        self.bucket_encryption_configs.write().remove(&bucket);
+        info!("Deleted bucket encryption config for bucket '{}'", bucket);
+        Ok(Response::new(DeleteBucketEncryptionResponse { success: true }))
     }
 
     // ============================================================
