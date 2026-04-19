@@ -3393,8 +3393,21 @@ pub async fn get_object(
             );
         }
 
-        // Decode using erasure coding
-        let codec = match ErasureCodec::new(ErasureConfig::new(ec_k as u8, ec_m as u8)) {
+        // Decode using erasure coding. Match the codec to how this stripe
+        // was encoded — reading an LRC-written stripe with a plain MDS codec
+        // produces wrong bytes (the decoder treats local parity shards as
+        // global parity and reconstruction diverges). LRC config pulls the
+        // (k, l, g) triple straight off the StripeMeta.
+        let codec_config = if stripe_ec_type == ErasureType::ErasureLrc {
+            ErasureConfig::lrc(
+                ec_k as u8,
+                stripe.ec_local_parity as u8,
+                stripe.ec_global_parity as u8,
+            )
+        } else {
+            ErasureConfig::new(ec_k as u8, ec_m as u8)
+        };
+        let codec = match ErasureCodec::new(codec_config) {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to create erasure codec: {}", e);
@@ -4982,22 +4995,26 @@ async fn upload_part_internal(
             total_success += success;
             locs.sort_by_key(|l| l.position);
 
+            // Multipart uses an MDS encoder regardless of placement.ec_type
+            // — LRC multipart encoding isn't wired yet. Persist the stripe
+            // as MDS so the read path decodes correctly; LRC-encoded
+            // multipart is tracked as a separate roadmap item.
             all_stripes.push(StripeMeta {
                 stripe_id: stripe_idx as u64,
                 ec_k,
                 ec_m,
                 shards: locs,
-                ec_type: placement.ec_type,
-                ec_local_parity: placement.ec_local_parity,
-                ec_global_parity: placement.ec_global_parity,
-                local_group_size: placement.local_group_size,
+                ec_type: ErasureType::ErasureMds.into(),
+                ec_local_parity: 0,
+                ec_global_parity: 0,
+                local_group_size: 0,
                 data_size: stripe_data_size,
-                object_id: part_object_id.to_vec(), // Store object_id used for shards
+                object_id: part_object_id.to_vec(),
                 encryption_iv: stripe_iv.clone(),
             });
         }
 
-        (all_stripes, total_success, ec_type)
+        (all_stripes, total_success, ErasureType::ErasureMds)
     };
 
     debug!(
