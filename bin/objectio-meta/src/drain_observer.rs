@@ -808,8 +808,53 @@ async fn reconstruct_dangling_shard(
 
     let available = survivors.iter().filter(|s| s.is_some()).count();
     if available < ec_k {
+        // Distinguish transient "readers couldn't connect" from
+        // permanent "no reachable shards even exist." If every shard in
+        // this stripe points at a node_id that isn't currently
+        // registered, the object is terminally lost — GC the stale
+        // ObjectMeta from the scanning OSD so the rebalancer stops
+        // re-finding it every sweep. The `registered` set above is the
+        // current OSD list at call time.
+        let registered_shards = stripe
+            .shards
+            .iter()
+            .filter(|s| {
+                s.node_id.len() == 16
+                    && registered.contains(&<[u8; 16]>::try_from(s.node_id.as_slice()).unwrap())
+            })
+            .count();
+        if registered_shards < ec_k {
+            // Terminal: can't ever recover this. Delete the meta pointer
+            // on the OSD that surfaced it (one garbage-collected
+            // entry per sweep per object). Other OSDs' replicas will
+            // be cleaned up when they surface via their own list.
+            if let Ok(ch) = open_channel(owner_meta_addr).await {
+                let mut client = StorageServiceClient::new(ch);
+                let _ = client
+                    .delete_object_meta(objectio_proto::storage::DeleteObjectMetaRequest {
+                        bucket: object.bucket.clone(),
+                        key: object.key.clone(),
+                        version_id: String::new(),
+                    })
+                    .await;
+            }
+            tracing::info!(
+                "reconstruct: {}/{} stripe={stripe_id} pos={position} terminally lost \
+                 ({registered_shards}/{ec_k} shards on registered OSDs); \
+                 GC'd ObjectMeta from {owner_meta_addr}",
+                object.bucket,
+                object.key,
+            );
+            return Err(anyhow::anyhow!(
+                "terminally_lost: {}/{} stripe={stripe_id} pos={position} \
+                 ({registered_shards}/{ec_k} on registered OSDs)",
+                object.bucket,
+                object.key,
+            ));
+        }
         return Err(anyhow::anyhow!(
-            "reconstruct: only {available} survivors available, need {ec_k}"
+            "reconstruct: only {available} survivors reachable of {registered_shards} \
+             registered, need {ec_k} (transient)"
         ));
     }
 
@@ -1071,10 +1116,22 @@ async fn rebalance_sweep(
                     )
                     .await
                     {
-                        meta.update_rebalance_progress(|p| {
-                            p.last_error = format!("{}: {e}", object.key);
-                            p.last_sweep_at = now_unix();
-                        });
+                        // Terminal losses have already logged +
+                        // GC'd inside reconstruct_dangling_shard;
+                        // surface as info on the banner so the UI
+                        // doesn't turn "healthy cluster, one bad
+                        // object" into "rebalancer broken."
+                        if e.to_string().starts_with("terminally_lost:") {
+                            meta.update_rebalance_progress(|p| {
+                                p.last_error.clear();
+                                p.last_sweep_at = now_unix();
+                            });
+                        } else {
+                            meta.update_rebalance_progress(|p| {
+                                p.last_error = format!("{}: {e}", object.key);
+                                p.last_sweep_at = now_unix();
+                            });
+                        }
                     } else {
                         info!(
                             "rebalance: moved {}/{} stripe={} pos={} → {}",
