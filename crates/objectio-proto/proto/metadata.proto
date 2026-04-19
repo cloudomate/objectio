@@ -342,6 +342,12 @@ message CreateObjectRequest {
     map<string, string> user_metadata = 6;
     repeated StripeMeta stripes = 7;
     bytes object_id = 8;        // 16-byte UUID (provided by caller)
+    // Placement context the gateway picked up from GetPlacementResponse.
+    // Server trusts these for the listing entry so reads don't need a
+    // second hash+pool lookup. 0 / "" = legacy (pre-PG) write; server
+    // will leave the listing entry unpopulated on the PG axis.
+    uint32 pg_id = 9;
+    string pool = 10;
 }
 
 message CreateObjectResponse {

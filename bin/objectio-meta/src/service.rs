@@ -311,6 +311,60 @@ fn raft_write_to_status(
     }
 }
 
+/// Classify a shard slot's role under MDS/LRC/Replication layouts the
+/// PG-allocation path uses. For MDS and Replication the layout is
+/// [data... parity...]; for LRC it is [data... local_parities...
+/// global_parities...] ordered by `template.lrc(k, l, g)` in the
+/// placement crate.
+fn pg_position_shard_type(
+    ec_type: ErasureType,
+    position: usize,
+    ec_k: usize,
+    ec_local_parity: usize,
+    _local_group_size: usize,
+) -> ShardType {
+    match ec_type {
+        ErasureType::ErasureLrc => {
+            if position < ec_k {
+                ShardType::ShardData
+            } else if position < ec_k + ec_local_parity {
+                ShardType::ShardLocalParity
+            } else {
+                ShardType::ShardGlobalParity
+            }
+        }
+        ErasureType::ErasureReplication => ShardType::ShardData,
+        _ => {
+            if position < ec_k {
+                ShardType::ShardData
+            } else {
+                ShardType::ShardGlobalParity
+            }
+        }
+    }
+}
+
+/// For LRC, shard positions within a local-parity group share a
+/// `local_group` id. MDS and Replication return 0.
+fn pg_position_local_group(
+    ec_type: ErasureType,
+    position: usize,
+    ec_k: usize,
+    ec_local_parity: usize,
+    local_group_size: usize,
+) -> u32 {
+    if ec_type != ErasureType::ErasureLrc || local_group_size == 0 {
+        return 0;
+    }
+    if position < ec_k {
+        (position / local_group_size) as u32
+    } else if position < ec_k + ec_local_parity {
+        ((position - ec_k).min(ec_local_parity.saturating_sub(1))) as u32
+    } else {
+        0
+    }
+}
+
 /// Metadata service state
 ///
 /// Note: Object metadata is stored on OSDs (primary OSD for each object).
@@ -790,6 +844,128 @@ impl MetaService {
             .read()
             .get(&(pool.to_string(), pg_id))
             .cloned()
+    }
+
+    /// Pre-allocate `pool.pg_count` placement groups using the
+    /// copyset allocator. Called from `create_pool` once the pool
+    /// row has been committed. Returns Ok(()) when every PG is
+    /// written (or on the non-Raft fallback path). Commits in
+    /// MultiCas batches of ≤128 ops to stay under the storage
+    /// limit (see `raft_storage::MAX_OPS = 256`).
+    async fn preallocate_placement_groups(&self, pool: &PoolConfig) -> Result<(), Status> {
+        use objectio_common::FailureDomain;
+        use objectio_placement::CopysetPool;
+
+        let copy_count = match pool.ec_type() {
+            ErasureType::ErasureMds => (pool.ec_k + pool.ec_m) as usize,
+            ErasureType::ErasureLrc => {
+                (pool.ec_k + pool.ec_local_parity + pool.ec_global_parity) as usize
+            }
+            ErasureType::ErasureReplication => pool.replication_count as usize,
+        };
+        if copy_count == 0 {
+            return Err(Status::invalid_argument(
+                "pool has zero shards per PG — check ec_k / ec_m / replication_count",
+            ));
+        }
+
+        let fd_level = match pool.failure_domain.as_str() {
+            "host" | "" => FailureDomain::Host,
+            "node" => FailureDomain::Node,
+            "rack" => FailureDomain::Rack,
+            "datacenter" => FailureDomain::Datacenter,
+            "zone" => FailureDomain::Zone,
+            "region" => FailureDomain::Region,
+            "disk" => FailureDomain::Disk,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "pool.failure_domain '{other}' not recognised"
+                )));
+            }
+        };
+
+        let topology = self.topology.read().clone();
+        // Seed = topology.version × pg_count so concurrent pool creates
+        // with the same topology get distinct pools.
+        let seed = topology
+            .version
+            .wrapping_mul(1_000_003)
+            .wrapping_add(u64::from(pool.pg_count));
+        let cs_pool = CopysetPool::build(&topology, fd_level, copy_count, 10, seed).map_err(
+            |e| Status::failed_precondition(format!("copyset pool build failed: {e}")),
+        )?;
+        if cs_pool.sets.is_empty() {
+            return Err(Status::failed_precondition(
+                "no feasible copysets for current topology",
+            ));
+        }
+
+        let now = Self::current_timestamp();
+        let mut pgs: Vec<PlacementGroup> = Vec::with_capacity(pool.pg_count as usize);
+        for pg_id in 0..pool.pg_count {
+            let cs = &cs_pool.sets[pg_id as usize % cs_pool.sets.len()];
+            pgs.push(PlacementGroup {
+                pool: pool.name.clone(),
+                pg_id,
+                osd_ids: cs.osds.iter().map(|n| n.as_bytes().to_vec()).collect(),
+                version: 1,
+                updated_at: now,
+                migrating_to_osd_ids: Vec::new(),
+                migration_started_at: 0,
+                pending_moves_count: 0,
+            });
+        }
+
+        // Commit in batches. MAX_OPS in raft_storage is 256 — stay
+        // well under to leave headroom for other MultiCas calls that
+        // land in the same raft entry.
+        const CHUNK: usize = 128;
+        let raft = self.raft_handle();
+        for chunk in pgs.chunks(CHUNK) {
+            if let Some(raft) = raft.clone() {
+                use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+                let ops: Vec<CasOp> = chunk
+                    .iter()
+                    .map(|pg| CasOp {
+                        table: CasTable::PlacementGroups,
+                        key: MetaStore::pg_key(&pg.pool, pg.pg_id),
+                        expected: None,
+                        new_value: Some(pg.encode_to_vec()),
+                    })
+                    .collect();
+                let cmd = MetaCommand::MultiCas {
+                    ops,
+                    requested_by: "create-pool:init-pgs".into(),
+                };
+                match raft.client_write(cmd).await {
+                    Ok(r) => match r.data {
+                        MetaResponse::MultiCasOk => {}
+                        MetaResponse::MultiCasConflict { .. } => {
+                            return Err(Status::aborted("PG conflict during pre-allocation"));
+                        }
+                        other => {
+                            error!("unexpected raft response during PG pre-alloc: {other:?}");
+                            return Err(Status::internal("raft commit wrong variant"));
+                        }
+                    },
+                    Err(e) => return Err(raft_write_to_status(&e)),
+                }
+            } else if let Some(store) = &self.store {
+                for pg in chunk {
+                    store.put_placement_group(&pg.pool, pg.pg_id, &pg.encode_to_vec());
+                }
+            }
+        }
+
+        info!(
+            "pool '{}' pre-allocated {} PGs (copy_count={}, fd={}, pool.size={})",
+            pool.name,
+            pool.pg_count,
+            copy_count,
+            fd_level,
+            cs_pool.sets.len(),
+        );
+        Ok(())
     }
 
     fn apply_iceberg_warehouse_event(&self, key: &str, new_value: Option<&[u8]>) {
@@ -2183,10 +2359,12 @@ impl MetadataService for MetaService {
             storage_class: "STANDARD".into(),
             user_metadata: req.user_metadata.clone(),
             primary_osd_id,
-            // Filled in Phase 3 once CreateObjectRequest carries pg_id +
-            // pool (gateway reads them from GetPlacementResponse).
-            pg_id: 0,
-            pool: String::new(),
+            // Gateway carried these from its GetPlacement call. With
+            // pg_id set, ListObjects + GET can resolve osd_ids via a
+            // single PG lookup; without, we fall back to the legacy
+            // per-object CRUSH path.
+            pg_id: req.pg_id,
+            pool: req.pool.clone(),
         };
         let listing_key = format!("{}\0{}\0", req.bucket, req.key);
         let new_bytes = entry.encode_to_vec();
@@ -2408,19 +2586,26 @@ impl MetadataService for MetaService {
                 .map(|b| b.pool.clone())
                 .unwrap_or_default()
         };
-        let pool_ec = if !pool_name.is_empty() {
-            self.pools.read().get(&pool_name).map(|p| {
-                (
-                    p.ec_type(),
-                    p.ec_k,
-                    p.ec_m,
-                    p.ec_local_parity,
-                    p.ec_global_parity,
-                    p.replication_count,
-                )
-            })
+        let (pool_ec, pool_pg_count) = if !pool_name.is_empty() {
+            self.pools
+                .read()
+                .get(&pool_name)
+                .map(|p| {
+                    (
+                        Some((
+                            p.ec_type(),
+                            p.ec_k,
+                            p.ec_m,
+                            p.ec_local_parity,
+                            p.ec_global_parity,
+                            p.replication_count,
+                        )),
+                        p.pg_count,
+                    )
+                })
+                .unwrap_or((None, 0))
         } else {
-            None
+            (None, 0)
         };
 
         // Select placement template based on pool EC config or global default
@@ -2494,6 +2679,101 @@ impl MetadataService for MetaService {
                 ),
             }
         };
+
+        // Placement-group fast path. When the bucket's pool has a
+        // non-zero pg_count we route object_id -> pg_id via jump
+        // consistent hash and read the PG's committed osd_ids in one
+        // in-memory lookup. Falls through to CRUSH2 if the PG row is
+        // missing (pre-allocation still in progress on a fresh pool)
+        // or if the PG's shard count disagrees with the current EC
+        // config (topology mid-reconfigure).
+        if pool_pg_count > 0 && !pool_name.is_empty() {
+            let key_str = format!("{}/{}", req.bucket, req.key);
+            let key_hash = xxhash_rust::xxh64::xxh64(key_str.as_bytes(), 0);
+            let pg_id = objectio_placement::jump_consistent_hash(key_hash, pool_pg_count as i32)
+                as u32;
+            if let Some(pg) = self.placement_group(&pool_name, pg_id) {
+                let expected_shards = match ec_type {
+                    ErasureType::ErasureMds => ec_k as usize + ec_global_parity as usize,
+                    ErasureType::ErasureLrc => {
+                        ec_k as usize + ec_local_parity as usize + ec_global_parity as usize
+                    }
+                    ErasureType::ErasureReplication => replication_count as usize,
+                };
+                if pg.osd_ids.len() == expected_shards && expected_shards > 0 {
+                    let nodes_snap = self.osd_nodes.read();
+                    let placements: Vec<NodePlacement> = pg
+                        .osd_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(pos, osd_bytes)| {
+                            let node = nodes_snap.iter().find(|n| n.node_id.as_slice() == osd_bytes.as_slice());
+                            let (node_address, disk_id) = match node {
+                                Some(n) => (
+                                    n.address.clone(),
+                                    n.disk_ids
+                                        .first()
+                                        .map(|d| d.to_vec())
+                                        .unwrap_or_else(|| vec![0u8; 16]),
+                                ),
+                                None => (String::new(), vec![0u8; 16]),
+                            };
+                            let shard_type = pg_position_shard_type(
+                                ec_type,
+                                pos,
+                                ec_k as usize,
+                                ec_local_parity as usize,
+                                local_group_size as usize,
+                            );
+                            let local_group = pg_position_local_group(
+                                ec_type,
+                                pos,
+                                ec_k as usize,
+                                ec_local_parity as usize,
+                                local_group_size as usize,
+                            );
+                            NodePlacement {
+                                position: pos as u32,
+                                node_id: osd_bytes.clone(),
+                                node_address,
+                                disk_id,
+                                shard_type: shard_type.into(),
+                                local_group,
+                            }
+                        })
+                        .collect();
+                    debug!(
+                        "PG placement for {}/{}: pool={}, pg_id={}, {} shards",
+                        req.bucket,
+                        req.key,
+                        pool_name,
+                        pg_id,
+                        placements.len()
+                    );
+                    return Ok(Response::new(GetPlacementResponse {
+                        storage_class: req.storage_class.clone(),
+                        ec_k,
+                        ec_m: ec_local_parity + ec_global_parity,
+                        nodes: placements,
+                        ec_type: ec_type.into(),
+                        ec_local_parity,
+                        ec_global_parity,
+                        local_group_size,
+                        replication_count,
+                        pg_id,
+                        pg_version: pg.version,
+                        pool: pool_name.clone(),
+                    }));
+                }
+                warn!(
+                    "PG {}/{}: osd_ids={} doesn't match expected shards={}; falling back to CRUSH",
+                    pool_name,
+                    pg_id,
+                    pg.osd_ids.len(),
+                    expected_shards
+                );
+            }
+        }
 
         // Use CRUSH 2.0 for placement
         let crush = self.crush.read();
@@ -6332,6 +6612,21 @@ impl MetadataService for MetaService {
 
         self.pools.write().insert(pool.name.clone(), pool.clone());
         info!("Created pool: {}", pool.name);
+
+        // Pre-allocate placement groups if the pool opted in. Done
+        // after the pool row is committed so a partial failure here
+        // leaves a pool with pg_count>0 but no PGs — the balancer
+        // (Phase 4) will detect that and regenerate. Fatal errors
+        // from allocation surface as status; gateway retries.
+        if pool.pg_count > 0
+            && let Err(e) = self.preallocate_placement_groups(&pool).await
+        {
+            warn!(
+                "pool '{}' created but PG pre-allocation failed: {}",
+                pool.name, e
+            );
+        }
+
         Ok(Response::new(CreatePoolResponse { pool: Some(pool) }))
     }
 

@@ -2912,6 +2912,8 @@ pub async fn put_object(
             user_metadata: object_meta.user_metadata.clone(),
             stripes: object_meta.stripes.clone(),
             object_id: object_id.to_vec(),
+            pg_id: placement.pg_id,
+            pool: placement.pool.clone(),
         };
         if let Err(e) = meta_client.create_object(req).await {
             warn!(
