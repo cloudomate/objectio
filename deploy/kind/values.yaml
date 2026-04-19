@@ -18,9 +18,11 @@ gateway:
   warehouseLocation: s3://objectio-warehouse
   region: us-east-1
   logLevel: info
-  # Delta Sharing — endpoint is reached via NodePort 30000 → host port 9000
+  # Public URL for OIDC callback / Iceberg vended creds / Delta Sharing
+  # presign. NodePort 30000 → host port 9000 via kubectl port-forward.
+  externalUrl: http://localhost:9000
+  # Delta Sharing credentials only. The URL base above is shared.
   deltaSharing:
-    externalEndpoint: http://localhost:9000
     accessKeyId: admin
     secretKey: objectio-delta-secret-key
   service:

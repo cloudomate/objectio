@@ -32,7 +32,15 @@ gateway:
   hostProvider:
     enabled: true
     kind: k8s
-  # Delta Sharing presigned URL config. Set externalEndpoint + credentials to enable.
+  # Public URL the gateway is reachable at (e.g. https://s3.example.com
+  # or http://localhost:9000 for kind). Consumed by Iceberg vended
+  # credentials, Delta Sharing presigned URLs, and the console OIDC
+  # callback. Leave empty to default to http://<listen>.
+  externalUrl: ""
+  # Delta Sharing presigned URL config. Credentials only — the URL base
+  # is taken from gateway.externalUrl. The old deltaSharing.externalEndpoint
+  # key is still read as a fallback for older deployments but should be
+  # migrated to gateway.externalUrl.
   deltaSharing:
     externalEndpoint: ""
     accessKeyId: ""

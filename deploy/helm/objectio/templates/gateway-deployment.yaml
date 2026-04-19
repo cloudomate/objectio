@@ -42,7 +42,15 @@ spec:
             - "--no-auth"
             {{- end }}
             - "--external-endpoint"
-            - {{ .Values.gateway.deltaSharing.externalEndpoint | quote }}
+            {{- /*
+              gateway.externalUrl is the canonical key — the public URL the
+              gateway is reachable at. Consumed by Iceberg vended creds,
+              Delta Sharing presigned URLs, and the console OIDC callback.
+              gateway.deltaSharing.externalEndpoint is kept as a fallback
+              so existing deployments that only set the Delta Sharing key
+              don't break on upgrade.
+            */}}
+            - {{ (default .Values.gateway.deltaSharing.externalEndpoint .Values.gateway.externalUrl) | quote }}
             - "--delta-access-key-id"
             - {{ .Values.gateway.deltaSharing.accessKeyId | quote }}
             - "--delta-secret-key"

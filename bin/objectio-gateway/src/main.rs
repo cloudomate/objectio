@@ -201,10 +201,17 @@ struct Args {
     #[arg(long, default_value = "s3://objectio-warehouse")]
     warehouse_location: String,
 
-    /// Public endpoint URL for presigned URLs (e.g. https://objectio.example.com).
-    /// Used by Delta Sharing to generate presigned S3 URLs for Parquet files.
-    /// Defaults to http://<listen> if not set.
-    #[arg(long, default_value = "")]
+    /// Public URL the gateway is reachable at (e.g. https://s3.example.com).
+    /// Consumed by three features:
+    ///   • Iceberg vended credentials — included as the `s3.endpoint` in
+    ///     LoadTableResponse.credentials so Spark/Trino clients know where
+    ///     to send subsequent S3 reads/writes.
+    ///   • Delta Sharing — base URL used when generating presigned S3 URLs
+    ///     for Parquet file downloads.
+    ///   • Console OIDC callback — the authorize flow needs an absolute
+    ///     redirect_uri; Entra/Okta reject bare paths.
+    /// Defaults to http://<listen> if unset.
+    #[arg(long, default_value = "", alias = "external-url")]
     external_endpoint: String,
 
     /// Admin access key ID for Delta Sharing presigned URL generation.
