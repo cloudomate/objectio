@@ -2,6 +2,7 @@
 //!
 //! This binary provides the storage node service.
 
+mod discovery;
 mod service;
 
 use anyhow::Result;
@@ -48,9 +49,32 @@ struct Args {
     #[arg(long)]
     advertise_addr: Option<String>,
 
-    /// Disk paths to use for storage
+    /// Disk paths to use for storage. Explicit — discovery skips most
+    /// filters for these (still honors root-FS exclusion + mount check).
     #[arg(long)]
     disks: Vec<String>,
+
+    /// Disk discovery glob(s), e.g. `/dev/disk/by-id/wwn-*` or
+    /// `/data/disk*/disk.raw`. Each match is probed; previously-
+    /// claimed ObjectIO disks attach automatically, blanks are
+    /// reported but skipped unless `--init-blank-disks=true`.
+    /// Operator-safe by default: foreign filesystems and the root
+    /// FS's backing device are always excluded.
+    #[arg(long = "disk-filter")]
+    disk_filters: Vec<String>,
+
+    /// Minimum disk size (bytes) considered by discovery. Guards
+    /// against accidentally formatting a tiny EFI partition or an
+    /// install image.
+    #[arg(long, default_value_t = 1024u64 * 1024 * 1024)]
+    disk_min_size: u64,
+
+    /// Allow discovery to format blank disks. Off by default — an
+    /// operator must explicitly opt in, matching the Rook /
+    /// ceph-volume posture ("refuse to touch anything we don't
+    /// already own").
+    #[arg(long, default_value_t = false)]
+    init_blank_disks: bool,
 
     /// Metadata service endpoint
     #[arg(long)]
@@ -200,7 +224,7 @@ async fn main() -> Result<()> {
     // Merge CLI args with config file (CLI takes precedence)
     let listen = args.listen.unwrap_or(config.osd.listen);
     let meta_endpoint = args.meta_endpoint.unwrap_or(config.osd.meta_endpoint);
-    let disks = if args.disks.is_empty() {
+    let explicit_disks = if args.disks.is_empty() {
         config.storage.disks
     } else {
         args.disks
@@ -223,6 +247,51 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting ObjectIO OSD");
+
+    // Resolve final disk list — explicit disks pass through; any
+    // `--disk-filter` globs are expanded, root-FS device + mounted
+    // partitions excluded, superblocks classified.
+    let disks = {
+        let discovered = discovery::discover(
+            &explicit_disks,
+            &args.disk_filters,
+            args.disk_min_size,
+        )
+        .map_err(|e| anyhow::anyhow!("disk discovery failed: {e}"))?;
+
+        let mut claim = Vec::new();
+        for d in &discovered {
+            let path = d.path.display().to_string();
+            match &d.state {
+                discovery::DiskState::Claimed { .. } => {
+                    info!("discovery: claiming {path} ({} bytes)", d.size_bytes);
+                    claim.push(path);
+                }
+                discovery::DiskState::Blank => {
+                    if args.init_blank_disks {
+                        info!("discovery: initialising blank disk {path} (--init-blank-disks)");
+                        claim.push(path);
+                    } else {
+                        warn!(
+                            "discovery: skipping blank disk {path} — pass --init-blank-disks=true to format"
+                        );
+                    }
+                }
+                discovery::DiskState::Foreign { reason } => {
+                    warn!("discovery: refusing foreign disk {path}: {reason}");
+                }
+            }
+        }
+        if claim.is_empty() {
+            anyhow::bail!(
+                "no disks to claim after discovery; explicit={} filters={} foreign/blank/excluded={}",
+                explicit_disks.len(),
+                args.disk_filters.len(),
+                discovered.len()
+            );
+        }
+        claim
+    };
     info!("Config file: {}", args.config);
     info!("Disks: {:?}", disks);
     info!(
