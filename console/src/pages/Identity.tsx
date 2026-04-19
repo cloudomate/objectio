@@ -18,6 +18,9 @@ interface OidcProvider {
     enabled: boolean;
     vendor?: string;
     azure_tenant_id?: string;
+    /// Allow this provider to log users into the system-admin console
+    /// (no tenant binding required). Defaults to false — tenant-scoped.
+    system_admin?: boolean;
   };
   updated_at: number;
   updated_by: string;
@@ -36,6 +39,7 @@ const emptyProvider = {
   enabled: true,
   vendor: "",
   azure_tenant_id: "",
+  system_admin: false,
 };
 
 export default function Identity() {
@@ -297,6 +301,27 @@ export default function Identity() {
               />
               <label className="text-sm">Enabled</label>
             </div>
+            {!sessionTenant && (
+              <div className="md:col-span-2 flex items-start gap-2">
+                <input
+                  id="system_admin_chk"
+                  type="checkbox"
+                  checked={form.system_admin ?? false}
+                  onChange={(e) =>
+                    setForm({ ...form, system_admin: e.target.checked })
+                  }
+                  className="rounded mt-1"
+                />
+                <label htmlFor="system_admin_chk" className="text-sm">
+                  Allow system-admin SSO
+                  <span className="block text-xs text-gray-500 mt-0.5">
+                    Users authenticated through this provider log into the
+                    system-admin console without a tenant binding. Leave
+                    unchecked if this provider is only for tenant users.
+                  </span>
+                </label>
+              </div>
+            )}
           </div>
           <div className="flex gap-3 mt-6 pt-4 border-t border-gray-100">
             <button

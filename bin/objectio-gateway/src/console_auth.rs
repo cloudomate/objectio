@@ -697,8 +697,13 @@ pub async fn oidc_callback(
     let provider_name = state_parts.get(1).unwrap_or(&"").to_string();
     let tenant_from_state = state_parts.get(2).unwrap_or(&"").to_string();
 
-    // Resolve OIDC provider (same logic as authorize)
-    let oidc = if !provider_name.is_empty() && provider_name != "system" {
+    // Resolve OIDC provider (same logic as authorize). Also captures
+    // the provider's `system_admin` flag — when true, a user
+    // authenticated through this provider lands on the system-admin
+    // console even if no tenant maps to the provider.
+    let (oidc, provider_is_system_admin) = if !provider_name.is_empty()
+        && provider_name != "system"
+    {
         let mut client = state.meta_client.clone();
         let config_key = format!("identity/openid/{provider_name}");
         match client
@@ -707,11 +712,15 @@ pub async fn oidc_callback(
         {
             Ok(resp) => {
                 let entry = resp.into_inner().entry.unwrap_or_default();
-                match serde_json::from_slice::<serde_json::Value>(&entry.value)
-                    .ok()
-                    .and_then(|c| build_oidc_provider_from_config(&c))
-                {
-                    Some(p) => p,
+                let config_json: Option<serde_json::Value> =
+                    serde_json::from_slice(&entry.value).ok();
+                let system_admin = config_json
+                    .as_ref()
+                    .and_then(|c| c.get("system_admin"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match config_json.and_then(|c| build_oidc_provider_from_config(&c)) {
+                    Some(p) => (p, system_admin),
                     None => {
                         return Response::builder()
                             .status(StatusCode::FOUND)
@@ -730,8 +739,10 @@ pub async fn oidc_callback(
             }
         }
     } else {
+        // Global provider from --oidc-* CLI args is implicitly
+        // system-admin scoped.
         match state.oidc_provider.as_ref() {
-            Some(p) => (**p).clone(),
+            Some(p) => ((**p).clone(), true),
             None => {
                 return (StatusCode::BAD_REQUEST, "OIDC not configured").into_response();
             }
@@ -784,7 +795,11 @@ pub async fn oidc_callback(
         }
     };
 
-    // Resolve tenant: from state, or look up which tenant uses this provider
+    // Resolve tenant: from state, or look up which tenant uses this
+    // provider. If the provider is flagged as system_admin AND no
+    // tenant maps to it, fall through to system-admin login instead
+    // of erroring — that's the new behavior set by the "Allow
+    // system-admin SSO" checkbox on the Identity page.
     let tenant = if !tenant_from_state.is_empty() {
         tenant_from_state
     } else if !provider_name.is_empty() && provider_name != "system" {
@@ -804,9 +819,14 @@ pub async fn oidc_callback(
         };
         match resolved {
             Some(t) => t,
+            None if provider_is_system_admin => {
+                // Intentional: operator enabled "Allow system-admin SSO".
+                String::new()
+            }
             None => {
                 warn!(
-                    "OIDC provider '{}' not mapped to any tenant — login denied",
+                    "OIDC provider '{}' not mapped to any tenant and not flagged \
+                     system_admin — login denied",
                     provider_name
                 );
                 return Response::builder()
