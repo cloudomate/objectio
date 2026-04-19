@@ -7,7 +7,7 @@ pub mod store;
 pub mod tables;
 pub mod types;
 
-pub use raft::{MetaCommand, MetaResponse, MetaTypeConfig};
+pub use raft::{CasOp, CasTable, MetaCommand, MetaResponse, MetaTypeConfig};
 pub use raft_network::{MetaRaftNetwork, MetaRaftNetworkFactory};
 pub use raft_storage::MetaRaftStorage;
 pub use store::{MetaStore, MetaStoreError, MetaStoreResult};

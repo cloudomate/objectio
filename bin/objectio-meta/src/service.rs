@@ -3554,32 +3554,70 @@ impl MetadataService for MetaService {
         let table_key =
             Self::iceberg_table_key_wh(&req.warehouse, &req.namespace_levels, &req.table_name);
 
-        let mut tables = self.iceberg_tables.write();
-        let entry = tables
-            .get(&table_key)
-            .ok_or_else(|| Status::not_found("table not found"))?;
+        // Stage 1 — read the current entry, validate the expected metadata
+        // location, and encode the proposed new entry. Held behind a read
+        // lock so concurrent non-conflicting RPCs on other tables aren't
+        // serialized against this one.
+        let (old_bytes, new_entry, new_bytes) = {
+            let tables = self.iceberg_tables.read();
+            let entry = tables
+                .get(&table_key)
+                .ok_or_else(|| Status::not_found("table not found"))?;
 
-        // CAS: verify current metadata location matches expected
-        if entry.metadata_location != req.current_metadata_location {
-            return Err(Status::failed_precondition(format!(
-                "metadata location mismatch: expected '{}', actual '{}'",
-                req.current_metadata_location, entry.metadata_location
-            )));
-        }
+            if entry.metadata_location != req.current_metadata_location {
+                return Err(Status::failed_precondition(format!(
+                    "metadata location mismatch: expected '{}', actual '{}'",
+                    req.current_metadata_location, entry.metadata_location
+                )));
+            }
 
-        let now = Self::current_timestamp();
-        let new_entry = IcebergTableEntry {
-            metadata_location: req.new_metadata_location.clone(),
-            created_at: entry.created_at,
-            updated_at: now,
-            metadata_json: req.new_metadata_json.clone(),
-            policy_json: entry.policy_json.clone(),
-        };
-
-        // Persist with CAS in store
-        if let Some(store) = &self.store {
+            let now = Self::current_timestamp();
+            let new_entry = IcebergTableEntry {
+                metadata_location: req.new_metadata_location.clone(),
+                created_at: entry.created_at,
+                updated_at: now,
+                metadata_json: req.new_metadata_json.clone(),
+                policy_json: entry.policy_json.clone(),
+            };
             let old_bytes = entry.encode_to_vec();
             let new_bytes = new_entry.encode_to_vec();
+            (old_bytes, new_entry, new_bytes)
+        };
+
+        // Stage 2 — replicate the CAS through Raft so followers observe
+        // the same commit. Non-leader pods return a Forwarding error that
+        // `raft_write_to_status` turns into a leader-hint Status; the
+        // iceberg REST handler retries against the leader.
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergTables,
+                    key: table_key.clone(),
+                    expected: Some(old_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "iceberg-commit".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::failed_precondition(
+                            "concurrent metadata update detected",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for iceberg commit: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            // Legacy non-Raft path (tests, pre-Raft deployments). Keep the
+            // old direct-redb CAS so unit tests without a raft handle
+            // still work.
             match store.cas_iceberg_table(&table_key, &old_bytes, &new_bytes) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -3594,7 +3632,13 @@ impl MetadataService for MetaService {
             }
         }
 
-        tables.insert(table_key, new_entry);
+        // Stage 3 — mirror into the in-memory cache on this leader so
+        // local reads see the update without waiting for a redb hit.
+        // Followers' caches are rebuilt from redb on next leader promote
+        // (the state machine apply already landed the bytes on disk).
+        self.iceberg_tables
+            .write()
+            .insert(table_key.clone(), new_entry);
 
         debug!(
             "Committed iceberg table {:?}.{}: {} -> {}",
