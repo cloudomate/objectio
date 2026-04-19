@@ -164,6 +164,164 @@ The gateway's KMS backend picks how SSE-KMS wrap/unwrap is performed.
 
 ---
 
+# 2a. Placement Engine (CRUSH + Placement Groups)
+
+Two-hop placement: `object_id → pg_id → [osd_1..k+m]`. Replaces
+per-object CRUSH with a fixed set of placement groups (PGs), each
+PG mapped to a specific `(k+m)`-tuple of OSDs. Modelled on Ceph's
+PG model + Cidon/Stutsman copyset diversity.
+
+### Two placement modes
+- **Legacy CRUSH2** — per-object HRW hash picks OSDs on every write.
+  Pools created with `pg_count = 0` use this path for back-compat.
+- **Placement groups** *(recommended)* — pool created with `pg_count > 0`
+  pre-allocates N PGs. Writes hash object key → PG via jump-consistent
+  hash; PG → OSDs is an explicit Meta lookup.
+
+### Object → PG routing
+- **Algorithm**: Lamping & Veach jump consistent hash (Google 2014).
+  O(log N) multiplications per call (~100 ns).
+- **Minimal remap** property: growing `pg_count` by one only moves
+  `old/new` of keys, and every moving key lands on the new PG. Mostly
+  academic today — resize isn't live — but the property is preserved
+  for future PG-split support.
+- Key = `xxh64(bucket/key)`.
+
+### PG → OSD assignment (copyset allocator)
+- **Cidon/Stutsman copyset pattern**: precompute a pool of valid
+  `(k+m)`-tuples of OSDs that respect the pool's failure-domain level.
+  PGs are sampled from this pool — dramatically reduces the number of
+  distinct copysets and the correlated-data-loss probability when
+  multiple OSDs fail simultaneously.
+- **Failure-domain aware**: every copyset spans distinct FD values
+  (host, rack, datacenter, zone, region, etc. as configured on the
+  pool).
+- **Scatter width** knob (`balancer/scatter_width`) — Cidon/Stutsman
+  recommend ~10. Lower = fewer distinct copysets, lower loss
+  probability, fewer choices for the balancer. Default 10.
+- Deterministic: seeded by topology version × pool hash so the
+  copyset pool is reproducible across Meta replicas and restarts.
+
+### Placement Groups (`PlacementGroup` proto)
+- One Raft-replicated row per PG: `(pool, pg_id, osd_ids, version,
+  updated_at, migrating_to_osd_ids)`.
+- CAS-versioned — the balancer bumps `version` on every move.
+- Cached in-memory on every Meta replica via the apply-listener;
+  hot reads don't hit redb.
+- Listed via `GET /_admin/pools/{name}/placement-groups` (paginated).
+
+### Balancer (descheduler pattern)
+Leader-only background task. Evaluates every PG on each tick and
+commits moves via MultiCas when a PG is overloaded or underloaded.
+
+**Hysteresis gates** (prevents thrash):
+
+- **Overload**: trigger a move when any OSD in the PG holds ≥
+  `overload_multiplier × target` PGs. Default 1.20 (20% above fair
+  share).
+- **Underload** *(optional)*: also trigger when any OSD in the
+  cluster holds ≤ `underload_multiplier × target` PGs. Default 0.70
+  (30% below fair share); set to 0 to disable.
+- **Improvement factor**: candidate copyset's total load must be
+  ≤ `improvement_factor × current`. Default 0.90 (≥10% improvement
+  required to commit).
+
+**Concurrency cap**: `max(3, osds/3)` moves per pool per tick by
+default. Bounds background churn. Override via `balancer/per_tick_cap`.
+
+**Greenfield mode**: ObjectIO today has no live data migration.
+Balancer commits `osd_ids` directly — orphan shards on OSDs that
+dropped out of a PG are collected by the terminal-loss GC in the
+drain observer. If production data lands, the `migrating_to_osd_ids`
+field on `PlacementGroup` becomes the migration signal and the
+migrator task (not yet implemented) consumes it before committing
+the transition.
+
+### Hot-reloadable tuning (via `/_admin/config/balancer/*`)
+
+| Key | Default | Effect |
+|---|---|---|
+| `balancer/sweep_interval_seconds` | 60 | Tick cadence (clamped 5–3600) |
+| `balancer/overload_multiplier` | 1.20 | Overload trigger threshold |
+| `balancer/underload_multiplier` | 0.0 | Underload trigger (0 = off) |
+| `balancer/improvement_factor` | 0.90 | Min improvement to commit |
+| `balancer/scatter_width` | 10 | Copyset-pool diversity |
+| `balancer/per_tick_cap` | 0 (auto) | Moves per pool per tick |
+| `balancer/paused` | false | Halt all commits |
+
+Each knob re-reads on every tick — no restart required. Ticks
+themselves are skipped when the sweep interval changes so the
+clock stays monotonic.
+
+### Sizing guidance
+
+Rule of thumb (Ceph / AIStor convention):
+
+```
+pg_count ≈ 100 × active_osds / (k+m), rounded to power of 2
+```
+
+| Cluster shape | Suggested `pg_count` |
+|---|---|
+| 9 OSDs, 2+1 EC | 256 or 512 |
+| 24 OSDs, 4+2 EC | 512 |
+| 100 OSDs, 4+2 EC | 2048 |
+| 1,000 OSDs, 8+4 EC | 8192 |
+
+Cost: ~200 bytes per PG row; `pg_count=4096` is ~1 MB of Meta
+state per pool. Hard cap is 65,536 per pool (plan invariant).
+
+### Scaling without PG split
+
+`pg_count` is fixed at pool creation (v1 non-goal: growable
+pg_count). Three escape hatches cover the scale range without
+bolting on split:
+
+1. **Size for target**. Pick `pg_count` for the cluster you expect
+   to reach, not the one you start at — cost is trivial.
+2. **New pool per expansion** (MinIO "server pool" pattern). When a
+   pool's PG count becomes tight, create a new pool with more PGs
+   and point new bucket creations at it. Existing buckets keep
+   working on the old pool untouched. Zero-downtime because pool
+   selection is per-bucket, recorded in `BucketMeta` at create time.
+3. **Multiple pools per tier from day 1**. `nvme-1`, `nvme-2`, …
+   Buckets round-robin or least-full across siblings. Failure
+   isolation + admin-op blast-radius containment come for free.
+
+Iceberg workloads effectively **never** need PG split — the
+catalog indirection makes "move data to a new pool" a
+metadata-only flip rather than a full copy. Long-lived
+bucket-scoped workloads where the bucket name is the permanent
+client API are the only case where split is cheaper than
+migration; not a v1 concern.
+
+### Console visualization
+
+`/cluster/pools/{name}` drill-down shows:
+- Stat cards (pg_count, k+m, target PGs/OSD, active OSDs).
+- Per-OSD PG-membership bar chart — red/amber coloring for
+  overloaded/underloaded OSDs, target marker line.
+- PG × OSD matrix — scrollable grid, blue cell = OSD is a member,
+  amber = migrating-to. Click a column to filter to one OSD's
+  PGs; click a row to pin a single PG.
+
+All backed by `GET /_admin/pools/{name}/placement-groups` +
+`GET /_admin/nodes` — no new data plane, just a read view.
+
+### Live status
+
+`GET /_admin/rebalance-status` returns a unified view (legacy
+drift-rebalance fields + new PG counters):
+- `pgs_moved_total` — cumulative PG moves since process start
+- `pg_candidates_last_tick` — PGs flagged for a move in the last tick
+- `pgs_scanned_last_tick` — total PGs evaluated per tick
+- `paused` — merged signal of `rebalance/paused` OR `balancer/paused`
+
+The console's Topology banner and the new **Cluster → Balancing**
+tab both consume this.
+
+---
+
 # 3. Data Lakehouse (Iceberg Tables + Delta Sharing)
 
 > Create analytics warehouses, manage Iceberg tables, query with Spark/Trino, and share data across organizations via the Delta Sharing protocol.
@@ -372,16 +530,19 @@ File storage provides POSIX-compatible access to ObjectIO buckets via standard f
 | **Buckets** | Create/delete buckets, versioning/lock/lifecycle badges, tenant column |
 | **Bucket Detail** | Tabs: Versioning toggle, Object Lock config, Lifecycle rule editor |
 | **Object Browser** | Navigate buckets → folders → files, breadcrumb path, folder/file counts |
-| **Storage Pools** | Protection presets, EC config (RS/LRC/Replication), failure domain, node-aware constraints |
+| **Cluster** | Unified view of cluster infrastructure via four tabs (all admin-only). Legacy `/topology`, `/drives`, `/pools` URLs redirect here. |
+| &nbsp;&nbsp;→ **Topology** | Interactive, collapsible diagram of region → zone → datacenter → rack → host → OSDs with color-coded level pills. Per-pool placement satisfiability strip. Rebalance banner merges legacy drift + PG-balancer counters. |
+| &nbsp;&nbsp;→ **Nodes & Drives** | K8s node grouping → OSD pods → disks, CPU/RAM/OS info, usage bars, Add Host via host-provider. |
+| &nbsp;&nbsp;→ **Storage Pools** | Protection presets, EC config (RS/LRC/Replication), failure domain, PG count selector on create, PGs column on list. Click PG count → placement drill-down. |
+| &nbsp;&nbsp;→ **Balancing** | Live balancer status card (Pause/Resume), 7 hot-reloadable tuning knobs (overload/underload/improvement thresholds, scatter width, per-tick cap, sweep interval, pause). |
+| **Pool Placement** (`/cluster/pools/:name`) | Per-pool PG visualization: stat cards, per-OSD PG-membership bars with overload/underload coloring and target line, PG × OSD matrix grid with click-to-filter. |
 | **Tenants** | Tenant CRUD, quotas, OIDC provider, pool assignment |
 | **Users & Keys** | Create users with tenant selector, auto-create access keys, credential display |
 | **Identity** | OIDC provider configuration (Azure, Keycloak, Okta, Google, generic) |
 | **Tables** | Warehouse → Namespace → Table hierarchy, table metadata viewer |
 | **Table Sharing** | Share/table/recipient CRUD, UniForm type support, token + profile.share generation |
 | **Monitoring** | Live Prometheus metrics, charts (line, area, bar), 5s polling |
-| **Nodes & Drives** | K8s node grouping → OSD pods → disks, CPU/RAM/OS info, usage bars |
 | **Encryption** | SSE master-key status, KMS backend selector (Disabled / Local / Vault), hot-swap + Test button |
-| **Topology** | Interactive, collapsible diagram of region → zone → datacenter → rack → host → OSDs with color-coded level pills. Per-pool placement satisfiability strip (green check / amber warning + reason). Distinct counts at every level. |
 | **License** | Current tier banner (Community / Enterprise), licensee + expiry, file upload to install, capacity + node usage bars (green/amber/red), per-feature unlock matrix |
 
 ### UI Design
