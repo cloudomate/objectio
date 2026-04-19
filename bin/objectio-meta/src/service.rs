@@ -1008,6 +1008,29 @@ impl MetaService {
         self.osd_nodes.read()
     }
 
+    /// Clone-snapshot of all pools. Background tasks use this instead
+    /// of holding the lock across awaits.
+    pub fn pools_snapshot(&self) -> Vec<PoolConfig> {
+        self.pools.read().values().cloned().collect()
+    }
+
+    /// Clone-snapshot of all placement groups for a given pool.
+    pub fn placement_groups_for_pool(&self, pool: &str) -> Vec<PlacementGroup> {
+        let map = self.placement_groups.read();
+        let mut pgs: Vec<PlacementGroup> = map
+            .iter()
+            .filter(|((p, _), _)| p == pool)
+            .map(|(_, pg)| pg.clone())
+            .collect();
+        pgs.sort_by_key(|p| p.pg_id);
+        pgs
+    }
+
+    /// Clone-snapshot of the cluster topology.
+    pub fn topology_snapshot(&self) -> ClusterTopology {
+        self.topology.read().clone()
+    }
+
     /// Snapshot of all OSD drain progresses — node_id → progress.
     /// Consumed by the gateway's `/_admin/drain-status` endpoint.
     pub fn drain_statuses_snapshot(&self) -> HashMap<[u8; 16], DrainProgress> {

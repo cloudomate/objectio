@@ -3,6 +3,7 @@
 //! This binary provides the Raft-based metadata service for both
 //! object storage and block storage.
 
+mod balancer;
 mod block_service;
 mod drain_observer;
 mod raft_admin;
@@ -273,6 +274,10 @@ async fn main() -> Result<()> {
     // issues client_writes. Kick it off once the Raft handle is wired
     // so `is_raft_leader` returns a meaningful answer.
     drain_observer::spawn(meta_service.clone());
+    // PG balancer — leader-only, evaluates placement-group load each
+    // tick. Currently observational (Phase 4a); execution lands with
+    // the Phase 5 migration path.
+    balancer::spawn(meta_service.clone());
     info!(
         "Raft node id={} advertise={} (call POST /init on :{} to bootstrap)",
         node_id, self_addr, args.admin_port
