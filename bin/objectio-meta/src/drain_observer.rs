@@ -1128,10 +1128,17 @@ async fn migrate_rebalance_one(
         position,
     };
 
-    // 1. Read from current owner.
+    // 1. Read from current owner. If the source reports NotFound
+    //    (the shard bytes aren't actually on the OSD the ObjectMeta
+    //    points at — happens after prior migrations that deleted the
+    //    source before the ObjectMeta rewrite landed, or after an
+    //    OSD lost its data volume), fall through to EC reconstruct:
+    //    we have the other k-1 ShardLocations, can regenerate the
+    //    missing one, and write it to target. Other error codes
+    //    propagate as-is.
     let source_ch = open_channel(&source_addr).await?;
     let mut source = StorageServiceClient::new(source_ch);
-    let bytes = tokio::time::timeout(
+    let read_result = tokio::time::timeout(
         PER_OSD_TIMEOUT,
         source.read_shard(ReadShardRequest {
             shard_id: Some(shard_id.clone()),
@@ -1140,9 +1147,30 @@ async fn migrate_rebalance_one(
         }),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("read_shard timeout"))??
-    .into_inner()
-    .data;
+    .map_err(|_| anyhow::anyhow!("read_shard timeout"))?;
+    let bytes = match read_result {
+        Ok(resp) => resp.into_inner().data,
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            tracing::info!(
+                "rebalance: source has no shard for {}/{} stripe={} pos={}; falling back to EC reconstruct",
+                object.bucket,
+                object.key,
+                stripe_id,
+                position
+            );
+            return reconstruct_dangling_shard(
+                meta,
+                current_owner,
+                current_owner_meta_addr,
+                target_node,
+                object,
+                stripe_id,
+                position,
+            )
+            .await;
+        }
+        Err(e) => return Err(anyhow::anyhow!("read_shard: {e}")),
+    };
 
     // 2. Write to target.
     let target_ch = open_channel(&target_addr).await?;
