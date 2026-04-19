@@ -60,6 +60,64 @@ pub enum MetaCommand {
         /// "cli"). Stored in logs, not in the state machine.
         requested_by: String,
     },
+    /// Atomic multi-key compare-and-swap across arbitrary meta tables.
+    /// Every op's expected precondition must hold, or the whole command is
+    /// rejected and no write lands. Intended for cross-table invariants —
+    /// Iceberg transactions touching several tables, bucket renames that
+    /// sweep every listing entry + bucket row in one shot, etc.
+    ///
+    /// Applied in a single redb write-txn so it's serialized with every
+    /// other log entry and atomic on restart. Kept small (<= ~256 ops per
+    /// command) to bound log-entry size and apply latency — callers with
+    /// larger batches should chunk and rely on idempotent per-op retry.
+    MultiCas {
+        ops: Vec<CasOp>,
+        /// Audit trail — caller identity. Not inspected by the state
+        /// machine; landed in logs only.
+        requested_by: String,
+    },
+}
+
+/// A single conditional write inside a [`MetaCommand::MultiCas`].
+///
+/// `expected == None` means "key must NOT exist for this op to apply"
+/// (create-if-absent). `new_value == None` means "delete this key"
+/// (delete-if-matching).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CasOp {
+    pub table: CasTable,
+    pub key: String,
+    pub expected: Option<Vec<u8>>,
+    pub new_value: Option<Vec<u8>>,
+}
+
+/// Which meta table a [`CasOp`] targets. Serialized as a stable tag; the
+/// state machine maps this to a `redb::TableDefinition`. Adding a new
+/// table = appending a new variant here; **never remove or reorder** —
+/// existing log entries carry these tags.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CasTable {
+    Buckets,
+    BucketPolicies,
+    IcebergNamespaces,
+    IcebergTables,
+    DeltaShares,
+    DeltaTables,
+    DeltaRecipients,
+    Config,
+    Pools,
+    Tenants,
+    IamPolicies,
+    Volumes,
+    Snapshots,
+    Users,
+    Groups,
+    /// Additive escape hatch for new tables introduced after this enum
+    /// was frozen. Callers pass the redb table name directly; the state
+    /// machine rejects unknown names rather than silently dropping the
+    /// op. Prefer adding a named variant above when a table is
+    /// long-lived.
+    Named(String),
 }
 
 /// Reply the state machine emits from `apply`, visible to the client that
@@ -82,6 +140,14 @@ pub enum MetaResponse {
     /// doesn't match any registered OSD (the command still applies
     /// successfully, but the caller can surface a warning).
     OsdAdminStateSet { changed: bool, found: bool },
+    /// `MultiCas` committed — every op matched its expected value and
+    /// every write/delete landed atomically.
+    MultiCasOk,
+    /// `MultiCas` rejected — at least one op's expected precondition
+    /// didn't hold. `failed_indices` lists the op positions that
+    /// mismatched so the caller can retry with refreshed expected
+    /// values. No writes were applied.
+    MultiCasConflict { failed_indices: Vec<u32> },
 }
 
 declare_raft_types!(
@@ -118,6 +184,29 @@ mod tests {
                 state: objectio_common::OsdAdminState::Out,
                 requested_by: "console".into(),
             },
+            MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: "ns/tbl".into(),
+                        expected: Some(b"old".to_vec()),
+                        new_value: Some(b"new".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::Named("custom_table".into()),
+                        key: "k".into(),
+                        expected: None,
+                        new_value: Some(b"v".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::BucketPolicies,
+                        key: "mybucket".into(),
+                        expected: Some(b"policy1".to_vec()),
+                        new_value: None, // delete
+                    },
+                ],
+                requested_by: "iceberg-txn".into(),
+            },
         ];
         for cmd in cases {
             let json = serde_json::to_vec(&cmd).unwrap();
@@ -141,6 +230,10 @@ mod tests {
             MetaResponse::OsdAdminStateSet {
                 changed: false,
                 found: false,
+            },
+            MetaResponse::MultiCasOk,
+            MetaResponse::MultiCasConflict {
+                failed_indices: vec![0, 2],
             },
         ];
         for resp in cases {

@@ -47,7 +47,7 @@ use openraft::{
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::raft::{MetaCommand, MetaResponse, MetaTypeConfig};
+use crate::raft::{CasOp, CasTable, MetaCommand, MetaResponse, MetaTypeConfig};
 use crate::tables;
 
 type NodeId = u64;
@@ -204,7 +204,119 @@ impl MetaRaftStorage {
                 state.last_applied = Some(log_id);
                 Ok(MetaResponse::OsdAdminStateSet { changed, found })
             }
+            MetaCommand::MultiCas {
+                ops,
+                requested_by: _,
+            } => apply_multi_cas(&self.db, state, ops, log_id),
         }
+    }
+}
+
+/// Apply a [`MetaCommand::MultiCas`] inside a single redb write-txn.
+///
+/// Two-pass: (1) read every op's current value and compare against its
+/// expected; collect all mismatches. If any mismatch, abort the txn —
+/// no partial writes. (2) write/delete every op's new value. Commit.
+///
+/// The read+write happens in the same write-txn so interleaving with
+/// other state-machine applies is impossible (openraft serializes
+/// applies, and redb's write-txn is exclusive anyway).
+fn apply_multi_cas(
+    db: &redb::Database,
+    state: &mut RaftPersistentState,
+    ops: &[CasOp],
+    log_id: LogId<NodeId>,
+) -> Result<MetaResponse, StorageError<NodeId>> {
+    // Guardrail: keep log-entry apply latency bounded. Callers that need
+    // thousands of conditional writes should chunk and retry.
+    const MAX_OPS: usize = 256;
+    if ops.len() > MAX_OPS {
+        return Err(StorageError::IO {
+            source: StorageIOError::write_state_machine(AnyError::error(format!(
+                "MultiCas too many ops: {} > {MAX_OPS}",
+                ops.len()
+            ))),
+        });
+    }
+
+    let txn = db.begin_write().map_err(write_err)?;
+    let mut failed_indices: Vec<u32> = Vec::new();
+
+    // Pass 1: verify every expected. Redb tables are scoped to the txn,
+    // so we re-open per op to keep the lifetimes simple.
+    for (idx, op) in ops.iter().enumerate() {
+        let name = cas_table_name(&op.table);
+        let tdef: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new(name);
+        let current: Option<Vec<u8>> = match txn.open_table(tdef) {
+            Ok(t) => t
+                .get(op.key.as_str())
+                .map_err(read_err)?
+                .map(|v| v.value().to_vec()),
+            Err(redb::TableError::TableDoesNotExist(_)) => None,
+            Err(e) => return Err(read_err(e)),
+        };
+        if current.as_deref() != op.expected.as_deref() {
+            failed_indices.push(idx as u32);
+        }
+    }
+
+    if !failed_indices.is_empty() {
+        // Abort: drop the txn without commit. No partial state changes.
+        // `last_applied` still advances so the log entry isn't retried.
+        drop(txn);
+        let commit_txn = db.begin_write().map_err(write_err)?;
+        let mut s_state = state.clone();
+        s_state.last_applied = Some(log_id);
+        *state = s_state;
+        commit_txn.commit().map_err(write_err)?;
+        // Only persist `last_applied` here so follower replay sees the
+        // same committed position. The failed indices go back to the
+        // client so they can refresh and retry.
+        return Ok(MetaResponse::MultiCasConflict { failed_indices });
+    }
+
+    // Pass 2: apply every write/delete in the same txn.
+    for op in ops {
+        let name = cas_table_name(&op.table);
+        let tdef: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new(name);
+        let mut t = txn.open_table(tdef).map_err(write_err)?;
+        match &op.new_value {
+            Some(bytes) => {
+                t.insert(op.key.as_str(), bytes.as_slice())
+                    .map_err(write_err)?;
+            }
+            None => {
+                t.remove(op.key.as_str()).map_err(write_err)?;
+            }
+        }
+    }
+
+    txn.commit().map_err(write_err)?;
+    state.last_applied = Some(log_id);
+    Ok(MetaResponse::MultiCasOk)
+}
+
+/// Map a [`CasTable`] tag to the redb table name used by the rest of the
+/// meta store. Stays in lock-step with `tables.rs` — if you add a new
+/// long-lived table, add a `CasTable` variant here too.
+fn cas_table_name(t: &CasTable) -> &str {
+    match t {
+        CasTable::Buckets => "buckets",
+        CasTable::BucketPolicies => "bucket_policies",
+        CasTable::IcebergNamespaces => "iceberg_namespaces",
+        CasTable::IcebergTables => "iceberg_tables",
+        CasTable::DeltaShares => "delta_shares",
+        CasTable::DeltaTables => "delta_tables",
+        CasTable::DeltaRecipients => "delta_recipients",
+        CasTable::Config => "config",
+        CasTable::Pools => "pools",
+        CasTable::Tenants => "tenants",
+        CasTable::IamPolicies => "iam_policies",
+        CasTable::Volumes => "volumes",
+        CasTable::Snapshots => "snapshots",
+        CasTable::Users => "users",
+        CasTable::Groups => "groups",
+        CasTable::Named(n) => n,
     }
 }
 
@@ -646,6 +758,138 @@ mod tests {
 
         let r = s.apply_to_state_machine(&[del]).await.unwrap();
         assert!(matches!(r[0], MetaResponse::ConfigDeleted { existed: true }));
+    }
+
+    #[tokio::test]
+    async fn multi_cas_all_ok() {
+        let (_d, mut s) = storage();
+        // Seed: prior iceberg table row.
+        let seed = normal_entry(
+            1,
+            MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergTables,
+                    key: "ns/tbl".into(),
+                    expected: None,
+                    new_value: Some(b"v1".to_vec()),
+                }],
+                requested_by: "seed".into(),
+            },
+        );
+        let r = s.apply_to_state_machine(&[seed]).await.unwrap();
+        assert!(matches!(r[0], MetaResponse::MultiCasOk));
+
+        // Cross-table atomic update: rewrite the iceberg row AND
+        // insert a bucket-policy row in one shot.
+        let txn = normal_entry(
+            2,
+            MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: "ns/tbl".into(),
+                        expected: Some(b"v1".to_vec()),
+                        new_value: Some(b"v2".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::BucketPolicies,
+                        key: "mybucket".into(),
+                        expected: None,
+                        new_value: Some(b"policy-json".to_vec()),
+                    },
+                ],
+                requested_by: "txn".into(),
+            },
+        );
+        let r = s.apply_to_state_machine(&[txn]).await.unwrap();
+        assert!(matches!(r[0], MetaResponse::MultiCasOk));
+    }
+
+    #[tokio::test]
+    async fn multi_cas_conflict_aborts_all() {
+        let (_d, mut s) = storage();
+        // Seed a row at v1.
+        let seed = normal_entry(
+            1,
+            MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergTables,
+                    key: "ns/a".into(),
+                    expected: None,
+                    new_value: Some(b"v1".to_vec()),
+                }],
+                requested_by: "seed".into(),
+            },
+        );
+        s.apply_to_state_machine(&[seed]).await.unwrap();
+
+        // Attempt cross-table update where op[1]'s expected is wrong.
+        // Op[0] would succeed in isolation; with MultiCas, the whole
+        // command must abort and no writes land.
+        let bad = normal_entry(
+            2,
+            MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: "ns/a".into(),
+                        expected: Some(b"v1".to_vec()),
+                        new_value: Some(b"v2".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::BucketPolicies,
+                        key: "mybucket".into(),
+                        expected: Some(b"not-there".to_vec()), // wrong
+                        new_value: Some(b"policy-json".to_vec()),
+                    },
+                ],
+                requested_by: "txn".into(),
+            },
+        );
+        let r = s.apply_to_state_machine(&[bad]).await.unwrap();
+        match &r[0] {
+            MetaResponse::MultiCasConflict { failed_indices } => {
+                assert_eq!(failed_indices, &vec![1]);
+            }
+            other => panic!("expected MultiCasConflict, got {other:?}"),
+        }
+
+        // Confirm op[0] was NOT applied — row is still v1, not v2.
+        let txn = s.db.begin_read().unwrap();
+        let t = txn
+            .open_table(redb::TableDefinition::<&str, &[u8]>::new("iceberg_tables"))
+            .unwrap();
+        let v = t.get("ns/a").unwrap().unwrap().value().to_vec();
+        assert_eq!(v, b"v1");
+
+        // And that `last_applied` still advanced — so the conflict entry
+        // isn't retried on leader restart.
+        let (last, _) = s.last_applied_state().await.unwrap();
+        assert_eq!(last.unwrap().index, 2);
+    }
+
+    #[tokio::test]
+    async fn multi_cas_rejects_oversized_batch() {
+        let (_d, mut s) = storage();
+        let ops: Vec<CasOp> = (0..300)
+            .map(|i| CasOp {
+                table: CasTable::Config,
+                key: format!("k{i}"),
+                expected: None,
+                new_value: Some(vec![0u8; 8]),
+            })
+            .collect();
+        let big = normal_entry(
+            1,
+            MetaCommand::MultiCas {
+                ops,
+                requested_by: "bulk".into(),
+            },
+        );
+        // Too large → apply returns the underlying storage error; the raft
+        // runtime surfaces that to the caller as a propose failure.
+        let err = s.apply_to_state_machine(&[big]).await.err();
+        assert!(err.is_some(), "oversized MultiCas should fail apply");
     }
 
     #[tokio::test]
