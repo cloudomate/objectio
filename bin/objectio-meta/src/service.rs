@@ -680,54 +680,59 @@ impl MetaService {
 
     /// Compute a CRUSH replacement for a single shard at `position` in
     /// the placement set for `object_id`, excluding the `exclude` node
-    /// (typically the draining OSD). Returns the node_id of the target.
-    /// Falls back to `None` if CRUSH can't find an alternative (rare;
-    /// happens when the cluster has too few eligible OSDs — in which
-    /// case the migrator logs and skips this shard).
+    /// (typically the draining / current-owner OSD). Only returns
+    /// candidates that are currently **registered** on this meta —
+    /// a stale topology entry for an unregistered node is skipped
+    /// rather than returned, so the caller can rely on
+    /// `osd_address_by_id(target)` succeeding.
+    ///
+    /// Returns `None` if CRUSH can't find a valid alternative (too few
+    /// eligible OSDs, or every CRUSH-picked node is unregistered /
+    /// the excluded one). Caller logs and retries next sweep.
     pub fn pick_migration_target(
         &self,
         object_id: &[u8; 16],
         position: u32,
         exclude: &[u8; 16],
     ) -> Option<[u8; 16]> {
-        use objectio_placement::ShardRole;
         use objectio_placement::crush2::PlacementTemplate;
 
-        // Use the default EC template — migration reuses the object's
-        // existing k/m. When we have per-object storage classes in Phase
-        // 4, this can look up the object's class instead.
         let template =
             PlacementTemplate::mds(self.default_ec_k as u8, self.default_ec_m as u8);
 
         let crush = self.crush.read();
-        // ObjectId is a newtype around Uuid — rebuild from the raw 16
-        // bytes via uuid::from_bytes.
         let obj_id =
             objectio_common::ObjectId::from_uuid(uuid::Uuid::from_bytes(*object_id));
         let placements = crush.select_placement(&obj_id, &template);
         drop(crush);
 
-        // Active_nodes() inside CRUSH already filters Draining and
-        // Decommissioning out, so the returned placements shouldn't
-        // include the excluded node — but double-check just in case of
-        // a stale topology read race.
+        let registered: std::collections::HashSet<[u8; 16]> = self
+            .osd_nodes
+            .read()
+            .iter()
+            .map(|n| n.node_id)
+            .collect();
+
+        let eligible = |cand: &[u8; 16]| cand != exclude && registered.contains(cand);
+
+        // Prefer the CRUSH pick for the exact stripe position. This
+        // preserves the intended role (Data vs Parity) and keeps
+        // placement deterministic for the other shards in the stripe.
         for p in &placements {
-            if p.position as u32 == position
-                && p.role == ShardRole::Data || p.role == ShardRole::LocalParity
-                || p.role == ShardRole::GlobalParity
-            {
+            if p.position as u32 == position {
                 let cand = *p.node_id.as_bytes();
-                if &cand != exclude {
+                if eligible(&cand) {
                     return Some(cand);
                 }
             }
         }
-        // If no position-exact match (different EC template?), return
-        // any CRUSH-eligible node that isn't excluded.
+        // Fallback: any CRUSH-eligible node in the returned set that
+        // isn't excluded. Role becomes a soft hint — better than
+        // failing the migration outright.
         placements
             .iter()
             .map(|p| *p.node_id.as_bytes())
-            .find(|id| id != exclude)
+            .find(eligible)
     }
 
     /// Invoke `SetOsdAdminState` from internal code (background tasks,
