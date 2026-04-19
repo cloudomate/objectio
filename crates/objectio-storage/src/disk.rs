@@ -94,6 +94,57 @@ impl DiskManager {
         self.superblock.read().disk_id
     }
 
+    /// Cluster UUID this disk belongs to, or `Uuid::nil()` if the disk
+    /// predates the identity fields / hasn't been claimed yet.
+    pub fn cluster_uuid(&self) -> uuid::Uuid {
+        self.superblock.read().cluster_uuid
+    }
+
+    /// Stable OSD node_id this disk is owned by, or all-zero if the
+    /// disk hasn't been claimed by an OSD yet. The OSD uses this on
+    /// boot to recover its identity across pod restarts.
+    pub fn osd_node_id(&self) -> [u8; 16] {
+        self.superblock.read().osd_node_id
+    }
+
+    /// Does this disk's superblock contain a persisted OSD identity?
+    /// `false` for pre-upgrade disks (both fields all-zero) — the OSD
+    /// will write one on the next mount.
+    pub fn has_identity(&self) -> bool {
+        self.superblock.read().has_identity()
+    }
+
+    /// Write cluster_uuid + osd_node_id into the superblock's reserved
+    /// region and persist. Idempotent — safe to call even if the disk
+    /// already has a matching identity; errors out if the existing
+    /// cluster_uuid disagrees (cross-cluster guard).
+    pub fn set_identity(
+        &self,
+        cluster_uuid: uuid::Uuid,
+        osd_node_id: [u8; 16],
+    ) -> Result<()> {
+        let mut sb = self.superblock.write();
+        if sb.has_identity()
+            && sb.cluster_uuid != cluster_uuid
+            && !cluster_uuid.is_nil()
+        {
+            return Err(Error::Storage(format!(
+                "refusing to rewrite disk identity: on-disk cluster_uuid={} \
+                 does not match caller's {}",
+                sb.cluster_uuid, cluster_uuid
+            )));
+        }
+        sb.set_identity(cluster_uuid, osd_node_id);
+        let sb_bytes = sb.to_bytes();
+        drop(sb);
+
+        let mut buf = AlignedBuffer::new(SUPERBLOCK_SIZE as usize);
+        buf.copy_from(&sb_bytes);
+        self.file.write_at(0, buf.as_slice())?;
+        self.file.sync()?;
+        Ok(())
+    }
+
     /// Get the disk path
     pub fn path(&self) -> &str {
         self.file.path()

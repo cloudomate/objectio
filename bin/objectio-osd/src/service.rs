@@ -262,6 +262,104 @@ pub struct OsdService {
     grpc_metrics: Arc<GrpcMetrics>,
 }
 
+/// Resolve the OSD's stable node_id + cluster_uuid from (in priority order):
+///
+/// 1. **Any opened disk's superblock** that already carries an identity.
+///    If two disks disagree on `osd_node_id` or `cluster_uuid`, reject
+///    the whole mount — the operator mixed disks from different OSDs
+///    or different clusters, which would silently corrupt metadata.
+/// 2. **`data_dir/node_id`** — the state-PVC fallback from the L1
+///    commit. Used when disks haven't yet been claimed (pre-upgrade
+///    or brand-new disks).
+/// 3. **Fresh random UUID** — only on the very first boot of a new
+///    OSD. Caller writes it back to (1) and (2) so subsequent boots
+///    are idempotent.
+///
+/// Returns `(node_id, cluster_uuid, from_disk)`. `from_disk = false`
+/// tells the caller to persist the identity to every disk (the
+/// Ceph/Rook-style activation flow).
+fn resolve_node_identity(
+    disks: &[objectio_storage::DiskManager],
+    id_path: &std::path::Path,
+) -> Result<([u8; 16], Uuid, bool), String> {
+    // Check every disk first — even one claimed disk wins over the
+    // state-PVC fallback, and mixed identities must be rejected.
+    let mut claimed: Option<([u8; 16], Uuid)> = None;
+    for disk in disks {
+        if disk.has_identity() {
+            let id = disk.osd_node_id();
+            let cuid = disk.cluster_uuid();
+            match claimed {
+                None => claimed = Some((id, cuid)),
+                Some((prev_id, prev_cuid)) => {
+                    if prev_id != id || prev_cuid != cuid {
+                        return Err(format!(
+                            "disks disagree on identity — first saw \
+                             node_id={} cluster_uuid={}, now disk '{}' has \
+                             node_id={} cluster_uuid={}. Refusing to mount; \
+                             resolve by removing the mis-claimed disk.",
+                            hex::encode(prev_id),
+                            prev_cuid,
+                            disk.path(),
+                            hex::encode(id),
+                            cuid,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((id, cuid)) = claimed {
+        info!(
+            "Loaded OSD identity from disk superblock: node_id={} cluster_uuid={}",
+            hex::encode(id),
+            cuid
+        );
+        return Ok((id, cuid, true));
+    }
+
+    // No disk has an identity yet — fall back to the state-PVC file.
+    if let Ok(bytes) = std::fs::read(id_path)
+        && bytes.len() == 16
+    {
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&bytes);
+        info!(
+            "Loaded OSD node_id from state-PVC file {}: {}",
+            id_path.display(),
+            hex::encode(id)
+        );
+        // cluster_uuid stays nil here — Meta will set it on first
+        // registration once the cluster-UUID RPC lands (task #145).
+        return Ok((id, Uuid::nil(), false));
+    }
+
+    // True first boot.
+    if let Some(parent) = id_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return Err(format!(
+            "Failed to create OSD data directory {}: {e}",
+            parent.display()
+        ));
+    }
+    let id = *Uuid::new_v4().as_bytes();
+    if let Err(e) = std::fs::write(id_path, id) {
+        warn!(
+            "Generated OSD node_id but failed to persist to {}: {e} — \
+             restarts will re-generate and orphan data",
+            id_path.display()
+        );
+    } else {
+        info!(
+            "Generated new OSD node_id at {}: {}",
+            id_path.display(),
+            hex::encode(id)
+        );
+    }
+    Ok((id, Uuid::nil(), false))
+}
+
 impl OsdService {
     /// Create a new OSD service with the given disks
     ///
@@ -273,54 +371,15 @@ impl OsdService {
         block_size: u32,
         data_dir: PathBuf,
     ) -> Result<Self, String> {
-        // Node identity: Ceph/Rook pattern is "disk is source of truth".
-        // We follow a three-level cascade:
-        //   1. Any data disk's superblock — if one has a non-nil osd_node_id,
-        //      use it (and reject the mount if disks disagree).
-        //   2. data_dir/node_id — state PVC fallback for clusters running
-        //      without disk-level identity (pre-migration, dev setups).
-        //   3. Fresh uuid — only on true first boot; persisted to the
-        //      state PVC immediately so a restart finds it.
-        //
-        // Superblock wiring lives in a follow-up patch; this commit lands
-        // the state-PVC fallback so pod restarts stop orphaning shards.
-        let id_path = data_dir.join("node_id");
-        let node_id: [u8; 16] = match std::fs::read(&id_path) {
-            Ok(bytes) if bytes.len() == 16 => {
-                let mut id = [0u8; 16];
-                id.copy_from_slice(&bytes);
-                info!(
-                    "Loaded persistent OSD node_id from {}: {}",
-                    id_path.display(),
-                    hex::encode(id)
-                );
-                id
-            }
-            _ => {
-                // First boot (or corrupt file) — generate and persist.
-                if let Err(e) = std::fs::create_dir_all(&data_dir) {
-                    return Err(format!(
-                        "Failed to create OSD data directory {}: {e}",
-                        data_dir.display()
-                    ));
-                }
-                let id = *Uuid::new_v4().as_bytes();
-                if let Err(e) = std::fs::write(&id_path, id) {
-                    warn!(
-                        "Generated OSD node_id but failed to persist to {}: {e} — \
-                         restarts will orphan data",
-                        id_path.display()
-                    );
-                } else {
-                    info!(
-                        "Generated persistent OSD node_id at {}: {}",
-                        id_path.display(),
-                        hex::encode(id)
-                    );
-                }
-                id
-            }
-        };
+        // Node identity: Ceph/Rook pattern — the disk is the source of
+        // truth. Three-level cascade:
+        //   1. Existing disk's superblock with a non-nil osd_node_id.
+        //      All claimed disks must agree; mixed identities = refuse.
+        //   2. data_dir/node_id file on the state PVC (fallback for
+        //      pre-identity disks or dev setups).
+        //   3. Fresh UUID on genuine first boot; persisted to (1) by
+        //      writing every disk's superblock, and to (2) as a
+        //      fallback.
         let mut disks = Vec::new();
         let mut disk_ids = Vec::new();
 
@@ -364,6 +423,34 @@ impl OsdService {
 
         if disks.is_empty() {
             return Err("No disks configured".into());
+        }
+
+        // Identity resolution: prefer any disk's superblock, then
+        // state-PVC fallback, then generate fresh.
+        let id_path = data_dir.join("node_id");
+        let (node_id, cluster_uuid, from_disk) = resolve_node_identity(&disks, &id_path)?;
+
+        // If the identity came from the state PVC (or was freshly
+        // generated), write it to every disk's superblock so the next
+        // restart has the real Ceph/Rook pattern (disk = truth). Disks
+        // that already matched are no-ops.
+        if !from_disk {
+            for (i, disk) in disks.iter().enumerate() {
+                if let Err(e) = disk.set_identity(cluster_uuid, node_id) {
+                    warn!(
+                        "Failed to write identity to disk {}: {e} — next \
+                         restart will fall back to state-PVC file",
+                        disk_paths[i]
+                    );
+                } else {
+                    info!(
+                        "Persisted OSD identity to disk {} (cluster_uuid={}, node_id={})",
+                        disk_paths[i],
+                        cluster_uuid,
+                        hex::encode(node_id)
+                    );
+                }
+            }
         }
 
         // Initialize metadata store for persistent object metadata
