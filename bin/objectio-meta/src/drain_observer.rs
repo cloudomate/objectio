@@ -785,12 +785,26 @@ async fn migrate_rebalance_one(
         return Ok(()); // No-op
     }
 
-    let source_addr = meta
-        .osd_address_by_id(current_owner)
-        .ok_or_else(|| anyhow::anyhow!("current owner not registered"))?;
-    let target_addr = meta
-        .osd_address_by_id(&target_node)
-        .ok_or_else(|| anyhow::anyhow!("target not registered"))?;
+    // Source / target must be currently registered for the migrate
+    // to mean anything. If either lookup fails, the topology is in
+    // flux (pod just rolled, meta just restarted) — skip this shard
+    // and let the next sweep try again. Report as a transient debug
+    // rather than a rebalancer error so the UI banner doesn't get
+    // stuck red on a routine restart window.
+    let Some(source_addr) = meta.osd_address_by_id(current_owner) else {
+        tracing::debug!(
+            "rebalance: current owner {} not registered yet; will retry next sweep",
+            hex::encode(current_owner)
+        );
+        return Ok(());
+    };
+    let Some(target_addr) = meta.osd_address_by_id(&target_node) else {
+        tracing::debug!(
+            "rebalance: target {} not registered yet; will retry next sweep",
+            hex::encode(target_node)
+        );
+        return Ok(());
+    };
 
     let shard_id = ShardId {
         object_id: object_id.to_vec(),
