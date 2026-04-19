@@ -250,6 +250,10 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    // Wrap in Arc early so the registration task (which needs to stamp
+    // cluster_uuid into disk superblocks on the response) can share
+    // it with the gRPC server and the metrics state.
+    let osd_service = Arc::new(osd_service);
 
     let node_id_bytes = *osd_service.node_id();
     let node_id = hex::encode(node_id_bytes);
@@ -309,6 +313,7 @@ async fn main() -> Result<()> {
     let advertise_addr_clone = advertise_addr.clone();
     let failure_domain_for_reg = failure_domain.clone();
     let node_name_for_reg = node_name.clone();
+    let osd_service_for_reg = osd_service.clone();
 
     // Spawn registration task with retry. Meta may be coming up in
     // parallel (rolling restart, k8s StatefulSet) so a transport error on
@@ -326,6 +331,7 @@ async fn main() -> Result<()> {
                 &failure_domain_for_reg,
                 node_name_for_reg.as_deref(),
                 weight,
+                osd_service_for_reg.as_ref(),
             )
             .await
             {
@@ -343,9 +349,6 @@ async fn main() -> Result<()> {
             }
         }
     });
-
-    // Wrap service in Arc for sharing
-    let osd_service = Arc::new(osd_service);
 
     // Create SMART monitor
     let smart_monitor = Arc::new(SmartMonitor::new(&node_id, Duration::from_secs(300)));
@@ -440,7 +443,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Register this OSD with the metadata service
+/// Register this OSD with the metadata service. On success, stamps
+/// the returned cluster_uuid into every disk's superblock so the
+/// cross-cluster guard (`DiskManager::set_identity`) can reject
+/// disks that try to join a different cluster later.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn register_with_meta(
     meta_endpoint: &str,
@@ -451,6 +457,7 @@ async fn register_with_meta(
     failure_domain: &FailureDomainConfig,
     node_name: Option<&str>,
     weight: f64,
+    osd_service: &OsdService,
 ) -> Result<(), String> {
     info!("Registering OSD with metadata service at {}", meta_endpoint);
 
@@ -480,12 +487,29 @@ async fn register_with_meta(
         .await
         .map_err(|e| format!("Failed to register OSD: {}", e))?;
 
+    let resp = response.into_inner();
+
+    // Stamp the cluster_uuid into each disk's superblock. Empty
+    // response means meta is pre-3.1 or a follower that couldn't
+    // write — leave superblocks alone in that case.
+    if resp.cluster_uuid.len() == 16 {
+        let mut cuid_bytes = [0u8; 16];
+        cuid_bytes.copy_from_slice(&resp.cluster_uuid);
+        let cluster_uuid = uuid::Uuid::from_bytes(cuid_bytes);
+        if let Err(e) = osd_service.stamp_cluster_uuid(cluster_uuid) {
+            warn!(
+                "cluster_uuid stamping failed: {e} — \
+                 cross-cluster guard won't trigger on this OSD until next register"
+            );
+        }
+    }
+
     info!(
         "OSD {} with {} disks ready to serve at {} (topology v{})",
         hex::encode(&node_id[..4]),
         disk_ids.len(),
         address,
-        response.into_inner().topology_version
+        resp.topology_version
     );
 
     Ok(())

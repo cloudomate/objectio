@@ -1102,6 +1102,80 @@ impl MetaService {
         self.config_str(key, "").parse::<T>().unwrap_or(default)
     }
 
+    /// Stable cluster UUID — lazily generated on first request and
+    /// persisted via Raft (config key `cluster/uuid`). Handed back to
+    /// every OSD on RegisterOsd so they can stamp their disk
+    /// superblocks with it; a disk whose on-disk cluster_uuid differs
+    /// from this value is refused by `DiskManager::set_identity`,
+    /// preventing an operator from accidentally mounting a disk from a
+    /// different cluster.
+    pub async fn cluster_uuid(&self) -> Vec<u8> {
+        const KEY: &str = "cluster/uuid";
+        // Fast path — in-memory config cache.
+        {
+            let cfg = self.config.read();
+            if let Some(entry) = cfg.get(KEY)
+                && entry.value.len() == 16
+            {
+                return entry.value.clone();
+            }
+        }
+
+        // Slow path — not yet set. Generate a fresh UUID and persist
+        // via Raft so every replica agrees. Only the leader actually
+        // writes; followers wait for the apply-listener to populate
+        // the cache and then re-read.
+        let Some(raft) = self.raft_handle() else {
+            // No Raft (single-process dev mode) — generate but don't
+            // persist. On next boot we'll regenerate, which is only a
+            // problem if an OSD is simultaneously claiming disks.
+            warn!("cluster_uuid requested before Raft handle is set — returning non-persistent value");
+            return Uuid::new_v4().as_bytes().to_vec();
+        };
+        if !self.is_raft_leader() {
+            // Follower can't write — fall back to returning a nil
+            // marker so the OSD skips stamping this round.
+            return Vec::new();
+        }
+
+        let fresh = Uuid::new_v4();
+        let bytes = fresh.as_bytes().to_vec();
+        use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+        let cmd = MetaCommand::MultiCas {
+            ops: vec![CasOp {
+                table: CasTable::Config,
+                key: KEY.to_string(),
+                expected: None,
+                new_value: Some(bytes.clone()),
+            }],
+            requested_by: "cluster-uuid-init".into(),
+        };
+        match raft.client_write(cmd).await {
+            Ok(r) => match r.data {
+                MetaResponse::MultiCasOk => {
+                    info!("Generated and persisted cluster/uuid: {fresh}");
+                    bytes
+                }
+                MetaResponse::MultiCasConflict { .. } => {
+                    // Another caller won the race — re-read the cache.
+                    self.config
+                        .read()
+                        .get(KEY)
+                        .map(|e| e.value.clone())
+                        .unwrap_or_default()
+                }
+                other => {
+                    warn!("cluster_uuid generation got unexpected raft response: {other:?}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                warn!("Failed to persist cluster_uuid: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Is the rebalancer currently paused via the `rebalance/paused`
     /// config key? Checked on every reconciler sweep so paused state
     /// stays hot-swappable without restarting the process.
@@ -3461,6 +3535,12 @@ impl MetadataService for MetaService {
             return Err(Status::invalid_argument("node_id must be 16 bytes"));
         }
 
+        // Resolve cluster_uuid upfront — any resolution that goes to
+        // Raft needs to finish before we grab the osd_nodes write lock,
+        // otherwise the parking_lot guard would be held across an
+        // await and poison the future's Send bound.
+        let cluster_uuid = self.cluster_uuid().await;
+
         let mut node_id = [0u8; 16];
         node_id.copy_from_slice(&req.node_id);
 
@@ -3653,6 +3733,7 @@ impl MetadataService for MetaService {
         Ok(Response::new(RegisterOsdResponse {
             success: true,
             topology_version,
+            cluster_uuid,
         }))
     }
 

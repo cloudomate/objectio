@@ -691,6 +691,13 @@ message RegisterOsdRequest {
 message RegisterOsdResponse {
     bool success = 1;
     uint64 topology_version = 2;        // Current cluster topology version
+    // 16-byte UUID identifying this cluster. Meta lazily generates one
+    // on first need and persists it in the config store (`cluster/uuid`).
+    // OSDs write it into each disk's superblock so a disk cannot be
+    // accidentally mounted by a different cluster — matches Ceph's
+    // FSID guard. Empty on pre-3.1 meta nodes; OSDs treat that as
+    // "leave existing superblock alone".
+    bytes cluster_uuid = 3;
 }
 
 // Operator-declared state for an OSD. Serialised as a string so adding

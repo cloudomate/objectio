@@ -529,6 +529,32 @@ impl OsdService {
         &self.node_id
     }
 
+    /// Stamp the cluster UUID into each disk's superblock. Called by
+    /// the registration path once Meta returns a cluster_uuid. Idempotent
+    /// — disks that already have the matching cluster_uuid are no-ops,
+    /// disks with a different cluster_uuid refuse the write and surface
+    /// the error (cross-cluster guard).
+    pub fn stamp_cluster_uuid(&self, cluster_uuid: Uuid) -> std::result::Result<(), String> {
+        if cluster_uuid.is_nil() {
+            return Ok(());
+        }
+        for disk in &self.disks {
+            if disk.cluster_uuid() == cluster_uuid
+                && disk.osd_node_id() == self.node_id
+            {
+                continue; // already stamped, nothing to do
+            }
+            disk.set_identity(cluster_uuid, self.node_id)
+                .map_err(|e| format!("disk {}: {e}", disk.path()))?;
+            info!(
+                "Stamped cluster_uuid {} on disk {}",
+                cluster_uuid,
+                disk.path()
+            );
+        }
+        Ok(())
+    }
+
     /// Get disk IDs
     pub fn disk_ids(&self) -> &[[u8; 16]] {
         &self.disk_ids
