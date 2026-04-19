@@ -142,19 +142,14 @@ pub fn spawn(meta: Arc<MetaService>) {
 async fn run(meta: Arc<MetaService>) {
     let mut ticker = interval(SWEEP_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Cluster-wide scan cursor for the rebalancer — one per OSD,
-    // advanced page by page across sweeps so a large cluster doesn't
-    // scan the full meta store on every tick. Lost on restart; the
-    // next leader starts from the top (safe, just repeats work).
-    let mut rebalance_cursors: std::collections::HashMap<[u8; 16], String> =
-        std::collections::HashMap::new();
+    // CRUSH-drift per-shard rebalancer is disabled: the PG balancer
+    // owns placement decisions now, and ObjectIO is greenfield — no
+    // existing-data migration is required. The drain (evacuate-on-
+    // admin-state=Draining) sweep stays.
     loop {
         ticker.tick().await;
         if let Err(e) = sweep_once(&meta).await {
             warn!("drain observer sweep failed: {e}");
-        }
-        if let Err(e) = rebalance_sweep(&meta, &mut rebalance_cursors).await {
-            warn!("rebalance sweep failed: {e}");
         }
     }
 }
