@@ -798,6 +798,73 @@ async fn migrate_rebalance_one(
         return Ok(()); // No-op — caller shouldn't have decided this was drift.
     }
 
+    // Cheap fresh-meta check BEFORE any data IO. If a previous sweep
+    // already migrated this shard, we'd otherwise re-copy bytes
+    // uselessly every tick. Also: if the source still has the
+    // orphaned shard but meta already points elsewhere, we need to
+    // delete the source copy to let shard_count converge.
+    let owner_ch = open_channel(current_owner_meta_addr).await?;
+    let mut owner = StorageServiceClient::new(owner_ch);
+    let Some(fresh_now) = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        owner.get_object_meta(GetObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            version_id: String::new(),
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("get_object_meta timeout"))??
+    .into_inner()
+    .object
+    else {
+        return Err(anyhow::anyhow!(
+            "owner no longer has ObjectMeta {}/{}",
+            object.bucket,
+            object.key
+        ));
+    };
+
+    let actual_node_in_fresh = fresh_now
+        .stripes
+        .iter()
+        .find(|s| s.stripe_id == stripe_id)
+        .and_then(|s| s.shards.iter().find(|sh| sh.position == position))
+        .map(|sh| sh.node_id.clone());
+
+    // Case: meta already points at target. Only action needed is to
+    // clean up the orphan shard on the source so shard_count can
+    // converge. Done — return Err so caller doesn't log/count.
+    if actual_node_in_fresh.as_deref() == Some(target_node.as_slice()) {
+        let shard_id = ShardId {
+            object_id: object_id.to_vec(),
+            stripe_id,
+            position,
+        };
+        if let Some(source_addr) = meta.osd_address_by_id(current_owner) {
+            if let Ok(source_ch) = open_channel(&source_addr).await {
+                let mut src = StorageServiceClient::new(source_ch);
+                let _ = tokio::time::timeout(
+                    PER_OSD_TIMEOUT,
+                    src.delete_shard(
+                        objectio_proto::storage::DeleteShardRequest {
+                            shard_id: Some(shard_id),
+                        },
+                    ),
+                )
+                .await;
+            }
+        }
+        return Err(anyhow::anyhow!("already on target (stale scan)"));
+    }
+
+    // Case: meta points somewhere else entirely (third owner). Skip.
+    if actual_node_in_fresh.as_deref() != Some(current_owner.as_slice()) {
+        return Err(anyhow::anyhow!(
+            "third-party owner for stripe={stripe_id} pos={position}"
+        ));
+    }
+
     // Source / target must be currently registered for the migrate
     // to mean anything. If either lookup fails, the topology is in
     // flux (pod just rolled, meta just restarted) — skip this shard
@@ -858,36 +925,20 @@ async fn migrate_rebalance_one(
     .map_err(|_| anyhow::anyhow!("write_shard timeout"))??
     .into_inner();
 
-    // 3. Rewrite the ObjectMeta on the owner OSD (the one holding the
-    //    primary-stored meta — same OSD we listed it from).
-    let owner_ch = open_channel(current_owner_meta_addr).await?;
-    let mut owner = StorageServiceClient::new(owner_ch);
-    let Some(mut fresh) = tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        owner.get_object_meta(GetObjectMetaRequest {
-            bucket: object.bucket.clone(),
-            key: object.key.clone(),
-            version_id: String::new(),
-        }),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("get_object_meta timeout"))??
-    .into_inner()
-    .object
-    else {
-        return Err(anyhow::anyhow!(
-            "owner no longer has ObjectMeta {}/{}",
-            object.bucket,
-            object.key
-        ));
-    };
+    // 3. Reuse `fresh_now` we fetched up-front for the "already done"
+    //    cheap check — it's the same ObjectMeta we'd refetch here
+    //    (same owner OSD, same seconds-old window), and avoids a
+    //    second round-trip per migration.
+    let mut fresh = fresh_now;
 
+    let mut updated = false;
     for stripe in &mut fresh.stripes {
         if stripe.stripe_id != stripe_id {
             continue;
         }
         for shard in &mut stripe.shards {
-            if shard.position == position && shard.node_id == current_owner.as_slice()
+            if shard.position == position
+                && shard.node_id == current_owner.as_slice()
             {
                 let target_disk = write_resp
                     .location
@@ -902,8 +953,17 @@ async fn migrate_rebalance_one(
                     shard_type: shard.shard_type,
                     local_group: shard.local_group,
                 };
+                updated = true;
             }
         }
+    }
+
+    if !updated {
+        // Neither current nor target — some third node took over
+        // between our list and our get. Skip; next sweep sees truth.
+        return Err(anyhow::anyhow!(
+            "third-party ownership on stripe={stripe_id} pos={position}"
+        ));
     }
 
     tokio::time::timeout(
