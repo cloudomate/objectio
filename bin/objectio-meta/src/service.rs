@@ -891,9 +891,13 @@ impl MetaService {
             .version
             .wrapping_mul(1_000_003)
             .wrapping_add(u64::from(pool.pg_count));
-        let cs_pool = CopysetPool::build(&topology, fd_level, copy_count, 10, seed).map_err(
-            |e| Status::failed_precondition(format!("copyset pool build failed: {e}")),
-        )?;
+        // scatter_width matches the balancer's knob so pre-alloc and
+        // later rebalance see copyset pools of equivalent shape.
+        let scatter_width = self.config_parsed::<usize>("balancer/scatter_width", 10).max(1);
+        let cs_pool = CopysetPool::build(&topology, fd_level, copy_count, scatter_width, seed)
+            .map_err(|e| {
+                Status::failed_precondition(format!("copyset pool build failed: {e}"))
+            })?;
         if cs_pool.sets.is_empty() {
             return Err(Status::failed_precondition(
                 "no feasible copysets for current topology",
@@ -1069,6 +1073,25 @@ impl MetaService {
     ) {
         let mut p = self.rebalance_progress.write();
         f(&mut p);
+    }
+
+    /// Fetch a config value as a string, falling back to `default` if
+    /// the key is absent, un-UTF-8, or the stored bytes are empty.
+    /// Used by background tasks (balancer, drain observer) to hot-read
+    /// tuning knobs without restarting the process.
+    pub fn config_str(&self, key: &str, default: &str) -> String {
+        let cfg = self.config.read();
+        cfg.get(key)
+            .and_then(|e| std::str::from_utf8(&e.value).ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| default.to_string(), str::to_string)
+    }
+
+    /// Typed config read — `FromStr` into the target type, falling
+    /// back to `default` on any error (missing key, parse failure).
+    pub fn config_parsed<T: std::str::FromStr>(&self, key: &str, default: T) -> T {
+        self.config_str(key, "").parse::<T>().unwrap_or(default)
     }
 
     /// Is the rebalancer currently paused via the `rebalance/paused`
