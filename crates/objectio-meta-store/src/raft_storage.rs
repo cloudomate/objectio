@@ -356,6 +356,7 @@ fn cas_table_name(t: &CasTable) -> &str {
         CasTable::Groups => "groups",
         CasTable::AccessKeys => "access_keys",
         CasTable::IcebergWarehouses => "iceberg_warehouses",
+        CasTable::PolicyAttachments => "policy_attachments",
         CasTable::Named(n) => n,
     }
 }

@@ -6638,8 +6638,7 @@ impl MetadataService for MetaService {
             return Err(Status::invalid_argument("Invalid JSON in policy document"));
         }
 
-        let mut map = self.iam_policies.write();
-        if map.contains_key(&name) {
+        if self.iam_policies.read().contains_key(&name) {
             return Err(Status::already_exists(format!(
                 "Policy '{}' already exists",
                 name
@@ -6652,10 +6651,39 @@ impl MetadataService for MetaService {
             created_at: now,
             updated_at: now,
         };
-        if let Some(store) = &self.store {
+        let bytes = policy.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IamPolicies,
+                    key: name.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "create-iam-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("policy already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_policy: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_iam_policy(&name, &policy.encode_to_vec());
         }
-        map.insert(name.clone(), policy.clone());
+
+        self.iam_policies
+            .write()
+            .insert(name.clone(), policy.clone());
         info!("Created IAM policy '{}'", name);
         Ok(Response::new(CreatePolicyResponse {
             policy: Some(policy),
@@ -6694,35 +6722,98 @@ impl MetadataService for MetaService {
         request: Request<DeletePolicyRequest>,
     ) -> Result<Response<DeletePolicyResponse>, Status> {
         let name = request.into_inner().name;
-        let removed = self.iam_policies.write().remove(&name).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_iam_policy(&name);
-            }
-            // Remove from all attachments
-            let mut attachments = self.policy_attachments.write();
-            let mut keys_to_update = Vec::new();
-            for (key, policies) in attachments.iter_mut() {
-                if policies.contains(&name) {
-                    policies.retain(|p| p != &name);
-                    keys_to_update.push((key.clone(), policies.clone()));
-                }
-            }
-            // Persist updated attachments
-            if let Some(store) = &self.store {
-                for (key, policies) in &keys_to_update {
-                    if policies.is_empty() {
-                        store.delete_policy_attachment(key);
+        // Snapshot current state: policy row + every attachment row that
+        // references this policy. The whole mutation lands as one atomic
+        // MultiCas — a crash mid-delete can't leave orphan attachments.
+        let (expected_policy_bytes, attachment_transitions) = {
+            let policies = self.iam_policies.read();
+            let Some(current) = policies.get(&name) else {
+                return Ok(Response::new(DeletePolicyResponse { success: false }));
+            };
+            let expected = current.encode_to_vec();
+            let mut transitions: Vec<(String, Vec<u8>, Option<Vec<u8>>, Vec<String>)> = Vec::new();
+            let atts = self.policy_attachments.read();
+            for (key, policy_names) in atts.iter() {
+                if policy_names.contains(&name) {
+                    let before = policy_names.clone();
+                    let after: Vec<String> = policy_names
+                        .iter()
+                        .filter(|p| *p != &name)
+                        .cloned()
+                        .collect();
+                    let old_bytes = before.join(",").into_bytes();
+                    let new_bytes = if after.is_empty() {
+                        None
                     } else {
-                        store.put_policy_attachment(key, &policies.join(","));
-                    }
+                        Some(after.join(",").into_bytes())
+                    };
+                    transitions.push((key.clone(), old_bytes, new_bytes, after));
                 }
             }
-            // Remove empty attachment entries
-            attachments.retain(|_, v| !v.is_empty());
-            info!("Deleted IAM policy '{}'", name);
+            (expected, transitions)
+        };
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let mut ops = Vec::with_capacity(1 + attachment_transitions.len());
+            ops.push(CasOp {
+                table: CasTable::IamPolicies,
+                key: name.clone(),
+                expected: Some(expected_policy_bytes),
+                new_value: None,
+            });
+            for (key, old, new, _) in &attachment_transitions {
+                ops.push(CasOp {
+                    table: CasTable::PolicyAttachments,
+                    key: key.clone(),
+                    expected: Some(old.clone()),
+                    new_value: new.clone(),
+                });
+            }
+            let cmd = MetaCommand::MultiCas {
+                ops,
+                requested_by: "delete-iam-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::aborted(format!(
+                            "policy or attachment changed mid-delete; retry (conflicts at ops {failed_indices:?})"
+                        )));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_policy: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_iam_policy(&name);
+            for (key, _, new, after) in &attachment_transitions {
+                if new.is_some() {
+                    store.put_policy_attachment(key, &after.join(","));
+                } else {
+                    store.delete_policy_attachment(key);
+                }
+            }
         }
-        Ok(Response::new(DeletePolicyResponse { success: removed }))
+
+        // Mirror into in-memory caches.
+        self.iam_policies.write().remove(&name);
+        {
+            let mut atts = self.policy_attachments.write();
+            for (key, _, _, after) in attachment_transitions {
+                if after.is_empty() {
+                    atts.remove(&key);
+                } else {
+                    atts.insert(key, after);
+                }
+            }
+        }
+        info!("Deleted IAM policy '{}'", name);
+        Ok(Response::new(DeletePolicyResponse { success: true }))
     }
 
     async fn attach_policy(
@@ -6750,15 +6841,58 @@ impl MetadataService for MetaService {
             ));
         };
 
-        let mut attachments = self.policy_attachments.write();
-        let policies = attachments.entry(key.clone()).or_default();
-        if !policies.contains(&policy_name) {
-            policies.push(policy_name.clone());
-            if let Some(store) = &self.store {
-                store.put_policy_attachment(&key, &policies.join(","));
+        // Snapshot current attachments under a read lock, compute the
+        // transition, then CAS. Idempotent: if the policy is already
+        // attached, no-op returns success without a Raft round-trip.
+        let (expected_bytes, new_policies_vec) = {
+            let atts = self.policy_attachments.read();
+            let current: Vec<String> = atts.get(&key).cloned().unwrap_or_default();
+            if current.contains(&policy_name) {
+                return Ok(Response::new(AttachPolicyResponse { success: true }));
             }
-            info!("Attached policy '{}' to '{}'", policy_name, key);
+            let old_bytes = if current.is_empty() {
+                None
+            } else {
+                Some(current.join(",").into_bytes())
+            };
+            let mut after = current;
+            after.push(policy_name.clone());
+            (old_bytes, after)
+        };
+        let new_bytes = new_policies_vec.join(",").into_bytes();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::PolicyAttachments,
+                    key: key.clone(),
+                    expected: expected_bytes,
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "attach-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("attachment changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for attach_policy: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_policy_attachment(&key, &new_policies_vec.join(","));
         }
+
+        self.policy_attachments
+            .write()
+            .insert(key.clone(), new_policies_vec);
+        info!("Attached policy '{}' to '{}'", policy_name, key);
         Ok(Response::new(AttachPolicyResponse { success: true }))
     }
 
@@ -6779,29 +6913,68 @@ impl MetadataService for MetaService {
             ));
         };
 
-        let mut attachments = self.policy_attachments.write();
-        let removed = if let Some(policies) = attachments.get_mut(&key) {
-            let before = policies.len();
-            policies.retain(|p| p != &policy_name);
-            let did_remove = policies.len() < before;
-            if did_remove {
-                if let Some(store) = &self.store {
-                    if policies.is_empty() {
-                        store.delete_policy_attachment(&key);
-                    } else {
-                        store.put_policy_attachment(&key, &policies.join(","));
-                    }
-                }
-                info!("Detached policy '{}' from '{}'", policy_name, key);
+        // Compute the transition under a read lock.
+        let (expected_bytes, new_after) = {
+            let atts = self.policy_attachments.read();
+            let Some(current) = atts.get(&key).cloned() else {
+                return Ok(Response::new(DetachPolicyResponse { success: false }));
+            };
+            if !current.contains(&policy_name) {
+                return Ok(Response::new(DetachPolicyResponse { success: false }));
             }
-            // Clean up empty entries
-            if policies.is_empty() {
-                attachments.remove(&key);
-            }
-            did_remove
-        } else {
-            false
+            let old_bytes = current.join(",").into_bytes();
+            let after: Vec<String> = current
+                .into_iter()
+                .filter(|p| p != &policy_name)
+                .collect();
+            (old_bytes, after)
         };
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let new_value = if new_after.is_empty() {
+                None
+            } else {
+                Some(new_after.join(",").into_bytes())
+            };
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::PolicyAttachments,
+                    key: key.clone(),
+                    expected: Some(expected_bytes),
+                    new_value,
+                }],
+                requested_by: "detach-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("attachment changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for detach_policy: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            if new_after.is_empty() {
+                store.delete_policy_attachment(&key);
+            } else {
+                store.put_policy_attachment(&key, &new_after.join(","));
+            }
+        }
+
+        let mut attachments = self.policy_attachments.write();
+        if new_after.is_empty() {
+            attachments.remove(&key);
+        } else {
+            attachments.insert(key.clone(), new_after);
+        }
+        info!("Detached policy '{}' from '{}'", policy_name, key);
+        let removed = true;
         Ok(Response::new(DetachPolicyResponse { success: removed }))
     }
 
