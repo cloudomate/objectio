@@ -1084,11 +1084,16 @@ function DrainProgressPanel({
   );
 }
 
-/// Single compact action on an OSD row: flips it to whichever state
-/// isn't current. From `in`, the next logical action is Out (fast
-/// take-out-of-service). From `out` or `draining`, it's In (return
-/// to placement). That mirrors what an operator actually clicks, and
-/// keeps the row from ballooning into three buttons.
+/// Single compact action on an OSD row: flips between participating
+/// and evacuating. From `in`, clicking "Out" triggers a **drain**
+/// — the fast, progress-tracked evacuation path that auto-finalizes
+/// to Out once shards reach zero. Flipping directly to Out (without
+/// drain) left shards stranded on the OSD waiting for the slower
+/// background rebalancer, which confused operators expecting the
+/// click to actually take the OSD out of service.
+///
+/// From `out` or `draining`, the action is "In" (return to placement,
+/// cancelling any in-flight drain).
 function OsdRowAction({
   current,
   busy,
@@ -1100,24 +1105,21 @@ function OsdRowAction({
   disabled: boolean;
   onToggle: (next: OsdAdminState) => void;
 }) {
-  const next: OsdAdminState = current === "in" ? "out" : "in";
+  // `in` → kick off a drain; every other state → return to placement.
+  const next: OsdAdminState = current === "in" ? "draining" : "in";
   const labelBase = next === "in" ? "In" : "Out";
-  const label = busy === next
-    ? next === "in"
-      ? "…"
-      : "…"
-    : labelBase;
+  const label = busy === next ? "…" : labelBase;
   const tone =
-    next === "out"
-      ? "border-red-200 text-red-600 hover:bg-red-50"
-      : "border-emerald-200 text-emerald-700 hover:bg-emerald-50";
+    next === "in"
+      ? "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+      : "border-red-200 text-red-600 hover:bg-red-50";
   return (
     <button
       disabled={disabled}
       onClick={() => onToggle(next)}
       title={
-        next === "out"
-          ? "Take this OSD out of placement"
+        next === "draining"
+          ? "Drain + auto-finalize Out (evacuates shards, shows progress)"
           : "Return this OSD to placement"
       }
       className={`text-[10px] font-semibold uppercase tracking-wider border rounded px-1.5 py-0.5 shrink-0 w-9 text-center ${tone} disabled:opacity-40 disabled:cursor-not-allowed`}
