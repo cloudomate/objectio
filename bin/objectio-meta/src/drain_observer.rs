@@ -871,19 +871,24 @@ async fn migrate_rebalance_one(
     // and let the next sweep try again. Report as a transient debug
     // rather than a rebalancer error so the UI banner doesn't get
     // stuck red on a routine restart window.
+    // Return Err — NOT Ok — so the caller doesn't log "moved" or
+    // bump the success counter for migrations that didn't happen.
+    // The current_owner-not-registered case is actually the permanent
+    // "dangling reference" state: ObjectMeta still points at an OSD
+    // node_id that no longer exists in the registration. Shard reads
+    // against it also fail; this needs real repair (EC reconstruction
+    // into a live target), not just a meta rewrite. Phase 4c.
     let Some(source_addr) = meta.osd_address_by_id(current_owner) else {
-        tracing::debug!(
-            "rebalance: current owner {} not registered yet; will retry next sweep",
+        return Err(anyhow::anyhow!(
+            "dangling shard ref: owner {} is not in current registration",
             hex::encode(current_owner)
-        );
-        return Ok(());
+        ));
     };
     let Some(target_addr) = meta.osd_address_by_id(&target_node) else {
-        tracing::debug!(
-            "rebalance: target {} not registered yet; will retry next sweep",
+        return Err(anyhow::anyhow!(
+            "target {} not registered yet",
             hex::encode(target_node)
-        );
-        return Ok(());
+        ));
     };
 
     let shard_id = ShardId {
