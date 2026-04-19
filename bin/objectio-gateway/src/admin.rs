@@ -19,10 +19,11 @@ use bytes::Bytes;
 use objectio_auth::AuthResult;
 use objectio_proto::metadata::{
     CreatePoolRequest, CreateTenantRequest, DeleteConfigRequest, DeletePoolRequest,
-    DeleteTenantRequest, GetConfigRequest, GetListingNodesRequest, GetPoolRequest,
-    GetTenantRequest, ListConfigRequest, ListPoolsRequest, ListTenantsRequest,
-    OsdAdminState as ProtoOsdAdminState, PoolConfig, SetConfigRequest, SetOsdAdminStateRequest,
-    TenantConfig, UpdatePoolRequest, UpdateTenantRequest,
+    DeleteTenantRequest, GetConfigRequest, GetDrainStatusRequest, GetListingNodesRequest,
+    GetPoolRequest, GetTenantRequest, ListConfigRequest, ListPoolsRequest,
+    ListTenantsRequest, OsdAdminState as ProtoOsdAdminState, PoolConfig,
+    SetConfigRequest, SetOsdAdminStateRequest, TenantConfig, UpdatePoolRequest,
+    UpdateTenantRequest,
 };
 use objectio_proto::storage::storage_service_client::StorageServiceClient;
 
@@ -2080,6 +2081,45 @@ pub async fn admin_reboot_osd(
         .into_response(),
         Err(e) => host_provider_error_to_response(e),
     }
+}
+
+/// `GET /_admin/drain-status`
+///
+/// Returns the current per-OSD drain progress snapshot (one entry per
+/// Draining OSD). Empty response when no drains are in flight.
+pub async fn admin_drain_status(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut meta = state.meta_client.clone();
+    let resp = match meta.get_drain_status(GetDrainStatusRequest {}).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string())
+                .into_response();
+        }
+    };
+
+    let drains: Vec<serde_json::Value> = resp
+        .drains
+        .into_iter()
+        .map(|d| {
+            serde_json::json!({
+                "node_id": hex::encode(&d.node_id),
+                "shards_remaining": d.shards_remaining,
+                "initial_shards": d.initial_shards,
+                "shards_migrated": d.shards_migrated,
+                "updated_at": d.updated_at,
+                "last_error": d.last_error,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({ "drains": drains })).into_response()
 }
 
 /// `GET /_admin/host-provider`

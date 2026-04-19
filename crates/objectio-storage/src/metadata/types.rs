@@ -67,6 +67,17 @@ impl MetadataKey {
         Self(data)
     }
 
+    /// Global scan prefix: every object metadata entry across every
+    /// bucket on this OSD. Single-byte `m` prefix.
+    ///
+    /// Used by the drain migrator (FindObjectsReferencingNode) which
+    /// needs to enumerate all primary-held ObjectMetas to discover
+    /// which ones reference a draining OSD's node_id.
+    #[must_use]
+    pub fn all_object_meta_prefix() -> Self {
+        Self(vec![b'm'])
+    }
+
     /// Parse bucket and key from object metadata key
     pub fn parse_object_meta(&self) -> Option<(String, String)> {
         if self.0.first() != Some(&b'm') {

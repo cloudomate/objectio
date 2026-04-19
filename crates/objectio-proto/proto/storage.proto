@@ -27,6 +27,18 @@ service StorageService {
     // Get node status
     rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 
+    // Find objects whose any stripe references `draining_node_id`.
+    // Used by the Phase 3b drain migrator: meta asks every OSD in the
+    // cluster which of its primary-stored object metas contain
+    // ShardLocations pointing at the draining OSD, collects the list,
+    // then migrates the affected shards + updates each ObjectMeta via
+    // PutObjectMeta on this same OSD (the primary).
+    //
+    // Scans the OSD's meta_store — O(total objects on this OSD).
+    // Acceptable because drains are rare and admin-initiated.
+    rpc FindObjectsReferencingNode(FindObjectsReferencingNodeRequest)
+        returns (FindObjectsReferencingNodeResponse);
+
     // Object metadata operations (stored on primary OSD)
     // Put object metadata (called by gateway after writing all shards)
     rpc PutObjectMeta(PutObjectMetaRequest) returns (PutObjectMetaResponse);
@@ -176,6 +188,38 @@ message DiskStatus {
     uint64 used_capacity = 4;
     string status = 5;      // "healthy", "degraded", "failed"
     uint64 shard_count = 6;
+}
+
+// Drain migration: ask an OSD which of its primary-held objects
+// contain shards on `draining_node_id`. The OSD scans its meta_store
+// and returns every (bucket, key) whose ObjectMeta.stripes[].shards[]
+// references the draining node.
+message FindObjectsReferencingNodeRequest {
+    bytes draining_node_id = 1;    // 16-byte UUID of the draining OSD
+    uint32 limit = 2;              // Cap on results; 0 = unlimited
+}
+
+message FindObjectsReferencingNodeResponse {
+    repeated AffectedObject objects = 1;
+    // True iff the scan hit `limit`; caller should paginate by
+    // excluding already-processed (bucket, key) pairs on the next call.
+    bool truncated = 2;
+}
+
+message AffectedObject {
+    string bucket = 1;
+    string key = 2;
+    bytes object_id = 3;
+    // Positions within the stripe that map to the draining node.
+    // The migrator uses this to know which ShardLocations to rewrite.
+    // One entry per (stripe_id, position) pair; meta walks the
+    // object's stripes in order so the list is compact.
+    repeated AffectedShardRef shards = 4;
+}
+
+message AffectedShardRef {
+    uint64 stripe_id = 1;
+    uint32 position = 2;
 }
 
 // ============================================================

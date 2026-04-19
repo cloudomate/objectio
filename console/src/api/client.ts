@@ -232,3 +232,21 @@ export const hostProvider = {
       pods_added: string[];
     }>("POST", "/_admin/hosts", { count }),
 };
+
+/// One entry per currently-Draining OSD. `initial_shards` is captured
+/// the first time this leader observed the OSD in Draining state, so
+/// progress = migrated / initial. `last_error` carries any transient
+/// failure from the latest sweep (empty on success).
+export interface DrainStatus {
+  node_id: string;
+  shards_remaining: number;
+  initial_shards: number;
+  shards_migrated: number;
+  updated_at: number;
+  last_error: string;
+}
+
+export const drain = {
+  status: (): Promise<{ drains: DrainStatus[] }> =>
+    request("GET", "/_admin/drain-status"),
+};

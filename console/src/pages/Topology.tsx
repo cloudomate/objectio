@@ -22,9 +22,11 @@ import StatusDot from "../components/StatusDot";
 import {
   nodes as nodesApi,
   hostProvider as hostProviderApi,
+  drain as drainApi,
   type NodeInfo,
   type OsdAdminState,
   type HostProviderInfo,
+  type DrainStatus,
 } from "../api/client";
 
 interface HostNode { host: string; osds: string[]; }
@@ -165,6 +167,7 @@ export default function Topology() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedHost, setSelectedHost] = useState<string | null>(null);
   const [provider, setProvider] = useState<HostProviderInfo | null>(null);
+  const [drains, setDrains] = useState<DrainStatus[]>([]);
 
   useEffect(() => {
     hostProviderApi
@@ -178,6 +181,16 @@ export default function Topology() {
         }),
       );
   }, []);
+
+  // Pull drain progress alongside node list. Auto-refreshes with the
+  // same 15 s cadence as the rest of the page when any OSD is
+  // Draining.
+  useEffect(() => {
+    drainApi
+      .status()
+      .then((d) => setDrains(d.drains))
+      .catch(() => setDrains([]));
+  }, [refreshKey]);
 
   // If any OSD is Draining, auto-refresh every 15 s so the operator
   // sees the shard count drop toward zero (and the auto-finalise to Out
@@ -554,6 +567,7 @@ export default function Topology() {
           <HostDrawerBody
             osds={selectedOsds}
             provider={provider}
+            drains={drains}
             onChanged={() => setRefreshKey((k) => k + 1)}
           />
         </Drawer>
@@ -565,10 +579,12 @@ export default function Topology() {
 function HostDrawerBody({
   osds,
   provider,
+  drains,
   onChanged,
 }: {
   osds: NodeInfo[];
   provider: HostProviderInfo | null;
+  drains: DrainStatus[];
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState<null | OsdAdminState | "reboot">(null);
@@ -714,22 +730,11 @@ function HostDrawerBody({
       </div>
 
       {effective === "draining" && (
-        <div className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-[11px] font-semibold text-amber-800">
-              Draining
-            </div>
-            <div className="text-[11px] text-amber-800 tabular-nums">
-              {drainingShardsRemaining.toLocaleString()} shards remaining
-            </div>
-          </div>
-          <p className="mt-1 text-[10px] text-amber-700/80">
-            The meta leader polls this host every 30 s and auto-finalises it to
-            Out when the shard count reaches zero. Real shard migration is
-            Phase&nbsp;3b; for now the count drops only as data ages out or
-            an external migrator moves it.
-          </p>
-        </div>
+        <DrainProgressPanel
+          drainingShardsRemaining={drainingShardsRemaining}
+          drains={drains}
+          drainingOsdIds={drainingOsds.map((o) => o.node_id)}
+        />
       )}
 
       <div>
@@ -886,6 +891,67 @@ function StatTile({
       <div className={`text-[13px] font-semibold mt-0.5 ${valueColor}`}>
         {value}
       </div>
+    </div>
+  );
+}
+
+/// Progress card for the Draining OSDs on the selected host. Sums
+/// initial/migrated/remaining across every Draining OSD on the host so
+/// a multi-OSD host drains as one visual bar. `last_error` from any
+/// Draining OSD surfaces inline — surfaces real failures instead of
+/// silent stalls.
+function DrainProgressPanel({
+  drainingShardsRemaining,
+  drains,
+  drainingOsdIds,
+}: {
+  drainingShardsRemaining: number;
+  drains: DrainStatus[];
+  drainingOsdIds: string[];
+}) {
+  const ours = drains.filter((d) => drainingOsdIds.includes(d.node_id));
+  const initial = ours.reduce((s, d) => s + d.initial_shards, 0);
+  const remaining = ours.reduce((s, d) => s + d.shards_remaining, 0);
+  const migrated = ours.reduce((s, d) => s + d.shards_migrated, 0);
+  const pct = initial > 0
+    ? Math.min(100, Math.round(((initial - remaining) / initial) * 100))
+    : 0;
+  const lastError = ours.find((d) => d.last_error)?.last_error ?? "";
+
+  return (
+    <div className="rounded-md bg-amber-50 border border-amber-200 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] font-semibold text-amber-800">Draining</div>
+        <div className="text-[11px] text-amber-800 tabular-nums">
+          {(initial > 0 ? remaining : drainingShardsRemaining).toLocaleString()}{" "}
+          shards remaining
+        </div>
+      </div>
+      {initial > 0 && (
+        <>
+          <div className="mt-1.5 h-1.5 bg-amber-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-amber-500 rounded-full transition-all"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between text-[10px] text-amber-800/90 tabular-nums">
+            <span>
+              {migrated.toLocaleString()} of {initial.toLocaleString()} migrated
+            </span>
+            <span>{pct}%</span>
+          </div>
+        </>
+      )}
+      {lastError && (
+        <p className="mt-1.5 text-[10px] text-red-700 truncate" title={lastError}>
+          last error: {lastError}
+        </p>
+      )}
+      <p className="mt-1.5 text-[10px] text-amber-700/80">
+        Meta leader migrates one shard per OSD every 30 s. When the count
+        hits zero the OSD auto-finalises to Out.
+      </p>
     </div>
   );
 }

@@ -27,6 +27,10 @@ use objectio_proto::storage::{
     ListObjectsMetaResponse,
     ListShardsRequest,
     ListShardsResponse,
+    FindObjectsReferencingNodeRequest,
+    FindObjectsReferencingNodeResponse,
+    AffectedObject,
+    AffectedShardRef,
     // Object metadata RPCs
     PutObjectMetaRequest,
     PutObjectMetaResponse,
@@ -998,6 +1002,88 @@ impl StorageService for OsdService {
             next_continuation_token: next_token,
             is_truncated,
             key_count: count as u32,
+        }))
+    }
+
+    async fn find_objects_referencing_node(
+        &self,
+        request: Request<FindObjectsReferencingNodeRequest>,
+    ) -> Result<Response<FindObjectsReferencingNodeResponse>, Status> {
+        let req = request.into_inner();
+
+        // 16-byte UUID validation. Unknown lengths are almost always a
+        // client bug; fail fast rather than "no matches" which would be
+        // misleading under a real drain.
+        if req.draining_node_id.len() != 16 {
+            return Err(Status::invalid_argument(
+                "draining_node_id must be 16 bytes",
+            ));
+        }
+        let needle = req.draining_node_id.as_slice();
+        let limit = if req.limit == 0 {
+            usize::MAX
+        } else {
+            req.limit as usize
+        };
+
+        // Scan every object_meta on this OSD (across all buckets) and
+        // collect the ones whose any stripe has a ShardLocation on the
+        // draining node. O(total objects on this OSD) — only runs when
+        // an operator-triggered drain is actively sweeping, so the
+        // linear scan is acceptable.
+        let prefix = MetadataKey::all_object_meta_prefix();
+        let entries = self.meta_store.scan_prefix(&prefix);
+        let mut out: Vec<AffectedObject> = Vec::new();
+        let mut truncated = false;
+
+        for (meta_key, value) in entries {
+            if out.len() >= limit {
+                truncated = true;
+                break;
+            }
+            // `m:` prefix also matches any future `m*`-rooted key we
+            // might add. parse_object_meta is the canonical check —
+            // skip anything that isn't a plain object_meta record.
+            let Some((bucket, key)) = meta_key.parse_object_meta() else {
+                continue;
+            };
+            let Ok(object) = objectio_proto::metadata::ObjectMeta::decode(&value[..])
+            else {
+                continue;
+            };
+
+            let mut shards: Vec<AffectedShardRef> = Vec::new();
+            for stripe in &object.stripes {
+                for shard in &stripe.shards {
+                    if shard.node_id == needle {
+                        shards.push(AffectedShardRef {
+                            stripe_id: stripe.stripe_id,
+                            position: shard.position,
+                        });
+                    }
+                }
+            }
+
+            if !shards.is_empty() {
+                out.push(AffectedObject {
+                    bucket,
+                    key,
+                    object_id: object.object_id.clone(),
+                    shards,
+                });
+            }
+        }
+
+        debug!(
+            "find_objects_referencing_node({}): {} objects affected (truncated={})",
+            hex::encode(&req.draining_node_id),
+            out.len(),
+            truncated
+        );
+
+        Ok(Response::new(FindObjectsReferencingNodeResponse {
+            objects: out,
+            truncated,
         }))
     }
 

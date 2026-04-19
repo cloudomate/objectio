@@ -251,6 +251,9 @@ use objectio_proto::metadata::{
     SetConfigResponse,
     SetOsdAdminStateRequest,
     SetOsdAdminStateResponse,
+    GetDrainStatusRequest,
+    GetDrainStatusResponse,
+    DrainStatus as ProtoDrainStatus,
     ShardType,
     TenantConfig,
     UpdatePoolRequest,
@@ -379,6 +382,37 @@ pub struct MetaService {
     /// `RwLock` so the service can be constructed before Raft (the
     /// existing startup order needs meta_service to register OSDs first).
     raft: RwLock<Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>>>,
+    /// Per-OSD drain progress — populated by the Phase 3b migrator
+    /// while an OSD is Draining, cleared when the OSD flips to Out or
+    /// back to In. Keyed by 16-byte node_id.
+    ///
+    /// Exposed to the admin layer via `drain_statuses()` and consumed
+    /// by `GET /_admin/drain-status`. Lives in memory only — losing
+    /// progress across leader failover is OK, the next sweep
+    /// reconstructs it from current shard counts.
+    drain_statuses: RwLock<HashMap<[u8; 16], DrainProgress>>,
+}
+
+/// Live progress for one Draining OSD.
+#[derive(Clone, Debug, Default)]
+pub struct DrainProgress {
+    /// shard_count reported by the OSD at the last sweep.
+    pub shards_remaining: u64,
+    /// Initial shard_count observed when the OSD first entered
+    /// Draining in this leader's lifetime. Used for "X of Y migrated"
+    /// display — `shards_migrated = initial - remaining`.
+    pub initial_shards: u64,
+    /// Unix seconds of the last sweep update.
+    pub updated_at: u64,
+    /// Last non-transient error observed by the migrator for this
+    /// OSD. Empty when the last sweep succeeded. Surfaced to the
+    /// admin UI so operators see real failures instead of silent
+    /// stalls.
+    pub last_error: String,
+    /// Number of shards the migrator successfully moved so far (distinct
+    /// from the derived `initial - remaining` because OSD shard_count
+    /// is eventually consistent and may lag slightly).
+    pub shards_migrated: u64,
 }
 
 /// Statistics for the metadata service
@@ -459,6 +493,7 @@ impl MetaService {
             lifecycle_configs: RwLock::new(HashMap::new()),
             bucket_encryption_configs: RwLock::new(HashMap::new()),
             kms_keys: RwLock::new(HashMap::new()),
+            drain_statuses: RwLock::new(HashMap::new()),
             license: RwLock::new(Arc::new(objectio_license::License::community())),
             store: None,
             raft: RwLock::new(None),
@@ -528,6 +563,104 @@ impl MetaService {
     /// iterate without acquiring the lock for an async scope.
     pub fn osd_nodes_read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<OsdNode>> {
         self.osd_nodes.read()
+    }
+
+    /// Snapshot of all OSD drain progresses — node_id → progress.
+    /// Consumed by the gateway's `/_admin/drain-status` endpoint.
+    pub fn drain_statuses_snapshot(&self) -> HashMap<[u8; 16], DrainProgress> {
+        self.drain_statuses.read().clone()
+    }
+
+    /// Mutate a single OSD's drain progress. Creates a default entry
+    /// if absent. Background-task entrypoint — not exposed over gRPC.
+    pub fn update_drain_progress<F: FnOnce(&mut DrainProgress)>(
+        &self,
+        node_id: [u8; 16],
+        f: F,
+    ) {
+        let mut statuses = self.drain_statuses.write();
+        let entry = statuses.entry(node_id).or_default();
+        f(entry);
+    }
+
+    /// Remove a node from the drain-progress map — called once an OSD
+    /// leaves the Draining state (either finalised to Out or rolled
+    /// back to In).
+    pub fn clear_drain_progress(&self, node_id: &[u8; 16]) {
+        self.drain_statuses.write().remove(node_id);
+    }
+
+    /// Look up the address of an OSD by its node_id. Used by the drain
+    /// migrator to open client channels.
+    pub fn osd_address_by_id(&self, node_id: &[u8; 16]) -> Option<String> {
+        self.osd_nodes
+            .read()
+            .iter()
+            .find(|n| &n.node_id == node_id)
+            .map(|n| n.address.clone())
+    }
+
+    /// List addresses of every registered OSD (any admin_state).
+    /// Drain migrator uses this to fan out the
+    /// `FindObjectsReferencingNode` scan.
+    pub fn all_osd_addresses(&self) -> Vec<(String, [u8; 16])> {
+        self.osd_nodes
+            .read()
+            .iter()
+            .map(|n| (n.address.clone(), n.node_id))
+            .collect()
+    }
+
+    /// Compute a CRUSH replacement for a single shard at `position` in
+    /// the placement set for `object_id`, excluding the `exclude` node
+    /// (typically the draining OSD). Returns the node_id of the target.
+    /// Falls back to `None` if CRUSH can't find an alternative (rare;
+    /// happens when the cluster has too few eligible OSDs — in which
+    /// case the migrator logs and skips this shard).
+    pub fn pick_migration_target(
+        &self,
+        object_id: &[u8; 16],
+        position: u32,
+        exclude: &[u8; 16],
+    ) -> Option<[u8; 16]> {
+        use objectio_placement::ShardRole;
+        use objectio_placement::crush2::PlacementTemplate;
+
+        // Use the default EC template — migration reuses the object's
+        // existing k/m. When we have per-object storage classes in Phase
+        // 4, this can look up the object's class instead.
+        let template =
+            PlacementTemplate::mds(self.default_ec_k as u8, self.default_ec_m as u8);
+
+        let crush = self.crush.read();
+        // ObjectId is a newtype around Uuid — rebuild from the raw 16
+        // bytes via uuid::from_bytes.
+        let obj_id =
+            objectio_common::ObjectId::from_uuid(uuid::Uuid::from_bytes(*object_id));
+        let placements = crush.select_placement(&obj_id, &template);
+        drop(crush);
+
+        // Active_nodes() inside CRUSH already filters Draining and
+        // Decommissioning out, so the returned placements shouldn't
+        // include the excluded node — but double-check just in case of
+        // a stale topology read race.
+        for p in &placements {
+            if p.position as u32 == position
+                && p.role == ShardRole::Data || p.role == ShardRole::LocalParity
+                || p.role == ShardRole::GlobalParity
+            {
+                let cand = *p.node_id.as_bytes();
+                if &cand != exclude {
+                    return Some(cand);
+                }
+            }
+        }
+        // If no position-exact match (different EC template?), return
+        // any CRUSH-eligible node that isn't excluded.
+        placements
+            .iter()
+            .map(|p| *p.node_id.as_bytes())
+            .find(|id| id != exclude)
     }
 
     /// Invoke `SetOsdAdminState` from internal code (background tasks,
@@ -4435,6 +4568,25 @@ impl MetadataService for MetaService {
             changed,
             effective: req.state,
         }))
+    }
+
+    async fn get_drain_status(
+        &self,
+        _request: Request<GetDrainStatusRequest>,
+    ) -> Result<Response<GetDrainStatusResponse>, Status> {
+        let snapshot = self.drain_statuses_snapshot();
+        let drains: Vec<ProtoDrainStatus> = snapshot
+            .into_iter()
+            .map(|(node_id, p)| ProtoDrainStatus {
+                node_id: node_id.to_vec(),
+                shards_remaining: p.shards_remaining,
+                initial_shards: p.initial_shards,
+                shards_migrated: p.shards_migrated,
+                updated_at: p.updated_at,
+                last_error: p.last_error,
+            })
+            .collect();
+        Ok(Response::new(GetDrainStatusResponse { drains }))
     }
 
     async fn list_config(

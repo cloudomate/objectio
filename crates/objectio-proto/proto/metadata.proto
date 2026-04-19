@@ -44,6 +44,11 @@ service MetadataService {
     // rebuild — Out and Draining are excluded from new placements.
     rpc SetOsdAdminState(SetOsdAdminStateRequest) returns (SetOsdAdminStateResponse);
 
+    // Snapshot of per-OSD drain progress kept in meta's in-memory map.
+    // Returns one entry per currently-Draining OSD; empty response
+    // means no drains in flight. Used by /_admin/drain-status.
+    rpc GetDrainStatus(GetDrainStatusRequest) returns (GetDrainStatusResponse);
+
     // IAM operations (user/credential persistence)
     rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
     rpc GetUser(GetUserRequest) returns (GetUserResponse);
@@ -636,6 +641,22 @@ message SetOsdAdminStateResponse {
     bool found = 1;             // node_id matched a registered OSD
     bool changed = 2;           // state actually changed (false if no-op)
     OsdAdminState effective = 3; // State after apply
+}
+
+// Snapshot of drain progress per currently-Draining OSD.
+message GetDrainStatusRequest {}
+
+message GetDrainStatusResponse {
+    repeated DrainStatus drains = 1;
+}
+
+message DrainStatus {
+    bytes node_id = 1;              // 16-byte UUID
+    uint64 shards_remaining = 2;    // Current shard_count on the OSD
+    uint64 initial_shards = 3;      // shard_count when drain started (this leader term)
+    uint64 shards_migrated = 4;     // Successfully moved by migrator
+    uint64 updated_at = 5;          // Unix seconds of last sweep
+    string last_error = 6;          // Empty when last sweep OK
 }
 
 // Get listing nodes for scatter-gather list operations
