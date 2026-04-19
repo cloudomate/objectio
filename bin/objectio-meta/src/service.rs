@@ -4851,29 +4851,60 @@ impl MetadataService for MetaService {
     ) -> Result<Response<AddUserToGroupResponse>, Status> {
         let req = request.into_inner();
 
-        // Validate user exists
         if !self.users.read().contains_key(&req.user_id) {
             return Err(Status::not_found("user not found"));
         }
 
-        let mut groups = self.groups.write();
-        let group = groups
-            .get_mut(&req.group_id)
-            .ok_or_else(|| Status::not_found("group not found"))?;
+        let (expected_bytes, new_group) = {
+            let groups = self.groups.read();
+            let current = groups
+                .get(&req.group_id)
+                .cloned()
+                .ok_or_else(|| Status::not_found("group not found"))?;
+            if current.member_user_ids.contains(&req.user_id) {
+                return Err(Status::already_exists("user already in group"));
+            }
+            let expected = bincode::serialize(&current)
+                .map_err(|e| Status::internal(format!("group encode: {e}")))?;
+            let mut new_group = current;
+            new_group.member_user_ids.push(req.user_id.clone());
+            (expected, new_group)
+        };
+        let new_bytes = bincode::serialize(&new_group)
+            .map_err(|e| Status::internal(format!("group encode: {e}")))?;
 
-        if group.member_user_ids.contains(&req.user_id) {
-            return Err(Status::already_exists("user already in group"));
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Groups,
+                    key: req.group_id.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "add-user-to-group".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("group changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for add_user_to_group: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_group(&req.group_id, &new_group);
         }
 
-        group.member_user_ids.push(req.user_id.clone());
-        let group_snapshot = group.clone();
-
-        if let Some(store) = &self.store {
-            store.put_group(&req.group_id, &group_snapshot);
-        }
-
+        self.groups
+            .write()
+            .insert(req.group_id.clone(), new_group);
         info!("Added user {} to group {}", req.user_id, req.group_id);
-
         Ok(Response::new(AddUserToGroupResponse { success: true }))
     }
 
@@ -4883,26 +4914,59 @@ impl MetadataService for MetaService {
     ) -> Result<Response<RemoveUserFromGroupResponse>, Status> {
         let req = request.into_inner();
 
-        let mut groups = self.groups.write();
-        let group = groups
-            .get_mut(&req.group_id)
-            .ok_or_else(|| Status::not_found("group not found"))?;
+        let (expected_bytes, new_group) = {
+            let groups = self.groups.read();
+            let current = groups
+                .get(&req.group_id)
+                .cloned()
+                .ok_or_else(|| Status::not_found("group not found"))?;
+            if !current.member_user_ids.contains(&req.user_id) {
+                return Err(Status::not_found("user not in group"));
+            }
+            let expected = bincode::serialize(&current)
+                .map_err(|e| Status::internal(format!("group encode: {e}")))?;
+            let mut new_group = current;
+            new_group.member_user_ids.retain(|id| id != &req.user_id);
+            (expected, new_group)
+        };
+        let new_bytes = bincode::serialize(&new_group)
+            .map_err(|e| Status::internal(format!("group encode: {e}")))?;
 
-        let before_len = group.member_user_ids.len();
-        group.member_user_ids.retain(|id| id != &req.user_id);
-
-        if group.member_user_ids.len() == before_len {
-            return Err(Status::not_found("user not in group"));
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Groups,
+                    key: req.group_id.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "remove-user-from-group".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("group changed since read; retry"));
+                    }
+                    other => {
+                        error!(
+                            "unexpected raft response for remove_user_from_group: {:?}",
+                            other
+                        );
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_group(&req.group_id, &new_group);
         }
 
-        let group_snapshot = group.clone();
-
-        if let Some(store) = &self.store {
-            store.put_group(&req.group_id, &group_snapshot);
-        }
-
+        self.groups
+            .write()
+            .insert(req.group_id.clone(), new_group);
         info!("Removed user {} from group {}", req.user_id, req.group_id);
-
         Ok(Response::new(RemoveUserFromGroupResponse { success: true }))
     }
 
@@ -4960,10 +5024,38 @@ impl MetadataService for MetaService {
             updated_at: now,
         };
 
-        if let Some(store) = &self.store {
+        let bytes = bincode::serialize(&filter)
+            .map_err(|e| Status::internal(format!("data_filter encode: {e}")))?;
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DataFilters,
+                    key: filter_id.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "create-data-filter".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("filter_id collision"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_data_filter: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_data_filter(&filter_id, &filter);
         }
-        self.data_filters.write().insert(filter_id, filter.clone());
+        self.data_filters
+            .write()
+            .insert(filter_id.clone(), filter.clone());
 
         info!(
             filter_id = %filter.filter_id,
@@ -5022,13 +5114,45 @@ impl MetadataService for MetaService {
         request: Request<DeleteDataFilterRequest>,
     ) -> Result<Response<DeleteDataFilterResponse>, Status> {
         let req = request.into_inner();
+        let expected = {
+            let filters = self.data_filters.read();
+            let Some(f) = filters.get(&req.filter_id) else {
+                return Ok(Response::new(DeleteDataFilterResponse { success: false }));
+            };
+            bincode::serialize(f)
+                .map_err(|e| Status::internal(format!("data_filter encode: {e}")))?
+        };
 
-        let removed = self.data_filters.write().remove(&req.filter_id).is_some();
-        if removed && let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DataFilters,
+                    key: req.filter_id.clone(),
+                    expected: Some(expected),
+                    new_value: None,
+                }],
+                requested_by: "delete-data-filter".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("filter changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_data_filter: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_data_filter(&req.filter_id);
         }
 
-        Ok(Response::new(DeleteDataFilterResponse { success: removed }))
+        self.data_filters.write().remove(&req.filter_id);
+        Ok(Response::new(DeleteDataFilterResponse { success: true }))
     }
 
     async fn get_data_filters_for_principal(
@@ -5082,6 +5206,9 @@ impl MetadataService for MetaService {
         if req.name.is_empty() {
             return Err(Status::invalid_argument("share name is required"));
         }
+        if self.delta_shares.read().contains_key(&req.name) {
+            return Err(Status::already_exists("share already exists"));
+        }
         let now = Self::current_timestamp();
         let entry = DeltaShareEntry {
             name: req.name.clone(),
@@ -5089,16 +5216,39 @@ impl MetadataService for MetaService {
             created_at: now as i64,
             tenant: req.tenant,
         };
-        {
-            let mut shares = self.delta_shares.write();
-            if shares.contains_key(&req.name) {
-                return Err(Status::already_exists("share already exists"));
+        let bytes = entry.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DeltaShares,
+                    key: req.name.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "delta-create-share".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("share already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_create_share: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
             }
-            shares.insert(req.name.clone(), entry.clone());
-        }
-        if let Some(store) = &self.store {
+        } else if let Some(store) = &self.store {
             store.put_delta_share(&req.name, &entry.encode_to_vec());
         }
+
+        self.delta_shares
+            .write()
+            .insert(req.name.clone(), entry.clone());
         info!("Created Delta share: {}", req.name);
         Ok(Response::new(DeltaCreateShareResponse {
             share: Some(entry),
@@ -5142,18 +5292,74 @@ impl MetadataService for MetaService {
         request: Request<DeltaDropShareRequest>,
     ) -> Result<Response<DeltaDropShareResponse>, Status> {
         let req = request.into_inner();
-        let removed = self.delta_shares.write().remove(&req.name).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_delta_share(&req.name);
+        // Multi-op MultiCas: the share row + every DeltaShareTableEntry
+        // whose key prefix matches. All removed atomically — no orphan
+        // table rows pointing at a dropped share.
+        let share_prefix = format!("{}\x00", req.name);
+        let (expected_share_bytes, table_deletes) = {
+            let shares = self.delta_shares.read();
+            let Some(share) = shares.get(&req.name) else {
+                return Ok(Response::new(DeltaDropShareResponse { success: false }));
+            };
+            let share_bytes = share.encode_to_vec();
+            let tables = self.delta_tables.read();
+            let deletes: Vec<(String, Vec<u8>)> = tables
+                .iter()
+                .filter(|(k, _)| k.starts_with(&share_prefix))
+                .map(|(k, v)| (k.clone(), v.encode_to_vec()))
+                .collect();
+            (share_bytes, deletes)
+        };
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let mut ops = Vec::with_capacity(1 + table_deletes.len());
+            ops.push(CasOp {
+                table: CasTable::DeltaShares,
+                key: req.name.clone(),
+                expected: Some(expected_share_bytes),
+                new_value: None,
+            });
+            for (tk, tb) in &table_deletes {
+                ops.push(CasOp {
+                    table: CasTable::DeltaTables,
+                    key: tk.clone(),
+                    expected: Some(tb.clone()),
+                    new_value: None,
+                });
             }
-            // Remove all tables in this share
-            self.delta_tables
-                .write()
-                .retain(|k, _| !k.starts_with(&format!("{}\x00", req.name)));
-            info!("Dropped Delta share: {}", req.name);
+            let cmd = MetaCommand::MultiCas {
+                ops,
+                requested_by: "delta-drop-share".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::aborted(format!(
+                            "share or table changed mid-drop; retry (conflicts at {failed_indices:?})"
+                        )));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_drop_share: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_delta_share(&req.name);
+            for (tk, _) in &table_deletes {
+                store.delete_delta_table(tk);
+            }
         }
-        Ok(Response::new(DeltaDropShareResponse { success: removed }))
+
+        self.delta_shares.write().remove(&req.name);
+        self.delta_tables
+            .write()
+            .retain(|k, _| !k.starts_with(&share_prefix));
+        info!("Dropped Delta share: {}", req.name);
+        Ok(Response::new(DeltaDropShareResponse { success: true }))
     }
 
     async fn delta_add_table(
@@ -5180,12 +5386,38 @@ impl MetadataService for MetaService {
             warehouse: req.warehouse.clone(),
             namespace: req.namespace.clone(),
         };
+        let bytes = entry.encode_to_vec();
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DeltaTables,
+                    key: table_key.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "delta-add-table".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("table already in share"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_add_table: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_delta_table(&table_key, &entry.encode_to_vec());
+        }
+
         self.delta_tables
             .write()
             .insert(table_key.clone(), entry.clone());
-        if let Some(store) = &self.store {
-            store.put_delta_table(&table_key, &entry.encode_to_vec());
-        }
         info!(
             "Added table {}.{} to Delta share {}",
             req.schema, req.table_name, req.share
@@ -5199,11 +5431,45 @@ impl MetadataService for MetaService {
     ) -> Result<Response<DeltaRemoveTableResponse>, Status> {
         let req = request.into_inner();
         let table_key = format!("{}\x00{}\x00{}", req.share, req.schema, req.table_name);
-        let removed = self.delta_tables.write().remove(&table_key).is_some();
-        if removed && let Some(store) = &self.store {
+        let expected = self
+            .delta_tables
+            .read()
+            .get(&table_key)
+            .map(|v| v.encode_to_vec());
+        if expected.is_none() {
+            return Ok(Response::new(DeltaRemoveTableResponse { success: false }));
+        }
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DeltaTables,
+                    key: table_key.clone(),
+                    expected,
+                    new_value: None,
+                }],
+                requested_by: "delta-remove-table".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("table changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_remove_table: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_delta_table(&table_key);
         }
-        Ok(Response::new(DeltaRemoveTableResponse { success: removed }))
+
+        self.delta_tables.write().remove(&table_key);
+        Ok(Response::new(DeltaRemoveTableResponse { success: true }))
     }
 
     async fn delta_list_tables(
@@ -5254,20 +5520,45 @@ impl MetadataService for MetaService {
             created_at: now as i64,
         };
 
-        {
-            let mut recipients = self.delta_recipients.write();
-            if recipients.contains_key(&req.name) {
-                return Err(Status::already_exists("recipient already exists"));
-            }
-            recipients.insert(req.name.clone(), entry.clone());
+        if self.delta_recipients.read().contains_key(&req.name) {
+            return Err(Status::already_exists("recipient already exists"));
         }
+        let bytes = entry.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DeltaRecipients,
+                    key: req.name.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "delta-create-recipient".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("recipient already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_create_recipient: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_delta_recipient(&req.name, &entry.encode_to_vec());
+        }
+
+        self.delta_recipients
+            .write()
+            .insert(req.name.clone(), entry.clone());
         self.delta_token_index
             .write()
             .insert(token_hash.clone(), req.name.clone());
-
-        if let Some(store) = &self.store {
-            store.put_delta_recipient(&req.name, &entry.encode_to_vec());
-        }
         info!("Created Delta recipient: {}", req.name);
         Ok(Response::new(DeltaCreateRecipientResponse {
             recipient: Some(entry),
@@ -5314,19 +5605,46 @@ impl MetadataService for MetaService {
         request: Request<DeltaDropRecipientRequest>,
     ) -> Result<Response<DeltaDropRecipientResponse>, Status> {
         let req = request.into_inner();
-        let entry = self.delta_recipients.write().remove(&req.name);
-        let removed = entry.is_some();
-        if let Some(e) = entry {
-            // Remove from token index
-            self.delta_token_index.write().remove(&e.token_hash);
-            if let Some(store) = &self.store {
-                store.delete_delta_recipient(&req.name);
+        let (expected, token_hash) = {
+            let recipients = self.delta_recipients.read();
+            let Some(entry) = recipients.get(&req.name) else {
+                return Ok(Response::new(DeltaDropRecipientResponse { success: false }));
+            };
+            (entry.encode_to_vec(), entry.token_hash.clone())
+        };
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::DeltaRecipients,
+                    key: req.name.clone(),
+                    expected: Some(expected),
+                    new_value: None,
+                }],
+                requested_by: "delta-drop-recipient".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("recipient changed since read; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delta_drop_recipient: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
             }
-            info!("Dropped Delta recipient: {}", req.name);
+        } else if let Some(store) = &self.store {
+            store.delete_delta_recipient(&req.name);
         }
-        Ok(Response::new(DeltaDropRecipientResponse {
-            success: removed,
-        }))
+
+        self.delta_recipients.write().remove(&req.name);
+        self.delta_token_index.write().remove(&token_hash);
+        info!("Dropped Delta recipient: {}", req.name);
+        Ok(Response::new(DeltaDropRecipientResponse { success: true }))
     }
 
     // ============ Cluster Configuration ============
