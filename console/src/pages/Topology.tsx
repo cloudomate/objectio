@@ -573,6 +573,27 @@ function HostDrawerBody({
 }) {
   const [busy, setBusy] = useState<null | OsdAdminState | "reboot">(null);
   const [error, setError] = useState<string | null>(null);
+  // Per-OSD busy state — keyed by node_id so clicking Out on one OSD
+  // doesn't grey out the buttons on the others. Host-level batch ops
+  // still use `busy` above; the two coexist.
+  const [busyOsd, setBusyOsd] = useState<Record<string, OsdAdminState>>({});
+
+  const setOneState = async (nodeId: string, target: OsdAdminState) => {
+    setError(null);
+    setBusyOsd((b) => ({ ...b, [nodeId]: target }));
+    try {
+      await nodesApi.setAdminState(nodeId, target);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusyOsd((b) => {
+        const next = { ...b };
+        delete next[nodeId];
+        return next;
+      });
+    }
+  };
 
   const reboot = async () => {
     setBusy("reboot");
@@ -724,16 +745,18 @@ function HostDrawerBody({
           {orderedOsds.map((osd) => {
             const adminState = osd.admin_state ?? "in";
             const muted = adminState !== "in";
+            const busyFor = busyOsd[osd.node_id];
+            const rowBusy = busyFor !== undefined;
             return (
               <li
                 key={osd.node_id}
-                className={`flex items-center justify-between border rounded-md px-2 py-1.5 ${
+                className={`flex items-center justify-between gap-2 border rounded-md px-2 py-1.5 ${
                   muted
-                    ? "bg-gray-50/50 border-gray-100 opacity-70"
+                    ? "bg-gray-50/50 border-gray-100"
                     : "bg-gray-50 border-gray-100"
                 }`}
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
                   <HardDrive
                     size={12}
                     className={muted ? "text-gray-300 shrink-0" : "text-gray-400 shrink-0"}
@@ -751,9 +774,18 @@ function HostDrawerBody({
                     </div>
                   </div>
                 </div>
-                <div className="text-[11px] text-gray-500 tabular-nums">
+                <div className="text-[11px] text-gray-500 tabular-nums shrink-0">
                   {formatBytes(osd.total_capacity)}
                 </div>
+                {/* Per-OSD action: swap to the opposite state. Keep
+                    it compact (one button, not three) since host-level
+                    batch controls below cover the full matrix. */}
+                <OsdRowAction
+                  current={adminState}
+                  busy={busyFor}
+                  disabled={rowBusy || busy !== null}
+                  onToggle={(next) => setOneState(osd.node_id, next)}
+                />
               </li>
             );
           })}
@@ -767,7 +799,7 @@ function HostDrawerBody({
 
       <div>
         <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">
-          Host Actions
+          Host Actions <span className="text-gray-400 normal-case">— all OSDs</span>
         </div>
         {error && (
           <div className="mb-2 px-2 py-1 rounded bg-red-50 border border-red-200 text-[11px] text-red-700">
@@ -855,6 +887,49 @@ function StatTile({
         {value}
       </div>
     </div>
+  );
+}
+
+/// Single compact action on an OSD row: flips it to whichever state
+/// isn't current. From `in`, the next logical action is Out (fast
+/// take-out-of-service). From `out` or `draining`, it's In (return
+/// to placement). That mirrors what an operator actually clicks, and
+/// keeps the row from ballooning into three buttons.
+function OsdRowAction({
+  current,
+  busy,
+  disabled,
+  onToggle,
+}: {
+  current: OsdAdminState;
+  busy: OsdAdminState | undefined;
+  disabled: boolean;
+  onToggle: (next: OsdAdminState) => void;
+}) {
+  const next: OsdAdminState = current === "in" ? "out" : "in";
+  const labelBase = next === "in" ? "In" : "Out";
+  const label = busy === next
+    ? next === "in"
+      ? "…"
+      : "…"
+    : labelBase;
+  const tone =
+    next === "out"
+      ? "border-red-200 text-red-600 hover:bg-red-50"
+      : "border-emerald-200 text-emerald-700 hover:bg-emerald-50";
+  return (
+    <button
+      disabled={disabled}
+      onClick={() => onToggle(next)}
+      title={
+        next === "out"
+          ? "Take this OSD out of placement"
+          : "Return this OSD to placement"
+      }
+      className={`text-[10px] font-semibold uppercase tracking-wider border rounded px-1.5 py-0.5 shrink-0 w-9 text-center ${tone} disabled:opacity-40 disabled:cursor-not-allowed`}
+    >
+      {label}
+    </button>
   );
 }
 
