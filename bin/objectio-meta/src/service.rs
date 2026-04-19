@@ -3045,12 +3045,43 @@ impl MetadataService for MetaService {
             tenant: tenant.clone(),
         };
 
-        self.users.write().insert(user_id.clone(), user.clone());
-        self.user_keys.write().insert(user_id.clone(), Vec::new());
-
-        if let Some(store) = &self.store {
+        // Replicate through Raft. expected=None ensures the user_id
+        // hasn't collided with a concurrent create (cryptographically
+        // unlikely for UUIDs, but tested correctly by the state machine).
+        let user_bytes = bincode::serialize(&user)
+            .map_err(|e| Status::internal(format!("user encode: {e}")))?;
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Users,
+                    key: user_id.clone(),
+                    expected: None,
+                    new_value: Some(user_bytes),
+                }],
+                requested_by: "create-user".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists(
+                            "user_id collision (retry with fresh id)",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_user: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_user(&user_id, &user);
         }
+
+        self.users.write().insert(user_id.clone(), user.clone());
+        self.user_keys.write().insert(user_id.clone(), Vec::new());
 
         info!(
             "Created user: {} (tenant={})",
@@ -3147,15 +3178,25 @@ impl MetadataService for MetaService {
     ) -> Result<Response<DeleteUserResponse>, Status> {
         let req = request.into_inner();
 
-        // Mark user as deleted (don't remove for audit trail)
-        let mut users = self.users.write();
-        let user = users
-            .get_mut(&req.user_id)
-            .ok_or_else(|| Status::not_found("user not found"))?;
-        user.status = UserStatus::UserDeleted as i32;
-        let user_snapshot = user.clone();
+        // Snapshot current user + access-key state under read locks so we
+        // can build the CAS batch atomically. The user's status flips to
+        // Deleted; every owned access key flips to Inactive — all in one
+        // MultiCas so followers see the compound change at the same log
+        // position (can't observe "user deleted but keys still active").
+        let (old_user_bytes, new_user_bytes, user_snapshot) = {
+            let users = self.users.read();
+            let user = users
+                .get(&req.user_id)
+                .ok_or_else(|| Status::not_found("user not found"))?;
+            let mut new_user = user.clone();
+            new_user.status = UserStatus::UserDeleted as i32;
+            let old_bytes = bincode::serialize(user)
+                .map_err(|e| Status::internal(format!("user encode: {e}")))?;
+            let new_bytes = bincode::serialize(&new_user)
+                .map_err(|e| Status::internal(format!("user encode: {e}")))?;
+            (old_bytes, new_bytes, new_user)
+        };
 
-        // Deactivate all user's keys
         let key_ids: Vec<String> = self
             .user_keys
             .read()
@@ -3163,20 +3204,77 @@ impl MetadataService for MetaService {
             .cloned()
             .unwrap_or_default();
 
-        let mut keys = self.access_keys.write();
-        for key_id in &key_ids {
-            if let Some(key) = keys.get_mut(key_id) {
-                key.status = KeyStatus::KeyInactive as i32;
+        // Build per-key (old_bytes, new_bytes) transitions. Keys that
+        // aren't found in the access_keys map are silently skipped (stale
+        // entry in user_keys index).
+        let mut key_transitions: Vec<(String, Vec<u8>, Vec<u8>, StoredAccessKey)> =
+            Vec::with_capacity(key_ids.len());
+        {
+            let keys = self.access_keys.read();
+            for key_id in &key_ids {
+                if let Some(key) = keys.get(key_id) {
+                    let mut new_key = key.clone();
+                    new_key.status = KeyStatus::KeyInactive as i32;
+                    let old_b = bincode::serialize(key)
+                        .map_err(|e| Status::internal(format!("key encode: {e}")))?;
+                    let new_b = bincode::serialize(&new_key)
+                        .map_err(|e| Status::internal(format!("key encode: {e}")))?;
+                    key_transitions.push((key_id.clone(), old_b, new_b, new_key));
+                }
             }
         }
 
-        // Persist updated user and deactivated keys
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let mut ops = Vec::with_capacity(1 + key_transitions.len());
+            ops.push(CasOp {
+                table: CasTable::Users,
+                key: req.user_id.clone(),
+                expected: Some(old_user_bytes),
+                new_value: Some(new_user_bytes),
+            });
+            for (kid, old_b, new_b, _) in &key_transitions {
+                ops.push(CasOp {
+                    table: CasTable::AccessKeys,
+                    key: kid.clone(),
+                    expected: Some(old_b.clone()),
+                    new_value: Some(new_b.clone()),
+                });
+            }
+            let cmd = MetaCommand::MultiCas {
+                ops,
+                requested_by: "delete-user".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::aborted(format!(
+                            "user or access-key changed mid-delete; retry (conflicts at ops {failed_indices:?})"
+                        )));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_user: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_user(&req.user_id, &user_snapshot);
-            for key_id in &key_ids {
-                if let Some(key) = keys.get(key_id) {
-                    store.put_access_key(key_id, key);
-                }
+            for (kid, _, _, new_key) in &key_transitions {
+                store.put_access_key(kid, new_key);
+            }
+        }
+
+        // Mirror into in-memory caches after the quorum commit.
+        self.users
+            .write()
+            .insert(req.user_id.clone(), user_snapshot);
+        {
+            let mut keys = self.access_keys.write();
+            for (kid, _, _, new_key) in key_transitions {
+                keys.insert(kid, new_key);
             }
         }
 
@@ -3216,6 +3314,41 @@ impl MetadataService for MetaService {
             tenant: user.tenant.clone(),
         };
 
+        let key_bytes = bincode::serialize(&key)
+            .map_err(|e| Status::internal(format!("access key encode: {e}")))?;
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    // No enum variant yet for access_keys — use Named
+                    // escape hatch. Switching to a dedicated CasTable
+                    // variant later is additive.
+                    table: CasTable::AccessKeys,
+                    key: access_key_id.clone(),
+                    expected: None,
+                    new_value: Some(key_bytes),
+                }],
+                requested_by: "create-access-key".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists(
+                            "access key id collision (retry with fresh id)",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_access_key: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_access_key(&access_key_id, &key);
+        }
+
         self.access_keys
             .write()
             .insert(access_key_id.clone(), key.clone());
@@ -3224,10 +3357,6 @@ impl MetadataService for MetaService {
             .entry(req.user_id.clone())
             .or_default()
             .push(access_key_id.clone());
-
-        if let Some(store) = &self.store {
-            store.put_access_key(&access_key_id, &key);
-        }
 
         info!(
             "Created access key {} for user {}",
@@ -3282,22 +3411,52 @@ impl MetadataService for MetaService {
     ) -> Result<Response<DeleteAccessKeyResponse>, Status> {
         let req = request.into_inner();
 
-        let key = self.access_keys.write().remove(&req.access_key_id);
-        if let Some(key) = key {
-            // Remove from user_keys
-            if let Some(keys) = self.user_keys.write().get_mut(&key.user_id) {
-                keys.retain(|id| id != &req.access_key_id);
-            }
+        let current = self
+            .access_keys
+            .read()
+            .get(&req.access_key_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("access key not found"))?;
+        let expected_bytes = bincode::serialize(&current)
+            .map_err(|e| Status::internal(format!("access key encode: {e}")))?;
 
-            if let Some(store) = &self.store {
-                store.delete_access_key(&req.access_key_id);
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::AccessKeys,
+                    key: req.access_key_id.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: None, // delete
+                }],
+                requested_by: "delete-access-key".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "access key changed since read; retry delete",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_access_key: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
             }
-
-            info!("Deleted access key: {}", req.access_key_id);
-            Ok(Response::new(DeleteAccessKeyResponse { success: true }))
-        } else {
-            Err(Status::not_found("access key not found"))
+        } else if let Some(store) = &self.store {
+            store.delete_access_key(&req.access_key_id);
         }
+
+        self.access_keys.write().remove(&req.access_key_id);
+        if let Some(keys) = self.user_keys.write().get_mut(&current.user_id) {
+            keys.retain(|id| id != &req.access_key_id);
+        }
+
+        info!("Deleted access key: {}", req.access_key_id);
+        Ok(Response::new(DeleteAccessKeyResponse { success: true }))
     }
 
     async fn get_access_key_for_auth(

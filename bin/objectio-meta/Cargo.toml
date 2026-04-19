@@ -39,3 +39,4 @@ md5 = "0.7"
 prost = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+bincode = { workspace = true }

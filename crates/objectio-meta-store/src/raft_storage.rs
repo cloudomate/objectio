@@ -316,6 +316,7 @@ fn cas_table_name(t: &CasTable) -> &str {
         CasTable::Snapshots => "snapshots",
         CasTable::Users => "users",
         CasTable::Groups => "groups",
+        CasTable::AccessKeys => "access_keys",
         CasTable::Named(n) => n,
     }
 }
