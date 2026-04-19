@@ -20,10 +20,10 @@ use objectio_auth::AuthResult;
 use objectio_proto::metadata::{
     CreatePoolRequest, CreateTenantRequest, DeleteConfigRequest, DeletePoolRequest,
     DeleteTenantRequest, GetConfigRequest, GetDrainStatusRequest, GetListingNodesRequest,
-    GetPoolRequest, GetTenantRequest, ListConfigRequest, ListPoolsRequest,
-    ListTenantsRequest, OsdAdminState as ProtoOsdAdminState, PoolConfig,
-    SetConfigRequest, SetOsdAdminStateRequest, TenantConfig, UpdatePoolRequest,
-    UpdateTenantRequest,
+    GetPoolRequest, GetRebalanceStatusRequest, GetTenantRequest, ListConfigRequest,
+    ListPoolsRequest, ListTenantsRequest, OsdAdminState as ProtoOsdAdminState,
+    PoolConfig, SetConfigRequest, SetOsdAdminStateRequest, TenantConfig,
+    UpdatePoolRequest, UpdateTenantRequest,
 };
 use objectio_proto::storage::storage_service_client::StorageServiceClient;
 
@@ -2120,6 +2120,90 @@ pub async fn admin_drain_status(
         .collect();
 
     Json(serde_json::json!({ "drains": drains })).into_response()
+}
+
+/// `GET /_admin/rebalance-status` — cluster-wide rebalance progress.
+pub async fn admin_rebalance_status(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut meta = state.meta_client.clone();
+    let r = match meta.get_rebalance_status(GetRebalanceStatusRequest {}).await {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string())
+                .into_response();
+        }
+    };
+    Json(serde_json::json!({
+        "started": r.started,
+        "paused": r.paused,
+        "last_sweep_at": r.last_sweep_at,
+        "scanned_this_pass": r.scanned_this_pass,
+        "drifts_seen_this_pass": r.drifts_seen_this_pass,
+        "shards_rebalanced_total": r.shards_rebalanced_total,
+        "last_error": r.last_error,
+    }))
+    .into_response()
+}
+
+/// `POST /_admin/rebalance/pause` — pause the cluster rebalancer.
+/// Persisted via Raft (`rebalance/paused = true`) so it survives
+/// leader failover and restarts.
+pub async fn admin_rebalance_pause(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    admin_rebalance_set_paused(&state, &auth, &headers, true).await
+}
+
+/// `POST /_admin/rebalance/resume` — re-enable the cluster rebalancer.
+pub async fn admin_rebalance_resume(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    admin_rebalance_set_paused(&state, &auth, &headers, false).await
+}
+
+async fn admin_rebalance_set_paused(
+    state: &Arc<AppState>,
+    auth: &Option<Extension<AuthResult>>,
+    headers: &HeaderMap,
+    paused: bool,
+) -> Response {
+    if let Some(deny) = require_system_admin(auth, headers) {
+        return deny;
+    }
+    let who = auth
+        .as_ref()
+        .map(|Extension(a)| a.user_id.clone())
+        .unwrap_or_else(|| "console".to_string());
+
+    let mut meta = state.meta_client.clone();
+    let req = SetConfigRequest {
+        key: "rebalance/paused".to_string(),
+        value: if paused { b"true".to_vec() } else { b"false".to_vec() },
+        updated_by: who,
+    };
+    match meta.set_config(req).await {
+        Ok(_) => {
+            Json(serde_json::json!({ "paused": paused })).into_response()
+        }
+        Err(e) => {
+            let code = if e.code() == tonic::Code::FailedPrecondition {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (code, e.message().to_string()).into_response()
+        }
+    }
 }
 
 /// `GET /_admin/host-provider`

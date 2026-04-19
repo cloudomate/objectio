@@ -23,10 +23,12 @@ import {
   nodes as nodesApi,
   hostProvider as hostProviderApi,
   drain as drainApi,
+  rebalance as rebalanceApi,
   type NodeInfo,
   type OsdAdminState,
   type HostProviderInfo,
   type DrainStatus,
+  type RebalanceStatus,
 } from "../api/client";
 
 interface HostNode { host: string; osds: string[]; }
@@ -168,6 +170,21 @@ export default function Topology() {
   const [selectedHost, setSelectedHost] = useState<string | null>(null);
   const [provider, setProvider] = useState<HostProviderInfo | null>(null);
   const [drains, setDrains] = useState<DrainStatus[]>([]);
+  const [rebal, setRebal] = useState<RebalanceStatus | null>(null);
+  const [rebalBusy, setRebalBusy] = useState(false);
+
+  const toggleRebalance = async () => {
+    if (!rebal) return;
+    setRebalBusy(true);
+    try {
+      if (rebal.paused) await rebalanceApi.resume();
+      else await rebalanceApi.pause();
+      const r = await rebalanceApi.status();
+      setRebal(r);
+    } finally {
+      setRebalBusy(false);
+    }
+  };
 
   useEffect(() => {
     hostProviderApi
@@ -190,7 +207,19 @@ export default function Topology() {
       .status()
       .then((d) => setDrains(d.drains))
       .catch(() => setDrains([]));
+    rebalanceApi
+      .status()
+      .then(setRebal)
+      .catch(() => setRebal(null));
   }, [refreshKey]);
+
+  // Rebalancer polls more slowly than the drain path — auto-refresh
+  // every 30 s so the banner counter advances without requiring a
+  // manual refresh.
+  useEffect(() => {
+    const t = setInterval(() => setRefreshKey((k) => k + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
 
   // If any OSD is Draining, auto-refresh every 15 s so the operator
   // sees the shard count drop toward zero (and the auto-finalise to Out
@@ -366,6 +395,14 @@ export default function Topology() {
 
         {loading && !topology && (
           <div className="text-[12px] text-gray-400">Loading topology…</div>
+        )}
+
+        {rebal && (
+          <RebalanceBanner
+            status={rebal}
+            busy={rebalBusy}
+            onToggle={toggleRebalance}
+          />
         )}
 
         {topology && (
@@ -891,6 +928,85 @@ function StatTile({
       <div className={`text-[13px] font-semibold mt-0.5 ${valueColor}`}>
         {value}
       </div>
+    </div>
+  );
+}
+
+/// Cluster-wide rebalance banner. Renders at the top of the Topology
+/// page whenever the reconciler has data — active (drifts being fixed),
+/// paused (red), or idle (subtle grey). Operator can click
+/// Pause/Resume inline without leaving the page.
+function RebalanceBanner({
+  status,
+  busy,
+  onToggle,
+}: {
+  status: RebalanceStatus;
+  busy: boolean;
+  onToggle: () => void;
+}) {
+  const active =
+    !status.paused &&
+    (status.drifts_seen_this_pass > 0 ||
+      status.scanned_this_pass > 0 ||
+      status.shards_rebalanced_total > 0);
+
+  const tone = status.paused
+    ? "bg-red-50 border-red-200 text-red-800"
+    : active
+      ? "bg-blue-50 border-blue-200 text-blue-800"
+      : "bg-gray-50 border-gray-200 text-gray-600";
+
+  return (
+    <div
+      className={`mb-3 flex items-center justify-between gap-3 rounded-md border px-3 py-2 ${tone}`}
+    >
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        <span
+          className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+            status.paused
+              ? "bg-red-500"
+              : active
+                ? "bg-blue-500 animate-pulse"
+                : "bg-gray-400"
+          }`}
+        />
+        <div className="text-[12px] truncate">
+          <span className="font-semibold mr-2">
+            Rebalancer{" "}
+            {status.paused
+              ? "paused"
+              : active
+                ? "running"
+                : "idle"}
+          </span>
+          <span className="opacity-80">
+            {status.shards_rebalanced_total.toLocaleString()} shards moved total
+            {active && status.drifts_seen_this_pass > 0 && (
+              <> · {status.drifts_seen_this_pass.toLocaleString()} drifts this pass</>
+            )}
+          </span>
+        </div>
+      </div>
+      {status.last_error && (
+        <span
+          className="text-[11px] text-red-700 max-w-xs truncate"
+          title={status.last_error}
+        >
+          err: {status.last_error}
+        </span>
+      )}
+      <button
+        onClick={onToggle}
+        disabled={busy}
+        className={`shrink-0 text-[11px] font-semibold uppercase tracking-wider border rounded px-2 py-0.5 ${
+          status.paused
+            ? "border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            : "border-gray-300 text-gray-700 hover:bg-gray-100"
+        } disabled:opacity-50 disabled:cursor-not-allowed`}
+      >
+        {busy ? "…" : status.paused ? "Resume" : "Pause"}
+      </button>
     </div>
   );
 }

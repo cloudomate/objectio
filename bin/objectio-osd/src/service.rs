@@ -948,31 +948,51 @@ impl StorageService for OsdService {
             req.max_keys as usize
         };
 
-        // Create prefix for scanning
-        let prefix = MetadataKey::object_meta_prefix(&req.bucket);
+        // Empty bucket means "scan every primary-held ObjectMeta on
+        // this OSD". Used by the cluster rebalancer to enumerate
+        // candidates without driving per-bucket fan-out. Regular
+        // bucket-scoped callers keep their existing semantics.
+        let prefix = if req.bucket.is_empty() {
+            MetadataKey::all_object_meta_prefix()
+        } else {
+            MetadataKey::object_meta_prefix(&req.bucket)
+        };
 
-        // Scan all objects in bucket
+        // Scan all objects in bucket (or cluster-wide when bucket="")
         let entries = self.meta_store.scan_prefix(&prefix);
 
         let mut objects = Vec::new();
         let mut count = 0;
         let mut last_key = String::new();
 
+        // Cluster-wide pagination: object keys can repeat across
+        // buckets (bucketA/file.txt vs bucketB/file.txt), so the
+        // single `key` string isn't a total order. When bucket is
+        // empty we cursor on `{bucket}\0{key}` instead — that matches
+        // the underlying meta_store key order.
+        let cluster_wide = req.bucket.is_empty();
         for (meta_key, value) in entries {
-            // Parse bucket/key from metadata key
-            if let Some((_bucket, key)) = meta_key.parse_object_meta() {
+            if let Some((bucket_of, key)) = meta_key.parse_object_meta() {
+                let cursor = if cluster_wide {
+                    format!("{bucket_of}\0{key}")
+                } else {
+                    key.clone()
+                };
+
                 // Skip if before start_after
-                if !req.start_after.is_empty() && key <= req.start_after {
+                if !req.start_after.is_empty() && cursor <= req.start_after {
                     continue;
                 }
 
-                // Apply prefix filter
+                // Apply prefix filter (only meaningful within a bucket)
                 if !req.prefix.is_empty() && !key.starts_with(&req.prefix) {
                     continue;
                 }
 
                 // Skip if before continuation token
-                if !req.continuation_token.is_empty() && key <= req.continuation_token {
+                if !req.continuation_token.is_empty()
+                    && cursor <= req.continuation_token
+                {
                     continue;
                 }
 
@@ -983,7 +1003,7 @@ impl StorageService for OsdService {
 
                 // Decode object metadata
                 if let Ok(object) = ObjectMeta::decode(&value[..]) {
-                    last_key = key;
+                    last_key = cursor;
                     objects.push(object);
                     count += 1;
                 }

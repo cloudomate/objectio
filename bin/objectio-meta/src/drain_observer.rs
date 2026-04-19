@@ -62,10 +62,19 @@ pub fn spawn(meta: Arc<MetaService>) {
 async fn run(meta: Arc<MetaService>) {
     let mut ticker = interval(SWEEP_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Cluster-wide scan cursor for the rebalancer — one per OSD,
+    // advanced page by page across sweeps so a large cluster doesn't
+    // scan the full meta store on every tick. Lost on restart; the
+    // next leader starts from the top (safe, just repeats work).
+    let mut rebalance_cursors: std::collections::HashMap<[u8; 16], String> =
+        std::collections::HashMap::new();
     loop {
         ticker.tick().await;
         if let Err(e) = sweep_once(&meta).await {
             warn!("drain observer sweep failed: {e}");
+        }
+        if let Err(e) = rebalance_sweep(&meta, &mut rebalance_cursors).await {
+            warn!("rebalance sweep failed: {e}");
         }
     }
 }
@@ -564,4 +573,359 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------
+// Continuous auto-rebalancer
+// ---------------------------------------------------------------------
+
+/// One page size per sweep per OSD. Small because the migrator itself
+/// is rate-limited to `SHARDS_PER_SWEEP` anyway — more candidates per
+/// page than we can actually move is just wasted scan work.
+const REBALANCE_PAGE_SIZE: u32 = 64;
+
+/// One rebalance pass over the cluster. Per sweep, per OSD, we:
+///   1. ListObjectsMeta (cluster-wide — bucket="") from the cursor we
+///      remembered last time.
+///   2. For each returned ObjectMeta, compute the CRUSH ideal placement
+///      for each stripe, and compare every ShardLocation.node_id to
+///      the ideal. Any mismatch is a drift candidate.
+///   3. Migrate at most one drift per OSD per sweep (matches drain's
+///      rate limit). Subsequent sweeps advance the cursor and continue.
+/// When the cursor exhausts, we clear it so the next sweep starts
+/// over — this is how new drifts caused by ongoing topology changes
+/// eventually get picked up.
+async fn rebalance_sweep(
+    meta: &Arc<MetaService>,
+    cursors: &mut std::collections::HashMap<[u8; 16], String>,
+) -> anyhow::Result<()> {
+    if !meta.is_raft_leader() {
+        return Ok(());
+    }
+    if meta.is_rebalance_paused() {
+        meta.update_rebalance_progress(|p| p.paused = true);
+        return Ok(());
+    }
+
+    // Skip rebalance if any OSD is actively Draining — drain already
+    // moves the big stuff, and running both in parallel doubles the IO
+    // impact. Drain finishes fast enough that a 30-s delay on
+    // rebalance is fine.
+    let any_draining = meta
+        .osd_nodes_read()
+        .iter()
+        .any(|n| n.admin_state == objectio_common::OsdAdminState::Draining);
+    if any_draining {
+        debug!("rebalance sweep: deferring — drain in progress");
+        return Ok(());
+    }
+
+    let owners = meta.all_osd_addresses();
+    if owners.is_empty() {
+        return Ok(());
+    }
+
+    let mut scanned: u64 = 0;
+    let mut drifts_seen: u64 = 0;
+    let mut migrated_this_sweep = false;
+    let draining_ids: std::collections::HashSet<[u8; 16]> = meta
+        .osd_nodes_read()
+        .iter()
+        .filter(|n| n.admin_state != objectio_common::OsdAdminState::In)
+        .map(|n| n.node_id)
+        .collect();
+
+    for (addr, node_id) in &owners {
+        let cursor = cursors.get(node_id).cloned().unwrap_or_default();
+        let (objects, next_cursor) =
+            match list_all_object_metas(addr, &cursor, REBALANCE_PAGE_SIZE).await {
+                Ok(r) => r,
+                Err(e) => {
+                    debug!(
+                        "rebalance: list on {addr} failed: {e} (will retry next sweep)"
+                    );
+                    continue;
+                }
+            };
+        scanned = scanned.saturating_add(objects.len() as u64);
+
+        // Advance or reset the cursor. When the OSD reports no next
+        // token, we've finished the scan on this OSD — clear to restart
+        // from the top next time.
+        if next_cursor.is_empty() {
+            cursors.remove(node_id);
+        } else {
+            cursors.insert(*node_id, next_cursor);
+        }
+
+        // Scan each returned ObjectMeta for drift. Migrate the FIRST
+        // one we find (per OSD, per sweep) and let the next sweep pick
+        // up subsequent drifts.
+        for object in objects {
+            // Parse the stored object_id into a [u8; 16] for CRUSH.
+            let Ok(object_id): Result<[u8; 16], _> =
+                object.object_id.as_slice().try_into()
+            else {
+                continue;
+            };
+
+            for stripe in &object.stripes {
+                for shard in &stripe.shards {
+                    if shard.node_id.len() != 16 {
+                        continue;
+                    }
+                    let mut current: [u8; 16] = [0; 16];
+                    current.copy_from_slice(&shard.node_id);
+
+                    // Shards whose current owner is not `In` ARE drifts
+                    // (they shouldn't serve placement anymore), but we
+                    // defer those to the drain migrator. So skip.
+                    if draining_ids.contains(&current) {
+                        continue;
+                    }
+
+                    let Some(ideal) = meta
+                        .pick_migration_target(&object_id, shard.position, &current)
+                    else {
+                        continue;
+                    };
+
+                    // If CRUSH's pick is the current owner, no drift.
+                    // pick_migration_target returns "anything but
+                    // excluded", so ideal will equal current when the
+                    // placement is already correct — treat as no drift.
+                    if ideal == current {
+                        continue;
+                    }
+
+                    drifts_seen = drifts_seen.saturating_add(1);
+
+                    if migrated_this_sweep {
+                        continue;
+                    }
+
+                    // One migration per sweep. Use the same primitive
+                    // as drain; the only difference is the "target"
+                    // comes from the rebalancer instead of the
+                    // draining-node filter.
+                    if let Err(e) = migrate_rebalance_one(
+                        meta,
+                        &current,
+                        addr,
+                        &object,
+                        stripe.stripe_id,
+                        shard.position,
+                    )
+                    .await
+                    {
+                        meta.update_rebalance_progress(|p| {
+                            p.last_error = format!("{}: {e}", object.key);
+                            p.last_sweep_at = now_unix();
+                        });
+                    } else {
+                        info!(
+                            "rebalance: moved {}/{} stripe={} pos={} → {}",
+                            object.bucket,
+                            object.key,
+                            stripe.stripe_id,
+                            shard.position,
+                            hex::encode(ideal),
+                        );
+                        meta.update_rebalance_progress(|p| {
+                            p.shards_rebalanced_total =
+                                p.shards_rebalanced_total.saturating_add(1);
+                            p.last_error.clear();
+                        });
+                        migrated_this_sweep = true;
+                    }
+                }
+            }
+        }
+    }
+
+    meta.update_rebalance_progress(|p| {
+        p.started = true;
+        p.paused = false;
+        p.last_sweep_at = now_unix();
+        p.scanned_this_pass = p.scanned_this_pass.saturating_add(scanned);
+        p.drifts_seen_this_pass =
+            p.drifts_seen_this_pass.saturating_add(drifts_seen);
+        // Reset pass counters when every cursor is exhausted (we
+        // finished a full loop over the cluster).
+        if cursors.is_empty() {
+            p.scanned_this_pass = 0;
+            p.drifts_seen_this_pass = 0;
+        }
+    });
+
+    Ok(())
+}
+
+/// One drift migration. Same steps as `migrate_shard_one` (read, write,
+/// rewrite ObjectMeta, delete source) but the object is already in
+/// hand so we skip the find-affected phase.
+async fn migrate_rebalance_one(
+    meta: &Arc<MetaService>,
+    current_owner: &[u8; 16],
+    current_owner_meta_addr: &str, // OSD that holds the ObjectMeta
+    object: &objectio_proto::metadata::ObjectMeta,
+    stripe_id: u64,
+    position: u32,
+) -> anyhow::Result<()> {
+    let Ok(object_id): Result<[u8; 16], _> =
+        object.object_id.as_slice().try_into()
+    else {
+        return Err(anyhow::anyhow!("object_id len != 16"));
+    };
+
+    let target_node = meta
+        .pick_migration_target(&object_id, position, current_owner)
+        .ok_or_else(|| anyhow::anyhow!("no CRUSH target"))?;
+    if &target_node == current_owner {
+        return Ok(()); // No-op
+    }
+
+    let source_addr = meta
+        .osd_address_by_id(current_owner)
+        .ok_or_else(|| anyhow::anyhow!("current owner not registered"))?;
+    let target_addr = meta
+        .osd_address_by_id(&target_node)
+        .ok_or_else(|| anyhow::anyhow!("target not registered"))?;
+
+    let shard_id = ShardId {
+        object_id: object_id.to_vec(),
+        stripe_id,
+        position,
+    };
+
+    // 1. Read from current owner.
+    let source_ch = open_channel(&source_addr).await?;
+    let mut source = StorageServiceClient::new(source_ch);
+    let bytes = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        source.read_shard(ReadShardRequest {
+            shard_id: Some(shard_id.clone()),
+            offset: 0,
+            length: 0,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("read_shard timeout"))??
+    .into_inner()
+    .data;
+
+    // 2. Write to target.
+    let target_ch = open_channel(&target_addr).await?;
+    let mut target = StorageServiceClient::new(target_ch);
+    let write_resp = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        target.write_shard(WriteShardRequest {
+            shard_id: Some(shard_id.clone()),
+            data: bytes,
+            ec_k: 0,
+            ec_m: 0,
+            checksum: None,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("write_shard timeout"))??
+    .into_inner();
+
+    // 3. Rewrite the ObjectMeta on the owner OSD (the one holding the
+    //    primary-stored meta — same OSD we listed it from).
+    let owner_ch = open_channel(current_owner_meta_addr).await?;
+    let mut owner = StorageServiceClient::new(owner_ch);
+    let Some(mut fresh) = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        owner.get_object_meta(GetObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            version_id: String::new(),
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("get_object_meta timeout"))??
+    .into_inner()
+    .object
+    else {
+        return Err(anyhow::anyhow!(
+            "owner no longer has ObjectMeta {}/{}",
+            object.bucket,
+            object.key
+        ));
+    };
+
+    for stripe in &mut fresh.stripes {
+        if stripe.stripe_id != stripe_id {
+            continue;
+        }
+        for shard in &mut stripe.shards {
+            if shard.position == position && shard.node_id == current_owner.as_slice()
+            {
+                let target_disk = write_resp
+                    .location
+                    .as_ref()
+                    .map(|l| l.disk_id.clone())
+                    .unwrap_or_default();
+                *shard = ShardLocation {
+                    position: shard.position,
+                    node_id: target_node.to_vec(),
+                    disk_id: target_disk,
+                    offset: 0,
+                    shard_type: shard.shard_type,
+                    local_group: shard.local_group,
+                };
+            }
+        }
+    }
+
+    tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        owner.put_object_meta(PutObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            object: Some(fresh),
+            versioning_enabled: false,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("put_object_meta timeout"))??;
+
+    // 4. Delete source shard.
+    tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        source.delete_shard(objectio_proto::storage::DeleteShardRequest {
+            shard_id: Some(shard_id),
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("delete_shard timeout"))??;
+
+    Ok(())
+}
+
+/// Page through every primary-held ObjectMeta on an OSD. Returns
+/// (objects, next_cursor) — empty cursor means the scan is complete.
+async fn list_all_object_metas(
+    addr: &str,
+    cursor: &str,
+    page_size: u32,
+) -> anyhow::Result<(Vec<objectio_proto::metadata::ObjectMeta>, String)> {
+    use objectio_proto::storage::ListObjectsMetaRequest;
+    let channel = open_channel(addr).await?;
+    let mut client = StorageServiceClient::new(channel);
+    let resp = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        client.list_objects_meta(ListObjectsMetaRequest {
+            bucket: String::new(), // empty = cluster-wide scan
+            prefix: String::new(),
+            start_after: String::new(),
+            max_keys: page_size,
+            continuation_token: cursor.to_string(),
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("list_objects_meta timeout"))??
+    .into_inner();
+    Ok((resp.objects, resp.next_continuation_token))
 }

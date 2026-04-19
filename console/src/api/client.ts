@@ -250,3 +250,20 @@ export const drain = {
   status: (): Promise<{ drains: DrainStatus[] }> =>
     request("GET", "/_admin/drain-status"),
 };
+
+export interface RebalanceStatus {
+  started: boolean;
+  paused: boolean;
+  last_sweep_at: number;
+  scanned_this_pass: number;
+  drifts_seen_this_pass: number;
+  shards_rebalanced_total: number;
+  last_error: string;
+}
+
+export const rebalance = {
+  status: (): Promise<RebalanceStatus> =>
+    request("GET", "/_admin/rebalance-status"),
+  pause: () => request<{ paused: boolean }>("POST", "/_admin/rebalance/pause"),
+  resume: () => request<{ paused: boolean }>("POST", "/_admin/rebalance/resume"),
+};

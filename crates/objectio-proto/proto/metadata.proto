@@ -49,6 +49,12 @@ service MetadataService {
     // means no drains in flight. Used by /_admin/drain-status.
     rpc GetDrainStatus(GetDrainStatusRequest) returns (GetDrainStatusResponse);
 
+    // Cluster-wide rebalance progress. Populated by the reconciler
+    // sweep that migrates shards whose current ShardLocation
+    // disagrees with CRUSH's current pick. Consumed by
+    // /_admin/rebalance-status.
+    rpc GetRebalanceStatus(GetRebalanceStatusRequest) returns (GetRebalanceStatusResponse);
+
     // IAM operations (user/credential persistence)
     rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
     rpc GetUser(GetUserRequest) returns (GetUserResponse);
@@ -657,6 +663,18 @@ message DrainStatus {
     uint64 shards_migrated = 4;     // Successfully moved by migrator
     uint64 updated_at = 5;          // Unix seconds of last sweep
     string last_error = 6;          // Empty when last sweep OK
+}
+
+message GetRebalanceStatusRequest {}
+
+message GetRebalanceStatusResponse {
+    bool started = 1;
+    bool paused = 2;
+    uint64 last_sweep_at = 3;
+    uint64 scanned_this_pass = 4;
+    uint64 drifts_seen_this_pass = 5;
+    uint64 shards_rebalanced_total = 6;
+    string last_error = 7;
 }
 
 // Get listing nodes for scatter-gather list operations

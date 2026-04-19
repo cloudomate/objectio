@@ -254,6 +254,8 @@ use objectio_proto::metadata::{
     GetDrainStatusRequest,
     GetDrainStatusResponse,
     DrainStatus as ProtoDrainStatus,
+    GetRebalanceStatusRequest,
+    GetRebalanceStatusResponse,
     ShardType,
     TenantConfig,
     UpdatePoolRequest,
@@ -391,6 +393,39 @@ pub struct MetaService {
     /// progress across leader failover is OK, the next sweep
     /// reconstructs it from current shard counts.
     drain_statuses: RwLock<HashMap<[u8; 16], DrainProgress>>,
+    /// Cluster-wide rebalance progress (one instance, not per-OSD).
+    rebalance_progress: RwLock<RebalanceProgress>,
+}
+
+/// Cluster-wide rebalance progress — exposed to the admin UI.
+///
+/// The rebalancer scans every primary-held ObjectMeta in the cluster
+/// once per scan cycle and migrates misplaced shards at the same rate
+/// as the drain migrator. One instance lives in `MetaService`;
+/// populated on the Raft leader, read by anyone.
+#[derive(Clone, Debug, Default)]
+pub struct RebalanceProgress {
+    /// True iff the reconciler sweep touched at least one OSD since
+    /// process start. Lets the console distinguish "not yet started"
+    /// from "finished clean".
+    pub started: bool,
+    /// Admin-toggled: when true, reconciler skips its sweep. Stored
+    /// in the `rebalance/paused` config key; mirrored here for fast
+    /// reads without a config lookup.
+    pub paused: bool,
+    /// Last time a sweep completed (unix seconds). 0 before first.
+    pub last_sweep_at: u64,
+    /// Number of ObjectMetas scanned so far in the current pass.
+    /// Resets each time we complete a full loop through the cluster.
+    pub scanned_this_pass: u64,
+    /// Number of drifted shards observed in the current pass.
+    pub drifts_seen_this_pass: u64,
+    /// Cumulative count of shards successfully migrated since process
+    /// start. Monotonic — doesn't reset per pass.
+    pub shards_rebalanced_total: u64,
+    /// Last non-empty error (transient OSD outage, etc.). Empty when
+    /// the last sweep succeeded. Surfaces real failures to operators.
+    pub last_error: String,
 }
 
 /// Live progress for one Draining OSD.
@@ -494,6 +529,7 @@ impl MetaService {
             bucket_encryption_configs: RwLock::new(HashMap::new()),
             kms_keys: RwLock::new(HashMap::new()),
             drain_statuses: RwLock::new(HashMap::new()),
+            rebalance_progress: RwLock::new(RebalanceProgress::default()),
             license: RwLock::new(Arc::new(objectio_license::License::community())),
             store: None,
             raft: RwLock::new(None),
@@ -588,6 +624,37 @@ impl MetaService {
     /// back to In).
     pub fn clear_drain_progress(&self, node_id: &[u8; 16]) {
         self.drain_statuses.write().remove(node_id);
+    }
+
+    /// Snapshot of the cluster-wide rebalance progress — consumed by
+    /// `/_admin/rebalance-status`.
+    pub fn rebalance_progress_snapshot(&self) -> RebalanceProgress {
+        self.rebalance_progress.read().clone()
+    }
+
+    /// Mutate rebalance progress. Used by the reconciler sweep.
+    pub fn update_rebalance_progress<F: FnOnce(&mut RebalanceProgress)>(
+        &self,
+        f: F,
+    ) {
+        let mut p = self.rebalance_progress.write();
+        f(&mut p);
+    }
+
+    /// Is the rebalancer currently paused via the `rebalance/paused`
+    /// config key? Checked on every reconciler sweep so paused state
+    /// stays hot-swappable without restarting the process.
+    pub fn is_rebalance_paused(&self) -> bool {
+        // The config map mirrors what `set_config` has committed via
+        // Raft; a bool cast from the stored "true"/"false" byte
+        // string. Any parse error is treated as not-paused so a
+        // garbled config can't lock the cluster into a no-rebalance
+        // state.
+        let cfg = self.config.read();
+        cfg.get("rebalance/paused")
+            .and_then(|e| std::str::from_utf8(&e.value).ok())
+            .map(|s| s.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
     }
 
     /// Look up the address of an OSD by its node_id. Used by the drain
@@ -4587,6 +4654,25 @@ impl MetadataService for MetaService {
             })
             .collect();
         Ok(Response::new(GetDrainStatusResponse { drains }))
+    }
+
+    async fn get_rebalance_status(
+        &self,
+        _request: Request<GetRebalanceStatusRequest>,
+    ) -> Result<Response<GetRebalanceStatusResponse>, Status> {
+        let p = self.rebalance_progress_snapshot();
+        // `paused` is sourced from the live config each request; the
+        // cached field is kept for the reconciler's fast path.
+        let paused = self.is_rebalance_paused();
+        Ok(Response::new(GetRebalanceStatusResponse {
+            started: p.started,
+            paused,
+            last_sweep_at: p.last_sweep_at,
+            scanned_this_pass: p.scanned_this_pass,
+            drifts_seen_this_pass: p.drifts_seen_this_pass,
+            shards_rebalanced_total: p.shards_rebalanced_total,
+            last_error: p.last_error,
+        }))
     }
 
     async fn list_config(

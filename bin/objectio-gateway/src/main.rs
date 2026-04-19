@@ -807,6 +807,18 @@ async fn main() -> Result<()> {
         .route("/_admin/hosts", post(admin::admin_add_hosts))
         .route("/_admin/host-provider", get(admin::admin_host_provider_info))
         .route("/_admin/drain-status", get(admin::admin_drain_status))
+        .route(
+            "/_admin/rebalance-status",
+            get(admin::admin_rebalance_status),
+        )
+        .route(
+            "/_admin/rebalance/pause",
+            post(admin::admin_rebalance_pause),
+        )
+        .route(
+            "/_admin/rebalance/resume",
+            post(admin::admin_rebalance_resume),
+        )
         .route("/_admin/cluster-info", get(admin::admin_cluster_info))
         .route("/_admin/topology", get(admin::admin_get_topology))
         .route(
