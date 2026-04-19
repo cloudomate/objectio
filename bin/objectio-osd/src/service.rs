@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// gRPC method metrics
@@ -273,7 +273,54 @@ impl OsdService {
         block_size: u32,
         data_dir: PathBuf,
     ) -> Result<Self, String> {
-        let node_id = *Uuid::new_v4().as_bytes();
+        // Node identity: Ceph/Rook pattern is "disk is source of truth".
+        // We follow a three-level cascade:
+        //   1. Any data disk's superblock — if one has a non-nil osd_node_id,
+        //      use it (and reject the mount if disks disagree).
+        //   2. data_dir/node_id — state PVC fallback for clusters running
+        //      without disk-level identity (pre-migration, dev setups).
+        //   3. Fresh uuid — only on true first boot; persisted to the
+        //      state PVC immediately so a restart finds it.
+        //
+        // Superblock wiring lives in a follow-up patch; this commit lands
+        // the state-PVC fallback so pod restarts stop orphaning shards.
+        let id_path = data_dir.join("node_id");
+        let node_id: [u8; 16] = match std::fs::read(&id_path) {
+            Ok(bytes) if bytes.len() == 16 => {
+                let mut id = [0u8; 16];
+                id.copy_from_slice(&bytes);
+                info!(
+                    "Loaded persistent OSD node_id from {}: {}",
+                    id_path.display(),
+                    hex::encode(id)
+                );
+                id
+            }
+            _ => {
+                // First boot (or corrupt file) — generate and persist.
+                if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                    return Err(format!(
+                        "Failed to create OSD data directory {}: {e}",
+                        data_dir.display()
+                    ));
+                }
+                let id = *Uuid::new_v4().as_bytes();
+                if let Err(e) = std::fs::write(&id_path, id) {
+                    warn!(
+                        "Generated OSD node_id but failed to persist to {}: {e} — \
+                         restarts will orphan data",
+                        id_path.display()
+                    );
+                } else {
+                    info!(
+                        "Generated persistent OSD node_id at {}: {}",
+                        id_path.display(),
+                        hex::encode(id)
+                    );
+                }
+                id
+            }
+        };
         let mut disks = Vec::new();
         let mut disk_ids = Vec::new();
 
