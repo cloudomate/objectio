@@ -366,6 +366,33 @@ message GetObjectResponse {
     ObjectMeta object = 1;
 }
 
+// Lightweight per-object summary stored in the Meta-backed
+// OBJECT_LISTINGS index. Carries the fields a client needs for
+// ListObjects responses (key, size, etag, timestamps) plus enough
+// routing info (primary_osd_id) for the gateway to locate the full
+// ObjectMeta without a scatter-gather. This is the authoritative
+// source of truth for "does object (bucket,key) exist in this
+// cluster" — updates happen through Raft MultiCas so every meta
+// replica sees the same commit at the same log position.
+message ObjectListingEntry {
+    string bucket = 1;
+    string key = 2;
+    uint64 size = 3;
+    string etag = 4;
+    string content_type = 5;
+    uint64 created_at = 6;
+    uint64 modified_at = 7;
+    string version_id = 8;
+    bool is_delete_marker = 9;
+    string storage_class = 10;
+    map<string, string> user_metadata = 11;
+    // Any one OSD that should have the full ObjectMeta replica. With
+    // the fan-out ObjectMeta model (every shard host holds a copy),
+    // this is a hint — the gateway tries this one first, falls back to
+    // the CRUSH placement on miss.
+    bytes primary_osd_id = 12;
+}
+
 // List objects
 message ListObjectsRequest {
     string bucket = 1;
@@ -378,11 +405,18 @@ message ListObjectsRequest {
 }
 
 message ListObjectsResponse {
+    // Pre-Raft-listings field — kept so older clients that still expect
+    // full ObjectMeta entries don't break. New server-side fills
+    // `entries` instead and leaves this empty.
     repeated ObjectMeta objects = 1;
     repeated string common_prefixes = 2;
     string next_continuation_token = 3;
     bool is_truncated = 4;
     uint32 key_count = 5;
+    // Meta-backed listing index results. When populated, this is
+    // authoritative — the gateway no longer scatter-gathers OSDs for
+    // this list.
+    repeated ObjectListingEntry entries = 6;
 }
 
 // Get placement for new object

@@ -38,6 +38,7 @@ use objectio_proto::metadata::{
     CreateMultipartUploadResponse,
     CreateObjectRequest,
     CreateObjectResponse,
+    ObjectListingEntry,
     CreatePolicyRequest,
     CreatePolicyResponse,
     // Pool types
@@ -2049,59 +2050,225 @@ impl MetadataService for MetaService {
 
     /// DEPRECATED: Object metadata is now stored on primary OSD
     /// This RPC is kept for backward compatibility but does nothing
+    /// Register a PUT in the Meta-backed OBJECT_LISTINGS index. Every
+    /// S3 PUT that succeeds at the data layer calls this to make the
+    /// object visible via ListObjects. Routed through Raft MultiCas so
+    /// followers see the commit at the same log position.
     async fn create_object(
         &self,
         request: Request<CreateObjectRequest>,
     ) -> Result<Response<CreateObjectResponse>, Status> {
         let req = request.into_inner();
-        warn!(
-            "create_object called (deprecated): {}/{}. Object metadata should be stored on primary OSD.",
-            req.bucket, req.key
-        );
-        // Return success but don't store anything - OSD is source of truth
+        if req.bucket.is_empty() || req.key.is_empty() {
+            return Err(Status::invalid_argument("bucket and key required"));
+        }
+
+        // Build the listing entry. primary_osd_id is optional (the
+        // first shard in the first stripe, as a routing hint).
+        let primary_osd_id = req
+            .stripes
+            .first()
+            .and_then(|s| s.shards.first())
+            .map(|s| s.node_id.clone())
+            .unwrap_or_default();
+        let now = Self::current_timestamp();
+        let entry = ObjectListingEntry {
+            bucket: req.bucket.clone(),
+            key: req.key.clone(),
+            size: req.size,
+            etag: req.etag.clone(),
+            content_type: req.content_type.clone(),
+            created_at: now,
+            modified_at: now,
+            version_id: String::new(),
+            is_delete_marker: false,
+            storage_class: "STANDARD".into(),
+            user_metadata: req.user_metadata.clone(),
+            primary_osd_id,
+        };
+        let listing_key = format!("{}\0{}\0", req.bucket, req.key);
+        let new_bytes = entry.encode_to_vec();
+
+        // Idempotent overwrite: PUT on an existing key replaces. Read
+        // current (if any) so the MultiCas doesn't spuriously fail.
+        let expected_bytes = self
+            .store
+            .as_ref()
+            .and_then(|s| s.read_object_listing(&listing_key));
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::ObjectListings,
+                    key: listing_key.clone(),
+                    expected: expected_bytes,
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "create-object".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "listing changed during PUT; client should retry",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_object: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_object_listing(&listing_key, &entry.encode_to_vec());
+        }
+
         Ok(Response::new(CreateObjectResponse { object: None }))
     }
 
-    /// DEPRECATED: Object metadata is now stored on primary OSD
-    /// This RPC is kept for backward compatibility but does nothing
     async fn delete_object(
         &self,
         request: Request<DeleteObjectRequest>,
     ) -> Result<Response<DeleteObjectResponse>, Status> {
         let req = request.into_inner();
-        warn!(
-            "delete_object called (deprecated): {}/{}. Object metadata should be deleted from primary OSD.",
-            req.bucket, req.key
-        );
-        // Return success - OSD is source of truth
+        let listing_key = format!("{}\0{}\0{}", req.bucket, req.key, req.version_id);
+        let expected_bytes = self
+            .store
+            .as_ref()
+            .and_then(|s| s.read_object_listing(&listing_key));
+        if expected_bytes.is_none() {
+            // Nothing to remove — return success idempotently.
+            return Ok(Response::new(DeleteObjectResponse {
+                success: true,
+                version_id: req.version_id,
+            }));
+        }
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::ObjectListings,
+                    key: listing_key,
+                    expected: expected_bytes,
+                    new_value: None,
+                }],
+                requested_by: "delete-object".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("listing changed during DELETE; retry"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_object: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            // Legacy non-raft path: direct redb delete.
+            store.delete_object_listing(&format!("{}\0{}\0{}", req.bucket, req.key, req.version_id));
+        }
+
         Ok(Response::new(DeleteObjectResponse {
             success: true,
-            version_id: String::new(),
+            version_id: req.version_id,
         }))
     }
 
-    /// DEPRECATED: Object metadata is now stored on primary OSD
-    /// Use scatter-gather to query OSDs directly
+    /// Single-object read — not in the common path (gateway goes to
+    /// OSDs for ObjectMeta), kept so admin tools can look up metadata
+    /// by (bucket, key).
     async fn get_object(
         &self,
         _request: Request<GetObjectRequest>,
     ) -> Result<Response<GetObjectResponse>, Status> {
-        // Object metadata is stored on primary OSD, not in meta service
         Err(Status::unimplemented(
-            "Object metadata is stored on primary OSD. Use GetObjectMeta RPC on OSD.",
+            "Object metadata lives on OSDs — use GetObjectMeta. ObjectListings only stores the listing hint.",
         ))
     }
 
-    /// DEPRECATED: Use scatter-gather to query OSDs directly
-    /// The meta service no longer maintains an object index
+    /// Linearizable listing via a B-tree scan of OBJECT_LISTINGS in
+    /// Meta's redb. Replaces the old scatter-gather-then-merge path
+    /// on the gateway. Continuation token is the bucket-relative
+    /// form of the last key returned.
     async fn list_objects(
         &self,
-        _request: Request<ListObjectsRequest>,
+        request: Request<ListObjectsRequest>,
     ) -> Result<Response<ListObjectsResponse>, Status> {
-        // ListObjects should use scatter-gather to query OSDs directly
-        Err(Status::unimplemented(
-            "ListObjects should use scatter-gather via Gateway. Use GetListingNodes + ListObjectsMeta on OSDs.",
-        ))
+        let req = request.into_inner();
+        if req.bucket.is_empty() {
+            return Err(Status::invalid_argument("bucket required"));
+        }
+        let max_keys = if req.max_keys == 0 {
+            1000
+        } else {
+            req.max_keys.min(1000) as usize
+        };
+        let start_after = if !req.continuation_token.is_empty() {
+            req.continuation_token.clone()
+        } else {
+            req.start_after.clone()
+        };
+
+        let Some(store) = &self.store else {
+            // No persistent store = no Raft backend — return empty.
+            return Ok(Response::new(ListObjectsResponse::default()));
+        };
+        let (rows, is_truncated, next_token) = store
+            .list_object_listings(&req.bucket, &req.prefix, &start_after, max_keys)
+            .map_err(|e| {
+                error!("list_object_listings failed: {e}");
+                Status::internal(format!("list failed: {e}"))
+            })?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for (_k, bytes) in rows {
+            match <ObjectListingEntry as prost::Message>::decode(bytes.as_slice()) {
+                Ok(e) => entries.push(e),
+                Err(err) => {
+                    warn!("decode ObjectListingEntry failed: {err}");
+                }
+            }
+        }
+
+        // Common prefixes (delimiter handling) — keep the existing
+        // shape the gateway expects. Our store scan returns fully
+        // expanded keys; applying the delimiter here keeps the client
+        // contract stable across the migration.
+        let mut common_prefixes: Vec<String> = Vec::new();
+        if !req.delimiter.is_empty() {
+            use std::collections::BTreeSet;
+            let mut prefixes: BTreeSet<String> = BTreeSet::new();
+            entries.retain(|e| {
+                let key = &e.key;
+                if let Some(tail) = key.strip_prefix(&req.prefix)
+                    && let Some(idx) = tail.find(&req.delimiter)
+                {
+                    let end = req.prefix.len() + idx + req.delimiter.len();
+                    prefixes.insert(key[..end].to_string());
+                    return false;
+                }
+                true
+            });
+            common_prefixes = prefixes.into_iter().collect();
+        }
+
+        let key_count = entries.len() as u32 + common_prefixes.len() as u32;
+        Ok(Response::new(ListObjectsResponse {
+            objects: Vec::new(),
+            common_prefixes,
+            next_continuation_token: next_token,
+            is_truncated,
+            key_count,
+            entries,
+        }))
     }
 
     async fn get_placement(

@@ -1632,8 +1632,79 @@ pub async fn list_objects(
         }
     }
 
-    // Use scatter-gather to list objects from all OSDs
+    // Prefer Meta's serializable listing index. Fall back to the
+    // scatter-gather path only when Meta has no entries for this
+    // bucket — happens during the transition window before the
+    // OBJECT_LISTINGS table is populated for pre-migration objects.
     let mut meta_client = state.meta_client.clone();
+    {
+        use objectio_proto::metadata::ListObjectsRequest as MetaListReq;
+        let meta_req = MetaListReq {
+            bucket: bucket.clone(),
+            prefix: prefix.clone(),
+            delimiter: delimiter.clone().unwrap_or_default(),
+            start_after: String::new(),
+            continuation_token: continuation_token
+                .clone()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            max_keys,
+            include_versions: false,
+        };
+        if let Ok(resp) = meta_client.list_objects(meta_req).await {
+            let r = resp.into_inner();
+            if !r.entries.is_empty() || !r.common_prefixes.is_empty() {
+                let contents: Vec<ObjectContent> = r
+                    .entries
+                    .into_iter()
+                    .map(|e| ObjectContent {
+                        key: e.key,
+                        last_modified: timestamp_to_iso(e.modified_at),
+                        etag: e.etag,
+                        size: e.size,
+                        storage_class: if e.storage_class.is_empty() {
+                            "STANDARD".into()
+                        } else {
+                            e.storage_class
+                        },
+                    })
+                    .collect();
+                let common_prefixes: Vec<CommonPrefix> = r
+                    .common_prefixes
+                    .into_iter()
+                    .map(|p| CommonPrefix { prefix: p })
+                    .collect();
+                let key_count = contents.len() + common_prefixes.len();
+                let result = ListBucketResult {
+                    name: bucket.clone(),
+                    prefix: prefix.clone(),
+                    delimiter: delimiter.clone(),
+                    max_keys,
+                    is_truncated: r.is_truncated,
+                    next_continuation_token: if r.next_continuation_token.is_empty() {
+                        None
+                    } else {
+                        Some(r.next_continuation_token)
+                    },
+                    key_count: Some(key_count as u32),
+                    common_prefixes,
+                    contents,
+                };
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
+                    to_xml(&result).unwrap_or_default()
+                );
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body(Body::from(xml))
+                    .unwrap();
+            }
+        }
+    }
+
+    // Fallback: scatter-gather for buckets whose objects predate the
+    // ObjectListings migration.
     match state
         .scatter_gather
         .list_objects(
@@ -2811,7 +2882,7 @@ pub async fn put_object(
         &placement.nodes,
         &bucket,
         &key,
-        object_meta,
+        object_meta.clone(),
         versioning_enabled,
     )
     .await
@@ -2822,6 +2893,32 @@ pub async fn put_object(
             &format!("Failed to store object metadata: {}", e),
             StatusCode::INTERNAL_SERVER_ERROR,
         );
+    }
+
+    // Register with Meta's serializable listing index. After this Raft
+    // commit the object is visible to ListObjects; without it the data
+    // is still readable by key but doesn't show up in a listing.
+    // Failure here leaves a "visible by direct GET only" window — log
+    // and return success since the data landed.
+    {
+        use objectio_proto::metadata::CreateObjectRequest;
+        let mut meta_client = state.meta_client.clone();
+        let req = CreateObjectRequest {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            size: original_size,
+            content_type: content_type.clone(),
+            etag: etag.clone(),
+            user_metadata: object_meta.user_metadata.clone(),
+            stripes: object_meta.stripes.clone(),
+            object_id: object_id.to_vec(),
+        };
+        if let Err(e) = meta_client.create_object(req).await {
+            warn!(
+                "create_object on meta failed ({e}); object is readable by key \
+                 but will not appear in ListObjects until repair",
+            );
+        }
     }
 
     info!(
@@ -3921,6 +4018,20 @@ pub async fn delete_object(
         delete_object_meta_from_all(&state.osd_pool, &placement.nodes, &bucket, &key, vid).await
     {
         warn!("Failed to delete object metadata from OSD: {}", e);
+    }
+
+    // Unregister from Meta's listing index. Non-fatal if it fails —
+    // the next ListObjects sweep will re-check the OSDs and prune.
+    {
+        use objectio_proto::metadata::DeleteObjectRequest as MetaDelReq;
+        let mut meta_client = state.meta_client.clone();
+        let _ = meta_client
+            .delete_object(MetaDelReq {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                version_id: vid.to_string(),
+            })
+            .await;
     }
 
     info!(

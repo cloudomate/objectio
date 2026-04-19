@@ -93,3 +93,12 @@ pub const BUCKET_ENCRYPTION_CONFIGS: TableDefinition<&str, &[u8]> =
 // KMS keys (service-master-key-wrapped key material)
 // Key: key_id, Value: prost-encoded KmsKey
 pub const KMS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("kms_keys");
+
+// Object listing index. Strongly-consistent "does (bucket,key[,version])
+// exist in this cluster" source of truth, maintained by the gateway's
+// S3 PUT/DELETE path via Raft MultiCas against CasTable::ObjectListings.
+// Key format: "{bucket}\0{key}\0{version_id}" — null-byte separators so
+// redb's range scan over a bucket prefix ("foo\0") reliably stops at the
+// next bucket. Value: prost-encoded ObjectListingEntry.
+pub const OBJECT_LISTINGS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("object_listings");

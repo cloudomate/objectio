@@ -359,6 +359,7 @@ fn cas_table_name(t: &CasTable) -> &str {
         CasTable::PolicyAttachments => "policy_attachments",
         CasTable::DataFilters => "data_filters",
         CasTable::MultipartUploads => "multipart_uploads",
+        CasTable::ObjectListings => "object_listings",
         CasTable::Named(n) => n,
     }
 }

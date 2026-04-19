@@ -555,6 +555,97 @@ impl MetaStore {
         Ok(failed)
     }
 
+    // ---- Object listings (prost, Raft-backed) ----
+
+    pub fn read_object_listing(&self, key: &str) -> Option<Vec<u8>> {
+        let read_txn = self.db.begin_read().ok()?;
+        let table = match read_txn.open_table(tables::OBJECT_LISTINGS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return None,
+            Err(_) => return None,
+        };
+        table.get(key).ok()?.map(|v| v.value().to_vec())
+    }
+
+    pub fn put_object_listing(&self, key: &str, bytes: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::OBJECT_LISTINGS, key, bytes) {
+            error!("Failed to persist object listing '{key}': {e}");
+        }
+    }
+
+    pub fn delete_object_listing(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::OBJECT_LISTINGS, key) {
+            error!("Failed to delete object listing '{key}': {e}");
+        }
+    }
+
+
+    /// Range scan over OBJECT_LISTINGS for one bucket with an optional
+    /// prefix filter. Returns up to `max_keys` entries (bucket/key/ver
+    /// strings plus raw prost-encoded ObjectListingEntry bytes) in
+    /// key-sorted order, and a continuation token for the next page.
+    /// Keys are stored as `{bucket}\0{key}\0{version_id}` so a range
+    /// scan starting at `{bucket}\0{prefix}` stops cleanly when the
+    /// next bucket begins.
+    pub fn list_object_listings(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        start_after: &str,
+        max_keys: usize,
+    ) -> MetaStoreResult<(Vec<(String, Vec<u8>)>, bool, String)> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(tables::OBJECT_LISTINGS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok((Vec::new(), false, String::new()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let bucket_prefix = format!("{bucket}\0");
+        let full_prefix = format!("{bucket_prefix}{prefix}");
+        let start_exclusive = if start_after.is_empty() {
+            None
+        } else {
+            Some(format!("{bucket_prefix}{start_after}"))
+        };
+
+        // Range: [full_prefix, bucket\0\xff) — iterate forward, stop on
+        // either max_keys or when the key no longer starts with
+        // full_prefix.
+        let mut results: Vec<(String, Vec<u8>)> = Vec::with_capacity(max_keys.min(1024));
+        let mut is_truncated = false;
+        let mut next_token = String::new();
+
+        let iter = table.range(full_prefix.as_str()..)?;
+        for entry in iter {
+            let (k, v) = entry?;
+            let k_str = k.value().to_string();
+            if !k_str.starts_with(&full_prefix) {
+                break;
+            }
+            if let Some(ref after) = start_exclusive
+                && k_str.as_str() <= after.as_str()
+            {
+                continue;
+            }
+            if results.len() >= max_keys {
+                is_truncated = true;
+                // Strip the bucket prefix from the token for caller
+                // convenience — they pass it back as start_after which
+                // is in bucket-relative form.
+                next_token = results
+                    .last()
+                    .map(|(k, _)| k[bucket_prefix.len()..].to_string())
+                    .unwrap_or_default();
+                break;
+            }
+            results.push((k_str, v.value().to_vec()));
+        }
+        Ok((results, is_truncated, next_token))
+    }
+
     // ---- Data Filters (bincode) ----
 
     pub fn put_data_filter(&self, filter_id: &str, filter: &StoredDataFilter) {
