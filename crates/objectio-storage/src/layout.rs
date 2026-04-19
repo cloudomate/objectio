@@ -90,8 +90,25 @@ pub struct Superblock {
     pub mount_count: u64,
     /// Flags
     pub flags: u32,
-    /// Reserved for future use
-    pub reserved: [u8; 128],
+    /// Cluster this disk belongs to. All-zero on pre-identity disks;
+    /// set on first init. DiskManager::open refuses to mount a disk
+    /// whose cluster_uuid does not match the cluster's — prevents
+    /// accidentally mixing disks from different clusters.
+    ///
+    /// Lives in bytes 0..16 of the old reserved[128] block so pre-
+    /// identity disks decode cleanly (zeros = "unset").
+    pub cluster_uuid: Uuid,
+    /// Stable node_id of the OSD that owns this disk. All-zero until
+    /// the OSD writes its identity on first init. OSDs use this as
+    /// their persistent cluster identity across pod restarts so old
+    /// shards don't get orphaned when the container is recycled.
+    ///
+    /// Lives in bytes 16..32 of the old reserved[128] block.
+    pub osd_node_id: [u8; 16],
+    /// Remaining reserved-for-future bytes (was 128; now 96 after
+    /// carving out cluster_uuid + osd_node_id). Stays zero until
+    /// a future feature claims part of it.
+    pub reserved: [u8; 96],
     /// Checksum of superblock (excluding this field)
     pub checksum: u32,
 }
@@ -149,12 +166,31 @@ impl Superblock {
             last_mount: now,
             mount_count: 1,
             flags: 0,
-            reserved: [0u8; 128],
+            cluster_uuid: Uuid::nil(),
+            osd_node_id: [0u8; 16],
+            reserved: [0u8; 96],
             checksum: 0,
         };
 
         sb.checksum = sb.compute_checksum();
         Ok(sb)
+    }
+
+    /// Fill in the OSD-identity fields on a fresh superblock. Called
+    /// by the format path when the OSD knows the cluster_uuid it
+    /// belongs to and the node_id it will advertise.
+    pub fn set_identity(&mut self, cluster_uuid: Uuid, osd_node_id: [u8; 16]) {
+        self.cluster_uuid = cluster_uuid;
+        self.osd_node_id = osd_node_id;
+        self.checksum = self.compute_checksum();
+    }
+
+    /// Was this disk initialised with an OSD identity? Pre-upgrade
+    /// disks read all zeros here and return false; the OSD treats
+    /// those as "blank identity" and writes one on next mount.
+    #[must_use]
+    pub fn has_identity(&self) -> bool {
+        !self.cluster_uuid.is_nil() && self.osd_node_id != [0u8; 16]
     }
 
     /// Serialize superblock to bytes
@@ -181,6 +217,11 @@ impl Superblock {
         buf.put_u64_le(self.last_mount);
         buf.put_u64_le(self.mount_count);
         buf.put_u32_le(self.flags);
+        // Identity fields live at the start of the former reserved[128]
+        // region so pre-identity disks (all-zero reserved) parse as
+        // nil UUID + zero node_id — treated as "unset" by has_identity().
+        buf.put_slice(self.cluster_uuid.as_bytes());
+        buf.put_slice(&self.osd_node_id);
         buf.put_slice(&self.reserved);
         buf.put_u32_le(self.checksum);
 
@@ -237,7 +278,16 @@ impl Superblock {
         let mount_count = buf.get_u64_le();
         let flags = buf.get_u32_le();
 
-        let mut reserved = [0u8; 128];
+        // Identity lives in the old reserved[128] prefix. Pre-identity
+        // disks read all zeros → nil UUID + zero node_id.
+        let mut cluster_uuid_bytes = [0u8; 16];
+        buf.copy_to_slice(&mut cluster_uuid_bytes);
+        let cluster_uuid = Uuid::from_bytes(cluster_uuid_bytes);
+
+        let mut osd_node_id = [0u8; 16];
+        buf.copy_to_slice(&mut osd_node_id);
+
+        let mut reserved = [0u8; 96];
         buf.copy_to_slice(&mut reserved);
 
         let checksum = buf.get_u32_le();
@@ -263,6 +313,8 @@ impl Superblock {
             last_mount,
             mount_count,
             flags,
+            cluster_uuid,
+            osd_node_id,
             reserved,
             checksum,
         };
