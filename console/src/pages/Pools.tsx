@@ -33,6 +33,10 @@ interface Pool {
   description: string;
   enabled: boolean;
   created_at: number;
+  // PG-engine fields; optional because older pools + older gateways
+  // may not return them.
+  pg_count?: number;
+  tier?: string;
 }
 
 const emptyPool: Omit<Pool, "created_at"> = {
@@ -919,6 +923,12 @@ function PoolList({
             <th className="text-left px-4 py-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
               Domain
             </th>
+            <th
+              className="text-left px-4 py-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider"
+              title="Placement groups — 0 = legacy per-object CRUSH"
+            >
+              PGs
+            </th>
             <th className="text-left px-4 py-2 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
               Quota
             </th>
@@ -933,7 +943,7 @@ function PoolList({
         <tbody className="divide-y divide-gray-100">
           {loading ? (
             <tr>
-              <td colSpan={7} className="px-4 py-8 text-center">
+              <td colSpan={8} className="px-4 py-8 text-center">
                 <div className="flex items-center justify-center gap-3">
                   <div className="w-16 h-0.5 bg-gray-200 rounded-full overflow-hidden">
                     <div className="h-full w-1/2 bg-blue-400 rounded-full animate-loading-bar" />
@@ -945,7 +955,7 @@ function PoolList({
           ) : pools.length === 0 ? (
             <tr>
               <td
-                colSpan={7}
+                colSpan={8}
                 className="px-4 py-8 text-center text-[12px] text-gray-400"
               >
                 No storage pools configured
@@ -984,6 +994,18 @@ function PoolList({
                 </td>
                 <td className="px-4 py-2 text-[12px] text-gray-500">
                   {p.failure_domain}
+                </td>
+                <td className="px-4 py-2 text-[12px] font-mono text-gray-500">
+                  {p.pg_count && p.pg_count > 0 ? (
+                    <span
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-medium"
+                      title="Placement-group routed"
+                    >
+                      {p.pg_count.toLocaleString()}
+                    </span>
+                  ) : (
+                    <span className="text-gray-400 text-[10px]">legacy</span>
+                  )}
                 </td>
                 <td className="px-4 py-2 text-[12px] text-gray-500">
                   {formatBytes(p.quota_bytes)}
