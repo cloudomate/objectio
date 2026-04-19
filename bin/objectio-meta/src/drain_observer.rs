@@ -690,16 +690,19 @@ async fn rebalance_sweep(
                         continue;
                     }
 
-                    let Some(ideal) = meta
-                        .pick_migration_target(&object_id, shard.position, &current)
+                    // Ask CRUSH for its canonical pick at this
+                    // position (no "exclude current" trickery) and
+                    // compare to what's actually stored. If equal,
+                    // the shard is already where CRUSH wants it —
+                    // not drift. This is the correct drift test;
+                    // pick_migration_target is for the drain path
+                    // where we explicitly want "anything but the
+                    // draining OSD".
+                    let Some(ideal) =
+                        meta.crush_ideal_for_position(&object_id, shard.position)
                     else {
                         continue;
                     };
-
-                    // If CRUSH's pick is the current owner, no drift.
-                    // pick_migration_target returns "anything but
-                    // excluded", so ideal will equal current when the
-                    // placement is already correct — treat as no drift.
                     if ideal == current {
                         continue;
                     }
@@ -710,14 +713,17 @@ async fn rebalance_sweep(
                         continue;
                     }
 
-                    // One migration per sweep. Use the same primitive
-                    // as drain; the only difference is the "target"
-                    // comes from the rebalancer instead of the
-                    // draining-node filter.
+                    // One migration per sweep. The target comes from
+                    // CRUSH's canonical pick (ideal, already computed
+                    // above) — passing it in avoids another CRUSH
+                    // lookup inside migrate_rebalance_one and
+                    // guarantees the two callsites agree on what
+                    // "the right place" is.
                     if let Err(e) = migrate_rebalance_one(
                         meta,
                         &current,
                         addr,
+                        ideal,
                         &object,
                         stripe.stripe_id,
                         shard.position,
@@ -769,11 +775,15 @@ async fn rebalance_sweep(
 
 /// One drift migration. Same steps as `migrate_shard_one` (read, write,
 /// rewrite ObjectMeta, delete source) but the object is already in
-/// hand so we skip the find-affected phase.
+/// hand so we skip the find-affected phase. `target_node` comes from
+/// the caller's already-computed CRUSH ideal — we don't re-ask CRUSH
+/// here, to guarantee the "is this drift" test and the "move where"
+/// decision use the same node.
 async fn migrate_rebalance_one(
     meta: &Arc<MetaService>,
     current_owner: &[u8; 16],
     current_owner_meta_addr: &str, // OSD that holds the ObjectMeta
+    target_node: [u8; 16],
     object: &objectio_proto::metadata::ObjectMeta,
     stripe_id: u64,
     position: u32,
@@ -784,11 +794,8 @@ async fn migrate_rebalance_one(
         return Err(anyhow::anyhow!("object_id len != 16"));
     };
 
-    let target_node = meta
-        .pick_migration_target(&object_id, position, current_owner)
-        .ok_or_else(|| anyhow::anyhow!("no CRUSH target"))?;
     if &target_node == current_owner {
-        return Ok(()); // No-op
+        return Ok(()); // No-op — caller shouldn't have decided this was drift.
     }
 
     // Source / target must be currently registered for the migrate
