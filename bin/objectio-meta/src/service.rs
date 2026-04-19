@@ -1736,13 +1736,43 @@ impl MetadataService for MetaService {
             object_lock: None,
         };
 
+        // Replicate through Raft so followers see the new bucket at the
+        // same log position. Single-op MultiCas with expected=None enforces
+        // "must-not-exist" at the state machine — if a concurrent proposal
+        // on another pod raced us, the CAS fails and we surface it as
+        // AlreadyExists (same error the in-memory precheck above returns).
+        let bucket_bytes = bucket.encode_to_vec();
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Buckets,
+                    key: req.name.clone(),
+                    expected: None,
+                    new_value: Some(bucket_bytes),
+                }],
+                requested_by: "create-bucket".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("bucket already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_bucket: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_bucket(&req.name, &bucket);
+        }
+
         self.buckets
             .write()
             .insert(req.name.clone(), bucket.clone());
-
-        if let Some(store) = &self.store {
-            store.put_bucket(&req.name, &bucket);
-        }
 
         info!("Created bucket: {}", req.name);
 
@@ -1757,20 +1787,50 @@ impl MetadataService for MetaService {
     ) -> Result<Response<DeleteBucketResponse>, Status> {
         let req = request.into_inner();
 
-        // Check if bucket exists
-        if !self.buckets.read().contains_key(&req.name) {
-            return Err(Status::not_found("bucket not found"));
-        }
+        // Read current bucket bytes so the CAS can detect a concurrent
+        // mutation between now and commit.
+        let current = {
+            let b = self.buckets.read();
+            b.get(&req.name)
+                .cloned()
+                .ok_or_else(|| Status::not_found("bucket not found"))?
+        };
+        let expected_bytes = current.encode_to_vec();
 
-        // Note: The check for whether bucket is empty should be done by the Gateway
-        // using scatter-gather before calling delete_bucket. Object metadata is stored
-        // on OSDs, so we can't check emptiness from the meta service.
+        // Note: The check for whether bucket is empty should be done by
+        // the Gateway using scatter-gather before calling delete_bucket.
 
-        self.buckets.write().remove(&req.name);
-
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Buckets,
+                    key: req.name.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: None, // delete
+                }],
+                requested_by: "delete-bucket".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "bucket changed since read; retry delete",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_bucket: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_bucket(&req.name);
         }
+
+        self.buckets.write().remove(&req.name);
 
         info!("Deleted bucket: {}", req.name);
 
@@ -2478,13 +2538,49 @@ impl MetadataService for MetaService {
             return Err(Status::invalid_argument("invalid policy JSON"));
         }
 
+        // CAS against whatever is currently stored so a concurrent update
+        // from another pod doesn't silently overwrite. Racing admin
+        // operations retry from the handler.
+        let expected = self
+            .bucket_policies
+            .read()
+            .get(&req.bucket)
+            .map(|v| v.as_bytes().to_vec());
+        let new_value = Some(req.policy_json.as_bytes().to_vec());
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::BucketPolicies,
+                    key: req.bucket.clone(),
+                    expected,
+                    new_value,
+                }],
+                requested_by: "set-bucket-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "bucket policy changed since read; retry",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for set_bucket_policy: {:?}", other);
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_bucket_policy(&req.bucket, &req.policy_json);
+        }
+
         self.bucket_policies
             .write()
             .insert(req.bucket.clone(), req.policy_json.clone());
-
-        if let Some(store) = &self.store {
-            store.put_bucket_policy(&req.bucket, &req.policy_json);
-        }
 
         info!("Set bucket policy for: {}", req.bucket);
 
@@ -2525,11 +2621,46 @@ impl MetadataService for MetaService {
             return Err(Status::not_found("bucket not found"));
         }
 
-        self.bucket_policies.write().remove(&req.bucket);
+        let expected = self
+            .bucket_policies
+            .read()
+            .get(&req.bucket)
+            .map(|v| v.as_bytes().to_vec());
 
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::BucketPolicies,
+                    key: req.bucket.clone(),
+                    expected,
+                    new_value: None, // delete
+                }],
+                requested_by: "delete-bucket-policy".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(resp) => match resp.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "bucket policy changed since read; retry",
+                        ));
+                    }
+                    other => {
+                        error!(
+                            "unexpected raft response for delete_bucket_policy: {:?}",
+                            other
+                        );
+                        return Err(Status::internal("raft commit returned wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_bucket_policy(&req.bucket);
         }
+
+        self.bucket_policies.write().remove(&req.bucket);
 
         info!("Deleted bucket policy for: {}", req.bucket);
 
