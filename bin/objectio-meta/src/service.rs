@@ -1110,7 +1110,13 @@ impl MetaService {
     /// preventing an operator from accidentally mounting a disk from a
     /// different cluster.
     pub async fn cluster_uuid(&self) -> Vec<u8> {
-        const KEY: &str = "cluster/uuid";
+        // Deliberately "cluster/id" rather than "cluster/uuid" — an
+        // earlier patch of this function wrote raw 16-byte UUIDs to
+        // `cluster/uuid` (missing the ConfigEntry wrap), which left
+        // some clusters with a decode-failing entry at that key and a
+        // permanent MultiCasConflict on re-write with expected=None.
+        // Using a fresh key sidesteps the recovery dance.
+        const KEY: &str = "cluster/id";
         // Fast path — in-memory config cache.
         {
             let cfg = self.config.read();
