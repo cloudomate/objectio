@@ -52,6 +52,8 @@ const emptyPool: Omit<Pool, "created_at"> = {
   quota_bytes: 0,
   description: "",
   enabled: true,
+  pg_count: 0,
+  tier: "",
 };
 
 function formatBytes(b: number) {
@@ -679,6 +681,27 @@ function ConfigTab({
               <option value={1099511627776}>1 TB</option>
               <option value={10995116277760}>10 TB</option>
               <option value={109951162777600}>100 TB</option>
+            </select>
+          </FormField>
+          <FormField
+            label="Placement Groups"
+            hint="0 = legacy CRUSH. Rec: 100 × OSDs ÷ (k+m), rounded up"
+          >
+            <select
+              value={form.pg_count ?? 0}
+              onChange={(e) =>
+                setForm({ ...form, pg_count: Number(e.target.value) })
+              }
+              className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-[13px] bg-white focus:ring-1 focus:ring-blue-500 focus:outline-none"
+            >
+              <option value={0}>0 (legacy)</option>
+              <option value={64}>64</option>
+              <option value={128}>128</option>
+              <option value={256}>256</option>
+              <option value={512}>512</option>
+              <option value={1024}>1024</option>
+              <option value={2048}>2048</option>
+              <option value={4096}>4096</option>
             </select>
           </FormField>
         </div>
