@@ -39,8 +39,10 @@ export interface IcebergTable {
   name: string;
 }
 
-// Simple fetch wrapper with error handling
-async function request<T>(
+// Simple fetch wrapper with error handling. `body` is JSON.stringify'd
+// for objects/arrays; raw strings are sent verbatim so balancer config
+// writes can pass a plain `0.95` or `true` without a JSON-object wrap.
+export async function request<T>(
   method: string,
   path: string,
   body?: unknown
@@ -49,7 +51,9 @@ async function request<T>(
     method,
     headers: { "Content-Type": "application/json" },
   };
-  if (body) opts.body = JSON.stringify(body);
+  if (body !== undefined && body !== null) {
+    opts.body = typeof body === "string" ? body : JSON.stringify(body);
+  }
 
   const resp = await fetch(`${BASE}${path}`, opts);
   if (!resp.ok) {

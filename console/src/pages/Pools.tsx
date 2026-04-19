@@ -108,7 +108,11 @@ type WizardTab = "config" | "volumes" | "policies";
 // Page
 // ---------------------------------------------------------------------
 
-export default function Pools() {
+interface PoolsProps {
+  embedded?: boolean;
+}
+
+export default function Pools({ embedded = false }: PoolsProps = {}) {
   const [pools, setPools] = useState<Pool[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState(emptyPool);
@@ -215,21 +219,33 @@ export default function Pools() {
   }, [form, osdCount, k8sNodeCount]);
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Storage Management"
-        description="Manage pools, volumes, and data policies."
-        action={
-          !editing ? (
-            <button
-              onClick={() => startEdit()}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-[12px] font-medium hover:bg-blue-700"
-            >
-              <Plus size={14} /> Create Pool
-            </button>
-          ) : null
-        }
-      />
+    <div className={embedded ? "" : "p-6"}>
+      {!embedded && (
+        <PageHeader
+          title="Storage Management"
+          description="Manage pools, volumes, and data policies."
+          action={
+            !editing ? (
+              <button
+                onClick={() => startEdit()}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white rounded-lg text-[12px] font-medium hover:bg-blue-700"
+              >
+                <Plus size={14} /> Create Pool
+              </button>
+            ) : null
+          }
+        />
+      )}
+      {embedded && !editing && (
+        <div className="flex items-center justify-end mb-3">
+          <button
+            onClick={() => startEdit()}
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-600 text-white rounded-lg text-[11px] font-medium hover:bg-blue-700"
+          >
+            <Plus size={12} /> Create Pool
+          </button>
+        </div>
+      )}
 
       {editing ? (
         <PoolWizard

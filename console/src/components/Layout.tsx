@@ -9,7 +9,6 @@ import {
   Table2,
   Share2,
   Activity,
-  HardDrive,
   Box,
   Layers,
   Building2,
@@ -36,7 +35,10 @@ const nav: NavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/buckets", icon: Archive, label: "Buckets" },
   { to: "/objects", icon: Box, label: "Object Browser" },
-  { to: "/pools", icon: Layers, label: "Storage Pools", adminOnly: true },
+  // Cluster bundles Topology + Nodes & Drives + Storage Pools +
+  // Balancing into a tabbed view. The legacy /pools, /topology,
+  // /drives routes redirect here for bookmark back-compat.
+  { to: "/cluster", icon: Layers, label: "Cluster", adminOnly: true },
   { to: "/tenants", icon: Building2, label: "Tenants", adminOnly: true, feature: "multi_tenancy" },
   { to: "/users", icon: Users, label: "Users" },
   { to: "/policies", icon: Shield, label: "Policies" },
@@ -44,8 +46,6 @@ const nav: NavItem[] = [
   { to: "/iceberg", icon: Table2, label: "Tables", feature: "iceberg" },
   { to: "/sharing", icon: Share2, label: "Table Sharing", feature: "delta_sharing" },
   { to: "/monitoring", icon: Activity, label: "Monitoring", adminOnly: true },
-  { to: "/drives", icon: HardDrive, label: "Nodes & Drives", adminOnly: true },
-  { to: "/topology", icon: Layers, label: "Topology", adminOnly: true },
   { to: "/encryption", icon: KeyRound, label: "Encryption", adminOnly: true, feature: "kms" },
   { to: "/license", icon: ScrollText, label: "License", adminOnly: true },
 ];

@@ -161,7 +161,13 @@ function TreeRow({
 
 /// Cluster Topology — hierarchical tree + selectable host rows with a
 /// right-side detail drawer (mirrors the mock's Cluster Topology screen).
-export default function Topology() {
+interface Props {
+  /// When rendered as a tab inside the unified /cluster page, the
+  /// parent PageHeader already shows the title — skip ours.
+  embedded?: boolean;
+}
+
+export default function Topology({ embedded = false }: Props = {}) {
   const [topology, setTopology] = useState<TopologyData | null>(null);
   const [osdNodes, setOsdNodes] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -387,23 +393,38 @@ export default function Topology() {
     <div className="flex h-screen bg-gray-50">
       {/* Main tree area */}
       <div className="flex-1 overflow-y-auto p-6 min-w-0">
-        <PageHeader
-          title="Cluster Topology"
-          description="Visual hierarchy and status of physical storage resources."
-          action={
-            <div className="flex items-center gap-2">
-              <StatusDot status="healthy" label={`${hostSummary.up} Hosts Up`} size="md" />
-              <StatusDot status="warning" label={`${hostSummary.warn} Warn`} size="md" />
-              <StatusDot status="error" label={`${hostSummary.down} Down`} size="md" />
-              <button
-                onClick={() => setRefreshKey((k) => k + 1)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
-              >
-                <RefreshCw size={13} /> Refresh
-              </button>
-            </div>
-          }
-        />
+        {!embedded && (
+          <PageHeader
+            title="Cluster Topology"
+            description="Visual hierarchy and status of physical storage resources."
+            action={
+              <div className="flex items-center gap-2">
+                <StatusDot status="healthy" label={`${hostSummary.up} Hosts Up`} size="md" />
+                <StatusDot status="warning" label={`${hostSummary.warn} Warn`} size="md" />
+                <StatusDot status="error" label={`${hostSummary.down} Down`} size="md" />
+                <button
+                  onClick={() => setRefreshKey((k) => k + 1)}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 border border-gray-200 text-gray-700 rounded-lg text-[12px] font-medium hover:bg-gray-50"
+                >
+                  <RefreshCw size={13} /> Refresh
+                </button>
+              </div>
+            }
+          />
+        )}
+        {embedded && (
+          <div className="flex items-center justify-end gap-2 mb-3">
+            <StatusDot status="healthy" label={`${hostSummary.up} Up`} size="sm" />
+            <StatusDot status="warning" label={`${hostSummary.warn} Warn`} size="sm" />
+            <StatusDot status="error" label={`${hostSummary.down} Down`} size="sm" />
+            <button
+              onClick={() => setRefreshKey((k) => k + 1)}
+              className="flex items-center gap-1.5 px-2.5 py-1 border border-gray-200 text-gray-700 rounded-lg text-[11px] font-medium hover:bg-gray-50"
+            >
+              <RefreshCw size={12} /> Refresh
+            </button>
+          </div>
+        )}
 
         {loading && !topology && (
           <div className="text-[12px] text-gray-400">Loading topology…</div>

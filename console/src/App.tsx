@@ -8,17 +8,16 @@ import BucketDetail from "./pages/BucketDetail";
 import Objects from "./pages/Objects";
 import UsersPage from "./pages/Users";
 import Identity from "./pages/Identity";
-import Pools from "./pages/Pools";
 import Tenants from "./pages/Tenants";
 import IcebergCatalog from "./pages/IcebergCatalog";
 import DeltaSharing from "./pages/DeltaSharing";
 import Monitoring from "./pages/Monitoring";
-import Drives from "./pages/Drives";
 import Policies from "./pages/Policies";
 import Encryption from "./pages/Encryption";
 import LicensePage from "./pages/License";
-import Topology from "./pages/Topology";
+import Cluster from "./pages/Cluster";
 import MyAccount from "./pages/MyAccount";
+import { Navigate } from "react-router-dom";
 
 export default function App() {
   const [user, setUser] = useState<string | null>(null);
@@ -78,15 +77,25 @@ export default function App() {
         <Route path="users" element={<UsersPage />} />
         <Route path="policies" element={<Policies />} />
         <Route path="identity" element={<Identity />} />
-        {isSystemAdmin && <Route path="pools" element={<Pools />} />}
         {isSystemAdmin && <Route path="tenants" element={<Tenants />} />}
         <Route path="iceberg" element={<IcebergCatalog />} />
         <Route path="sharing" element={<DeltaSharing />} />
         {isSystemAdmin && <Route path="monitoring" element={<Monitoring />} />}
-        {isSystemAdmin && <Route path="drives" element={<Drives />} />}
         {isSystemAdmin && <Route path="encryption" element={<Encryption />} />}
         {isSystemAdmin && <Route path="license" element={<LicensePage />} />}
-        {isSystemAdmin && <Route path="topology" element={<Topology />} />}
+        {/* Unified cluster page — Topology / Nodes & Drives / Pools /
+            Balancing tabs. Old routes redirect so deep links stay live. */}
+        {isSystemAdmin && <Route path="cluster" element={<Cluster />} />}
+        {isSystemAdmin && <Route path="cluster/:tab" element={<Cluster />} />}
+        {isSystemAdmin && (
+          <Route path="pools" element={<Navigate to="/cluster/pools" replace />} />
+        )}
+        {isSystemAdmin && (
+          <Route path="drives" element={<Navigate to="/cluster/drives" replace />} />
+        )}
+        {isSystemAdmin && (
+          <Route path="topology" element={<Navigate to="/cluster/topology" replace />} />
+        )}
       </Route>
     </Routes>
   );

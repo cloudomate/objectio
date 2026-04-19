@@ -59,7 +59,11 @@ interface Host {
 /// Node & OSD Management page — expandable host rows → OSD children, with
 /// capacity, topology path, and status per row. Mirrors the layout from
 /// the product mock.
-export default function Drives() {
+interface Props {
+  embedded?: boolean;
+}
+
+export default function Drives({ embedded = false }: Props = {}) {
   const [nodeList, setNodeList] = useState<NodeInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -167,7 +171,8 @@ export default function Drives() {
   };
 
   return (
-    <div className="p-6">
+    <div className={embedded ? "" : "p-6"}>
+      {!embedded && (
       <PageHeader
         title="Node & OSD Management"
         description="Manage physical hosts and storage daemons across the cluster topology."
@@ -204,6 +209,24 @@ export default function Drives() {
           </div>
         }
       />
+      )}
+      {embedded && (
+        <div className="flex items-center justify-end gap-2 mb-3">
+          <button
+            onClick={load}
+            className="flex items-center gap-1.5 px-2.5 py-1 border border-gray-200 text-gray-700 rounded-lg text-[11px] font-medium hover:bg-gray-50"
+          >
+            <RefreshCw size={12} /> Refresh
+          </button>
+          <button
+            onClick={addHost}
+            disabled={adding || !provider?.supports_add_host}
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-blue-600 text-white rounded-lg text-[11px] font-medium hover:bg-blue-700 disabled:opacity-50"
+          >
+            <Plus size={12} /> {adding ? "Adding…" : "Add Host"}
+          </button>
+        </div>
+      )}
 
       {actionError && (
         <div className="mb-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-[12px] text-red-700">
