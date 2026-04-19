@@ -579,6 +579,85 @@ impl MetaStore {
         }
     }
 
+    // ---- Placement groups (prost, Raft-backed) ----
+    //
+    // Keys are "{pool}\0{pg_id:010}" so a range scan on pool_prefix
+    // ("default\0") returns every PG in that pool in pg_id order.
+    // The balancer reads these to plan moves; the Raft state machine
+    // is the only writer (via CasTable::PlacementGroups MultiCas ops).
+    // Store methods below are reader-only + a fallback raw put/delete
+    // for the non-Raft test path.
+
+    pub fn read_placement_group(&self, pool: &str, pg_id: u32) -> Option<Vec<u8>> {
+        let key = Self::pg_key(pool, pg_id);
+        let read_txn = self.db.begin_read().ok()?;
+        let table = match read_txn.open_table(tables::PLACEMENT_GROUPS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return None,
+            Err(_) => return None,
+        };
+        table.get(key.as_str()).ok()?.map(|v| v.value().to_vec())
+    }
+
+    /// Fallback for test builds without a Raft handle. Production path
+    /// always goes through `CasTable::PlacementGroups` in MultiCas.
+    pub fn put_placement_group(&self, pool: &str, pg_id: u32, bytes: &[u8]) {
+        let key = Self::pg_key(pool, pg_id);
+        if let Err(e) = self.put_bytes(tables::PLACEMENT_GROUPS, &key, bytes) {
+            error!("Failed to persist placement group {pool}/{pg_id}: {e}");
+        }
+    }
+
+    pub fn delete_placement_group(&self, pool: &str, pg_id: u32) {
+        let key = Self::pg_key(pool, pg_id);
+        if let Err(e) = self.delete_key(tables::PLACEMENT_GROUPS, &key) {
+            error!("Failed to delete placement group {pool}/{pg_id}: {e}");
+        }
+    }
+
+    /// Range-scan every PG in the pool in pg_id order. Returns raw
+    /// prost-encoded bytes; callers decode into `PlacementGroup`.
+    pub fn list_placement_groups(
+        &self,
+        pool: &str,
+        start_after_pg_id: u32,
+        max_results: usize,
+    ) -> MetaStoreResult<Vec<Vec<u8>>> {
+        let read_txn = self.db.begin_read()?;
+        let table = match read_txn.open_table(tables::PLACEMENT_GROUPS) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let pool_prefix = format!("{pool}\0");
+        let start = if start_after_pg_id == 0 {
+            pool_prefix.clone()
+        } else {
+            // Start at the next PG after start_after_pg_id.
+            Self::pg_key(pool, start_after_pg_id.saturating_add(1))
+        };
+        let mut out = Vec::with_capacity(max_results.min(1024));
+        for entry in table.range(start.as_str()..)? {
+            let (k, v) = entry?;
+            let k_str = k.value().to_string();
+            if !k_str.starts_with(&pool_prefix) {
+                break;
+            }
+            if out.len() >= max_results {
+                break;
+            }
+            out.push(v.value().to_vec());
+        }
+        Ok(out)
+    }
+
+    /// Key format shared with the state machine. Keep both call sites
+    /// in lock-step — changing the zero-padding width invalidates
+    /// every stored key.
+    pub fn pg_key(pool: &str, pg_id: u32) -> String {
+        format!("{pool}\0{pg_id:010}")
+    }
+
 
     /// Range scan over OBJECT_LISTINGS for one bucket with an optional
     /// prefix filter. Returns up to `max_keys` entries (bucket/key/ver

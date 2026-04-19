@@ -360,6 +360,7 @@ fn cas_table_name(t: &CasTable) -> &str {
         CasTable::DataFilters => "data_filters",
         CasTable::MultipartUploads => "multipart_uploads",
         CasTable::ObjectListings => "object_listings",
+        CasTable::PlacementGroups => "placement_groups",
         CasTable::Named(n) => n,
     }
 }

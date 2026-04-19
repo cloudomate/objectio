@@ -233,6 +233,11 @@ use objectio_proto::metadata::{
     ObjectMeta,
     PartMeta,
     PolicyObject,
+    GetPlacementGroupRequest,
+    GetPlacementGroupResponse,
+    ListPlacementGroupsRequest,
+    ListPlacementGroupsResponse,
+    PlacementGroup,
     PoolConfig,
     PutBucketEncryptionRequest,
     PutBucketEncryptionResponse,
@@ -365,6 +370,10 @@ pub struct MetaService {
     policy_attachments: RwLock<HashMap<String, Vec<String>>>,
     /// Iceberg warehouses: warehouse_name -> IcebergWarehouse
     iceberg_warehouses: RwLock<HashMap<String, IcebergWarehouse>>,
+    /// Placement groups: (pool, pg_id) -> PlacementGroup. Refreshed by
+    /// the apply-listener so every replica has an up-to-date cache and
+    /// GetPlacement on the leader is a sub-millisecond in-memory lookup.
+    placement_groups: RwLock<HashMap<(String, u32), PlacementGroup>>,
     /// Object lock configurations: bucket_name -> ObjectLockConfiguration
     object_lock_configs: RwLock<HashMap<String, ObjectLockConfiguration>>,
     /// Lifecycle configurations: bucket_name -> LifecycleConfiguration
@@ -527,6 +536,7 @@ impl MetaService {
             iam_policies: RwLock::new(HashMap::new()),
             policy_attachments: RwLock::new(HashMap::new()),
             iceberg_warehouses: RwLock::new(HashMap::new()),
+            placement_groups: RwLock::new(HashMap::new()),
             object_lock_configs: RwLock::new(HashMap::new()),
             lifecycle_configs: RwLock::new(HashMap::new()),
             bucket_encryption_configs: RwLock::new(HashMap::new()),
@@ -617,6 +627,9 @@ impl MetaService {
                         }
                         CasTable::IcebergWarehouses => {
                             svc.apply_iceberg_warehouse_event(&key, new_value.as_deref());
+                        }
+                        CasTable::PlacementGroups => {
+                            svc.apply_placement_group_event(&key, new_value.as_deref());
                         }
                         // Tables not yet covered by a cache refresh:
                         // writers are responsible for mirroring their
@@ -736,6 +749,47 @@ impl MetaService {
                 ns.remove(key);
             }
         }
+    }
+
+    /// Apply a committed PlacementGroup mutation to the in-memory
+    /// cache. Key format is "{pool}\0{pg_id:010}" — same as the redb
+    /// key produced by `objectio_meta_store::MetaStore::pg_key`. A
+    /// delete (`new_value = None`) removes the entry; a put decodes
+    /// the prost bytes and upserts.
+    fn apply_placement_group_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let Some((pool, pg_id)) = Self::parse_pg_key(key) else {
+            warn!("apply: malformed placement_group key '{key}'");
+            return;
+        };
+        let mut map = self.placement_groups.write();
+        match new_value {
+            Some(bytes) => match PlacementGroup::decode(bytes) {
+                Ok(pg) => {
+                    map.insert((pool, pg_id), pg);
+                }
+                Err(e) => warn!("apply: decode PlacementGroup('{key}') failed: {e}"),
+            },
+            None => {
+                map.remove(&(pool, pg_id));
+            }
+        }
+    }
+
+    /// Inverse of `objectio_meta_store::MetaStore::pg_key`. Returns
+    /// (pool, pg_id) from "{pool}\0{pg_id:010}".
+    fn parse_pg_key(key: &str) -> Option<(String, u32)> {
+        let (pool, tail) = key.split_once('\0')?;
+        let pg_id: u32 = tail.parse().ok()?;
+        Some((pool.to_string(), pg_id))
+    }
+
+    /// Look up a placement group from the in-memory cache.
+    pub fn placement_group(&self, pool: &str, pg_id: u32) -> Option<PlacementGroup> {
+        self.placement_groups
+            .read()
+            .get(&(pool.to_string(), pg_id))
+            .cloned()
     }
 
     fn apply_iceberg_warehouse_event(&self, key: &str, new_value: Option<&[u8]>) {
@@ -1335,6 +1389,46 @@ impl MetaService {
             info!("Loaded {} iceberg warehouses from store", map.len());
         }
 
+        // Placement groups. Re-hydrate every PG across every pool so
+        // the first GetPlacement doesn't do a redb read. The store API
+        // is per-pool, so scan pools first; pools load above.
+        {
+            let pool_names: Vec<String> = self.pools.read().keys().cloned().collect();
+            let mut map = self.placement_groups.write();
+            let mut loaded = 0usize;
+            for pool in &pool_names {
+                let mut next_pg: u32 = 0;
+                loop {
+                    let rows = match store.list_placement_groups(pool, next_pg, 1000) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!("list placement_groups({pool}) failed: {e}");
+                            break;
+                        }
+                    };
+                    if rows.is_empty() {
+                        break;
+                    }
+                    let mut highest = next_pg;
+                    for bytes in rows {
+                        match PlacementGroup::decode(bytes.as_slice()) {
+                            Ok(pg) => {
+                                highest = highest.max(pg.pg_id);
+                                map.insert((pg.pool.clone(), pg.pg_id), pg);
+                                loaded += 1;
+                            }
+                            Err(e) => error!("decode PlacementGroup: {e}"),
+                        }
+                    }
+                    // list_placement_groups already advances past
+                    // start_after_pg_id; step one past the highest we
+                    // saw to paginate forward.
+                    next_pg = highest.saturating_add(1);
+                }
+            }
+            info!("Loaded {} placement groups from store", loaded);
+        }
+
         // Object lock configs
         {
             let entries = store.load_all_object_lock_configs();
@@ -1848,6 +1942,10 @@ impl MetaService {
             ec_global_parity: self.default_ec_m,
             local_group_size: 0,
             replication_count,
+            // Legacy path: no PG, pool blank. Phase 3 fills these.
+            pg_id: 0,
+            pg_version: 0,
+            pool: String::new(),
         }))
     }
 }
@@ -2085,6 +2183,10 @@ impl MetadataService for MetaService {
             storage_class: "STANDARD".into(),
             user_metadata: req.user_metadata.clone(),
             primary_osd_id,
+            // Filled in Phase 3 once CreateObjectRequest carries pg_id +
+            // pool (gateway reads them from GetPlacementResponse).
+            pg_id: 0,
+            pool: String::new(),
         };
         let listing_key = format!("{}\0{}\0", req.bucket, req.key);
         let new_bytes = entry.encode_to_vec();
@@ -2459,6 +2561,12 @@ impl MetadataService for MetaService {
             ec_global_parity,
             local_group_size,
             replication_count,
+            // Filled by Phase 3 once the PG lookup replaces
+            // per-object CRUSH. Leaving zeros keeps pre-migration
+            // clients safe (gateway treats 0 as legacy).
+            pg_id: 0,
+            pg_version: 0,
+            pool: String::new(),
         }))
     }
 
@@ -6350,6 +6458,48 @@ impl MetadataService for MetaService {
         self.pools.write().remove(&name);
         info!("Deleted pool: {}", name);
         Ok(Response::new(DeletePoolResponse { success: true }))
+    }
+
+    // ============ Placement groups ============
+    //
+    // Balancer owns writes (via CasTable::PlacementGroups MultiCas).
+    // Gateway only reads, so only Get + List are exposed for now.
+
+    async fn get_placement_group(
+        &self,
+        request: Request<GetPlacementGroupRequest>,
+    ) -> Result<Response<GetPlacementGroupResponse>, Status> {
+        let req = request.into_inner();
+        let pg = self.placement_group(&req.pool, req.pg_id);
+        let found = pg.is_some();
+        Ok(Response::new(GetPlacementGroupResponse { pg, found }))
+    }
+
+    async fn list_placement_groups(
+        &self,
+        request: Request<ListPlacementGroupsRequest>,
+    ) -> Result<Response<ListPlacementGroupsResponse>, Status> {
+        let req = request.into_inner();
+        let max = if req.max_results == 0 {
+            1000usize
+        } else {
+            (req.max_results as usize).min(10_000)
+        };
+        let map = self.placement_groups.read();
+        let mut pgs: Vec<PlacementGroup> = map
+            .iter()
+            .filter(|((p, id), _)| p == &req.pool && *id > req.start_after_pg_id)
+            .map(|(_, v)| v.clone())
+            .collect();
+        pgs.sort_by_key(|p| p.pg_id);
+        let truncated = pgs.len() > max;
+        pgs.truncate(max);
+        let next_pg_id = if truncated {
+            pgs.last().map(|p| p.pg_id).unwrap_or(0)
+        } else {
+            0
+        };
+        Ok(Response::new(ListPlacementGroupsResponse { pgs, next_pg_id }))
     }
 
     // ============ Tenants ============

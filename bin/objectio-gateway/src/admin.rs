@@ -51,6 +51,11 @@ fn json_to_pool(v: &serde_json::Value) -> PoolConfig {
         enabled: v["enabled"].as_bool().unwrap_or(true),
         created_at: 0,
         updated_at: 0,
+        // Placement-group sizing. 0 keeps the legacy per-object CRUSH
+        // path (backward-compat). Admins who want PG-based placement
+        // pass "pg_count": 256 (or higher) on pool creation.
+        pg_count: v["pg_count"].as_u64().unwrap_or_default() as u32,
+        tier: v["tier"].as_str().unwrap_or_default().to_string(),
     }
 }
 

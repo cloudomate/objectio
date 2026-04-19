@@ -130,6 +130,11 @@ service MetadataService {
     rpc UpdatePool(UpdatePoolRequest) returns (UpdatePoolResponse);
     rpc DeletePool(DeletePoolRequest) returns (DeletePoolResponse);
 
+    // Placement groups — explicit PG → OSD mapping. Mutated by the
+    // balancer service; consumed by Gateway read/write paths.
+    rpc GetPlacementGroup(GetPlacementGroupRequest) returns (GetPlacementGroupResponse);
+    rpc ListPlacementGroups(ListPlacementGroupsRequest) returns (ListPlacementGroupsResponse);
+
     // Tenants (multi-tenancy)
     rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
     rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
@@ -391,6 +396,14 @@ message ObjectListingEntry {
     // this is a hint — the gateway tries this one first, falls back to
     // the CRUSH placement on miss.
     bytes primary_osd_id = 12;
+
+    // Placement-group ID the object was routed through. 0 = legacy
+    // per-object CRUSH placement (pre-PG objects). With a non-zero
+    // pg_id the gateway can look up the PG's current osd_ids in one
+    // in-memory cache hit instead of recomputing CRUSH.
+    uint32 pg_id = 13;
+    // The pool name the PG lives in. Empty = default pool.
+    string pool = 14;
 }
 
 // List objects
@@ -441,6 +454,16 @@ message GetPlacementResponse {
 
     // Replication-specific fields
     uint32 replication_count = 9;   // Number of replicas (REPLICATION mode only)
+
+    // Placement group this object was routed through. The gateway
+    // stamps it into ObjectListingEntry.pg_id so LIST and GET can
+    // short-circuit the jump-hash + PG lookup on the next request.
+    // pg_version is the CAS version at placement time — lets the
+    // gateway detect a mid-flight PG migration and retry from
+    // GetPlacement rather than writing against a stale tuple.
+    uint32 pg_id = 11;
+    uint64 pg_version = 12;
+    string pool = 13;               // Pool this PG lives in.
 }
 
 message NodePlacement {
@@ -1386,6 +1409,56 @@ message PoolConfig {
     bool enabled = 12;
     uint64 created_at = 13;
     uint64 updated_at = 14;
+
+    // Placement-group knobs. pg_count is fixed at pool creation —
+    // growable pg_count is a v2 feature. tier selects the storage
+    // class the balancer places this pool's PGs on ("nvme" / "ssd" /
+    // "hdd" / "cold"). Empty tier = no constraint.
+    // pg_count = 0 keeps the legacy per-object CRUSH path — pre-PG
+    // pools and anyone on an upgrade still work unchanged.
+    uint32 pg_count = 15;
+    string tier = 16;
+}
+
+// One placement group — a fixed k+m-tuple of OSDs that a set of
+// objects is routed to via jump-hash(object_id) mod pg_count. The
+// balancer mutates osd_ids over time to keep counts flat and failure
+// domains respected; during a move `migrating_to_osd_ids` is
+// non-empty and the data path writes to the new set while reads
+// still work off the old set until the migration commits.
+message PlacementGroup {
+    string pool = 1;
+    uint32 pg_id = 2;
+    // k+m OSD node_ids, position-ordered (index 0 = first data shard).
+    repeated bytes osd_ids = 3;
+    // CAS version — bumped on every transition. Used by MultiCas to
+    // detect concurrent balancer activity.
+    uint64 version = 4;
+    uint64 updated_at = 5;
+    // Non-empty while a migration is in flight. Cleared on commit.
+    repeated bytes migrating_to_osd_ids = 6;
+    uint64 migration_started_at = 7;
+    // Soft progress indicator — objects still to copy during the
+    // current migration. Reset to 0 on commit.
+    uint32 pending_moves_count = 8;
+}
+
+message GetPlacementGroupRequest {
+    string pool = 1;
+    uint32 pg_id = 2;
+}
+message GetPlacementGroupResponse {
+    PlacementGroup pg = 1;
+    bool found = 2;
+}
+message ListPlacementGroupsRequest {
+    string pool = 1;
+    uint32 start_after_pg_id = 2;     // 0 = from the start
+    uint32 max_results = 3;           // 0 = default 1000
+}
+message ListPlacementGroupsResponse {
+    repeated PlacementGroup pgs = 1;
+    uint32 next_pg_id = 2;            // 0 = end of list
 }
 
 message CreatePoolRequest { PoolConfig pool = 1; }

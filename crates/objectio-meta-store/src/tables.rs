@@ -102,3 +102,11 @@ pub const KMS_KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("kms_key
 // next bucket. Value: prost-encoded ObjectListingEntry.
 pub const OBJECT_LISTINGS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("object_listings");
+
+// Placement groups. One row per PG, keyed as "{pool}\0{pg_id:010}"
+// (10-digit zero-padded so a range scan over a pool returns PGs in
+// pg_id order). Value: prost-encoded PlacementGroup. Mutated by the
+// balancer via CasTable::PlacementGroups so every follower observes
+// membership changes at the same Raft log position.
+pub const PLACEMENT_GROUPS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("placement_groups");
