@@ -327,12 +327,24 @@ export default function Topology() {
     return out;
   }, [osdNodes]);
 
-  // Derived host health summary for the top strip.
+  // Derived host health summary for the top strip. `osdsByHost` is
+  // indexed by MULTIPLE keys per OSD (kubernetes_node, hostname,
+  // node_name) so the drawer can find shards via any identifier — but
+  // that means iterating its values over-counts hosts. Group by
+  // canonical host (kubernetes_node, else hostname / node_name) and
+  // classify once per real host.
   const hostSummary = useMemo(() => {
+    const byCanonical = new Map<string, NodeInfo[]>();
+    for (const osd of osdNodes) {
+      const key =
+        osd.kubernetes_node || osd.hostname || osd.node_name || "(unknown)";
+      if (!byCanonical.has(key)) byCanonical.set(key, []);
+      byCanonical.get(key)!.push(osd);
+    }
     let up = 0,
       warn = 0,
       down = 0;
-    for (const osds of osdsByHost.values()) {
+    for (const osds of byCanonical.values()) {
       const allUp = osds.every((o) => o.online);
       const allDown = osds.every((o) => !o.online);
       if (allDown) down += 1;
@@ -340,7 +352,7 @@ export default function Topology() {
       else warn += 1;
     }
     return { up, warn, down };
-  }, [osdsByHost]);
+  }, [osdNodes]);
 
   const selectedOsds =
     selectedHost != null ? (osdsByHost.get(selectedHost) ?? []) : [];
