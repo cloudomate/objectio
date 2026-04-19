@@ -628,10 +628,16 @@ async fn rebalance_sweep(
     let mut scanned: u64 = 0;
     let mut drifts_seen: u64 = 0;
     let mut migrated_this_sweep = false;
+    // Only specifically-Draining OSDs are off-limits to the
+    // rebalancer — those have a dedicated migrator running on a
+    // different path and running both on the same shards races.
+    // OSDs marked Out should have their shards actively migrated OFF
+    // by rebalance; without this, shards on Out OSDs would linger
+    // indefinitely (the thing the operator *just* said to avoid).
     let draining_ids: std::collections::HashSet<[u8; 16]> = meta
         .osd_nodes_read()
         .iter()
-        .filter(|n| n.admin_state != objectio_common::OsdAdminState::In)
+        .filter(|n| n.admin_state == objectio_common::OsdAdminState::Draining)
         .map(|n| n.node_id)
         .collect();
 
