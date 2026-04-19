@@ -579,6 +579,142 @@ impl MetaService {
         self.raft.read().clone()
     }
 
+    /// Spawn the apply-listener task. Consumes `ApplyEvent`s emitted by
+    /// the Raft state machine after every committed MultiCas and
+    /// refreshes the matching in-memory cache. Runs on every replica —
+    /// not just the leader — so on failover a freshly-promoted pod
+    /// serves reads against a cache that was kept live all along,
+    /// instead of the pre-Raft snapshot plus whatever's been applied
+    /// since startup.
+    pub fn spawn_apply_listener(
+        self: &Arc<Self>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<objectio_meta_store::ApplyEvent>,
+    ) {
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            use objectio_meta_store::{ApplyEvent, CasTable};
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    ApplyEvent::MultiCasOp {
+                        table,
+                        key,
+                        new_value,
+                    } => match table {
+                        CasTable::Buckets => svc.apply_bucket_event(&key, new_value.as_deref()),
+                        CasTable::BucketPolicies => {
+                            svc.apply_bucket_policy_event(&key, new_value.as_deref());
+                        }
+                        CasTable::Users => svc.apply_user_event(&key, new_value.as_deref()),
+                        CasTable::AccessKeys => {
+                            svc.apply_access_key_event(&key, new_value.as_deref());
+                        }
+                        CasTable::IcebergTables => {
+                            svc.apply_iceberg_table_event(&key, new_value.as_deref());
+                        }
+                        // Tables not yet covered by a cache refresh:
+                        // writers are responsible for mirroring their
+                        // own writes on the leader, and followers still
+                        // rebuild from redb on promote (load_from_store).
+                        _ => {}
+                    },
+                }
+            }
+        });
+    }
+
+    fn apply_bucket_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let mut buckets = self.buckets.write();
+        match new_value {
+            Some(bytes) => match BucketMeta::decode(bytes) {
+                Ok(b) => {
+                    buckets.insert(key.to_string(), b);
+                }
+                Err(e) => warn!("apply: decode BucketMeta('{key}') failed: {e}"),
+            },
+            None => {
+                buckets.remove(key);
+            }
+        }
+    }
+
+    fn apply_bucket_policy_event(&self, key: &str, new_value: Option<&[u8]>) {
+        let mut m = self.bucket_policies.write();
+        match new_value {
+            Some(bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => {
+                    m.insert(key.to_string(), s.to_string());
+                }
+                Err(e) => warn!("apply: bucket_policy('{key}') not utf-8: {e}"),
+            },
+            None => {
+                m.remove(key);
+            }
+        }
+    }
+
+    fn apply_user_event(&self, key: &str, new_value: Option<&[u8]>) {
+        let mut m = self.users.write();
+        match new_value {
+            Some(bytes) => match bincode::deserialize::<StoredUser>(bytes) {
+                Ok(u) => {
+                    m.insert(key.to_string(), u);
+                }
+                Err(e) => warn!("apply: decode StoredUser('{key}') failed: {e}"),
+            },
+            None => {
+                m.remove(key);
+            }
+        }
+    }
+
+    fn apply_access_key_event(&self, key: &str, new_value: Option<&[u8]>) {
+        let mut m = self.access_keys.write();
+        match new_value {
+            Some(bytes) => match bincode::deserialize::<StoredAccessKey>(bytes) {
+                Ok(k) => {
+                    // Keep user_keys index consistent: insert the
+                    // access_key_id under the owning user if absent.
+                    let user_id = k.user_id.clone();
+                    m.insert(key.to_string(), k);
+                    drop(m);
+                    let mut idx = self.user_keys.write();
+                    let ids = idx.entry(user_id).or_default();
+                    if !ids.iter().any(|k2| k2 == key) {
+                        ids.push(key.to_string());
+                    }
+                }
+                Err(e) => warn!("apply: decode StoredAccessKey('{key}') failed: {e}"),
+            },
+            None => {
+                let removed = m.remove(key);
+                drop(m);
+                if let Some(k) = removed {
+                    let mut idx = self.user_keys.write();
+                    if let Some(ids) = idx.get_mut(&k.user_id) {
+                        ids.retain(|k2| k2 != key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_iceberg_table_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let mut tables = self.iceberg_tables.write();
+        match new_value {
+            Some(bytes) => match IcebergTableEntry::decode(bytes) {
+                Ok(e) => {
+                    tables.insert(key.to_string(), e);
+                }
+                Err(e) => warn!("apply: decode IcebergTableEntry('{key}') failed: {e}"),
+            },
+            None => {
+                tables.remove(key);
+            }
+        }
+    }
+
     /// True iff this replica is the current Raft leader. Used by
     /// leader-only background tasks (drain observer, future migrator)
     /// so every replica can run the task definition while only one

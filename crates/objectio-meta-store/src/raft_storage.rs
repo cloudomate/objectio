@@ -47,7 +47,7 @@ use openraft::{
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::raft::{CasOp, CasTable, MetaCommand, MetaResponse, MetaTypeConfig};
+use crate::raft::{ApplyEvent, CasOp, CasTable, MetaCommand, MetaResponse, MetaTypeConfig};
 use crate::tables;
 
 type NodeId = u64;
@@ -73,6 +73,13 @@ struct RaftPersistentState {
 #[derive(Clone)]
 pub struct MetaRaftStorage {
     db: Arc<Database>,
+    /// Optional broadcast channel to the consumer of apply events.
+    /// When set, the state machine emits one [`ApplyEvent`] per op of
+    /// each committed `MultiCas` right after the redb commit. Consumers
+    /// on both leader and follower use these to refresh their
+    /// in-memory caches live — so reads on a just-promoted follower
+    /// aren't stuck on the pre-promote snapshot.
+    listener: Option<tokio::sync::mpsc::UnboundedSender<ApplyEvent>>,
 }
 
 impl MetaRaftStorage {
@@ -80,7 +87,21 @@ impl MetaRaftStorage {
     /// opened on first write — no upfront migration needed.
     #[must_use]
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self { db, listener: None }
+    }
+
+    /// Attach an apply-event listener. The state machine will send one
+    /// event per op of every committed `MultiCas`. Cloning the storage
+    /// clones the sender too (unbounded channels are multi-producer).
+    #[must_use]
+    pub fn with_apply_listener(
+        db: Arc<Database>,
+        listener: tokio::sync::mpsc::UnboundedSender<ApplyEvent>,
+    ) -> Self {
+        Self {
+            db,
+            listener: Some(listener),
+        }
     }
 
     // ---------------------------------------------------------------
@@ -207,7 +228,7 @@ impl MetaRaftStorage {
             MetaCommand::MultiCas {
                 ops,
                 requested_by: _,
-            } => apply_multi_cas(&self.db, state, ops, log_id),
+            } => apply_multi_cas(&self.db, state, ops, log_id, self.listener.as_ref()),
         }
     }
 }
@@ -226,6 +247,7 @@ fn apply_multi_cas(
     state: &mut RaftPersistentState,
     ops: &[CasOp],
     log_id: LogId<NodeId>,
+    listener: Option<&tokio::sync::mpsc::UnboundedSender<ApplyEvent>>,
 ) -> Result<MetaResponse, StorageError<NodeId>> {
     // Guardrail: keep log-entry apply latency bounded. Callers that need
     // thousands of conditional writes should chunk and retry.
@@ -293,6 +315,22 @@ fn apply_multi_cas(
 
     txn.commit().map_err(write_err)?;
     state.last_applied = Some(log_id);
+
+    // Fan out apply events after the commit lands on disk. Send is
+    // non-fatal: a dropped receiver (service crash, not yet wired up)
+    // means the event is silently discarded. Consumers resync from redb
+    // on next load_from_store so the cache can't stay permanently stale.
+    if let Some(tx) = listener {
+        for op in ops {
+            let ev = ApplyEvent::MultiCasOp {
+                table: op.table.clone(),
+                key: op.key.clone(),
+                new_value: op.new_value.clone(),
+            };
+            let _ = tx.send(ev);
+        }
+    }
+
     Ok(MetaResponse::MultiCasOk)
 }
 
@@ -867,6 +905,124 @@ mod tests {
         // isn't retried on leader restart.
         let (last, _) = s.last_applied_state().await.unwrap();
         assert_eq!(last.unwrap().index, 2);
+    }
+
+    #[tokio::test]
+    async fn apply_listener_receives_one_event_per_op() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meta.db");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApplyEvent>();
+        let mut s = MetaRaftStorage::with_apply_listener(db, tx);
+
+        let e = normal_entry(
+            1,
+            MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::Buckets,
+                        key: "b1".into(),
+                        expected: None,
+                        new_value: Some(b"v1".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: "ns/t".into(),
+                        expected: None,
+                        new_value: Some(b"v2".to_vec()),
+                    },
+                    CasOp {
+                        table: CasTable::Buckets,
+                        key: "b2".into(),
+                        expected: None,
+                        new_value: None, // delete — none to begin with, still reports as delete event
+                    },
+                ],
+                requested_by: "test".into(),
+            },
+        );
+        s.apply_to_state_machine(&[e]).await.unwrap();
+
+        // Three ops → three events, in declaration order.
+        let events: Vec<ApplyEvent> = (0..3).map(|_| rx.try_recv().unwrap()).collect();
+        assert!(rx.try_recv().is_err(), "no more events expected");
+
+        match &events[0] {
+            ApplyEvent::MultiCasOp {
+                table,
+                key,
+                new_value,
+            } => {
+                assert_eq!(table, &CasTable::Buckets);
+                assert_eq!(key, "b1");
+                assert_eq!(new_value.as_deref(), Some(&b"v1"[..]));
+            }
+        }
+        match &events[1] {
+            ApplyEvent::MultiCasOp { table, key, .. } => {
+                assert_eq!(table, &CasTable::IcebergTables);
+                assert_eq!(key, "ns/t");
+            }
+        }
+        match &events[2] {
+            ApplyEvent::MultiCasOp {
+                table,
+                key,
+                new_value,
+            } => {
+                assert_eq!(table, &CasTable::Buckets);
+                assert_eq!(key, "b2");
+                assert!(new_value.is_none(), "delete op");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_listener_not_called_on_conflict() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("meta.db");
+        let db = Arc::new(Database::create(&path).unwrap());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApplyEvent>();
+        let mut s = MetaRaftStorage::with_apply_listener(db, tx);
+
+        // Seed b1=v1.
+        let seed = normal_entry(
+            1,
+            MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Buckets,
+                    key: "b1".into(),
+                    expected: None,
+                    new_value: Some(b"v1".to_vec()),
+                }],
+                requested_by: "seed".into(),
+            },
+        );
+        s.apply_to_state_machine(&[seed]).await.unwrap();
+        // Consume the seed event.
+        let _ = rx.try_recv().unwrap();
+
+        // Now try a conflict MultiCas — should NOT emit events because
+        // the writes didn't land.
+        let bad = normal_entry(
+            2,
+            MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Buckets,
+                    key: "b1".into(),
+                    expected: Some(b"wrong".to_vec()),
+                    new_value: Some(b"v2".to_vec()),
+                }],
+                requested_by: "conflict".into(),
+            },
+        );
+        let r = s.apply_to_state_machine(&[bad]).await.unwrap();
+        assert!(matches!(r[0], MetaResponse::MultiCasConflict { .. }));
+
+        assert!(
+            rx.try_recv().is_err(),
+            "conflict should not emit apply events"
+        );
     }
 
     #[tokio::test]

@@ -233,7 +233,15 @@ async fn main() -> Result<()> {
         .store()
         .map(|s| s.db())
         .expect("meta service must be backed by a persistent store for Raft");
-    let raft_storage = objectio_meta_store::MetaRaftStorage::new(raft_db);
+
+    // Apply-event channel: state machine → meta service cache refresher.
+    // On every follower too — so a just-promoted pod doesn't serve reads
+    // off a pre-promote snapshot of buckets/users/iceberg-tables.
+    let (apply_tx, apply_rx) =
+        tokio::sync::mpsc::unbounded_channel::<objectio_meta_store::ApplyEvent>();
+    meta_service.spawn_apply_listener(apply_rx);
+    let raft_storage =
+        objectio_meta_store::MetaRaftStorage::with_apply_listener(raft_db, apply_tx);
     let (log_store, state_machine) = openraft::storage::Adaptor::new(raft_storage);
     let raft_config = Arc::new(
         openraft::Config {

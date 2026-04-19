@@ -121,6 +121,27 @@ pub enum CasTable {
     Named(String),
 }
 
+/// Event emitted by the state machine after a committed mutation has
+/// landed in redb. Consumers — the live meta service on leader AND every
+/// follower — use these to refresh their in-memory caches so reads
+/// don't go stale until the next restart. The channel is unbounded and
+/// best-effort: on slow consumers events accumulate, and on consumer
+/// death the sender's send returns Err and the apply path drops the
+/// event (the next promote-driven rebuild from redb catches up).
+#[derive(Clone, Debug)]
+pub enum ApplyEvent {
+    /// One op from a committed `MultiCas`. A MultiCas that touches N
+    /// keys produces N events, in the order the ops were declared. The
+    /// state machine already applied them atomically — this event is a
+    /// pure notification.
+    MultiCasOp {
+        table: CasTable,
+        key: String,
+        /// `None` = the op deleted the key.
+        new_value: Option<Vec<u8>>,
+    },
+}
+
 /// Reply the state machine emits from `apply`, visible to the client that
 /// proposed the command.
 ///
