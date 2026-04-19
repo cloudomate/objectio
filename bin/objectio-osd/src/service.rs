@@ -234,8 +234,12 @@ pub struct OsdStatus {
     pub uptime_secs: u64,
 }
 
-/// Shard location stored in memory (backed by MetadataStore for persistence)
-#[derive(Clone, Debug)]
+/// Shard location stored in memory. Mirrored to the persistent
+/// MetadataStore on every write so pod restarts can rebuild the
+/// in-memory index from the WAL — without this, the OSD forgets
+/// which shards it holds the moment its process restarts, and
+/// meta thinks every OSD is empty.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct ShardLocation {
     disk_idx: usize,
     block_num: u64,
@@ -243,6 +247,12 @@ struct ShardLocation {
     crc32c: u32,
     created_at: u64,
 }
+
+/// Prefix under which the OSD persists its shard-location index in
+/// MetadataStore. Keys are `{PREFIX}{shard_key_string}`. The prefix
+/// keeps us from colliding with the ShardMeta entries the object
+/// layer writes under its own 's'-prefixed keys.
+const SHARD_LOC_PREFIX: &[u8] = b"osd_loc:";
 
 /// OSD service state
 pub struct OsdService {
@@ -465,17 +475,39 @@ impl OsdService {
         );
 
         let num_disks = disks.len();
+        // Rebuild the in-memory shard index from persisted entries
+        // (replayed from the WAL as part of `MetadataStore::open_or_create`
+        // above). Before this step the OSD used to report 0 shards on
+        // every restart even though disk.raw was full.
+        let persisted = Self::load_persisted_shard_index(&meta_store);
+        info!(
+            "Rebuilt shard index from persistent store: {} entries",
+            persisted.len()
+        );
+        // Advance the per-disk next_block cursor past any block we
+        // already wrote so we don't overwrite existing shards.
+        let next_block: Vec<std::sync::atomic::AtomicU64> = (0..num_disks)
+            .map(|_| std::sync::atomic::AtomicU64::new(0))
+            .collect();
+        for loc in persisted.values() {
+            if loc.disk_idx < next_block.len() {
+                let cur = next_block[loc.disk_idx].load(std::sync::atomic::Ordering::Relaxed);
+                let want = loc.block_num + 1;
+                if want > cur {
+                    next_block[loc.disk_idx]
+                        .store(want, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         Ok(Self {
             node_id,
             disks,
             disk_ids,
-            shard_index: RwLock::new(HashMap::new()),
+            shard_index: RwLock::new(persisted),
             meta_store: Arc::new(meta_store),
             start_time: Instant::now(),
             next_disk: RwLock::new(0),
-            next_block: (0..num_disks)
-                .map(|_| std::sync::atomic::AtomicU64::new(0))
-                .collect(),
+            next_block,
             grpc_metrics: Arc::new(GrpcMetrics::default()),
         })
     }
@@ -573,6 +605,66 @@ impl OsdService {
         format!("{}:{}:{}", hex::encode(object_id), stripe_id, position)
     }
 
+    /// Build the MetadataStore key we persist a ShardLocation under.
+    fn shard_loc_meta_key(shard_key: &str) -> objectio_storage::MetadataKey {
+        let mut bytes = Vec::with_capacity(SHARD_LOC_PREFIX.len() + shard_key.len());
+        bytes.extend_from_slice(SHARD_LOC_PREFIX);
+        bytes.extend_from_slice(shard_key.as_bytes());
+        objectio_storage::MetadataKey::from_bytes(bytes)
+    }
+
+    /// Persist a ShardLocation so a restart can rebuild the in-memory
+    /// index. Called on every successful WriteShard.
+    fn persist_shard_location(
+        meta_store: &MetadataStore,
+        shard_key: &str,
+        loc: &ShardLocation,
+    ) -> std::result::Result<(), String> {
+        let key = Self::shard_loc_meta_key(shard_key);
+        let value = bincode::serialize(loc).map_err(|e| e.to_string())?;
+        meta_store.put(key, value).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Remove a persisted ShardLocation (delete_shard path).
+    fn forget_shard_location(
+        meta_store: &MetadataStore,
+        shard_key: &str,
+    ) -> std::result::Result<(), String> {
+        let key = Self::shard_loc_meta_key(shard_key);
+        meta_store.delete(&key).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Scan the MetadataStore for every persisted ShardLocation and
+    /// rebuild the in-memory index. Called once during OSD startup —
+    /// before this, `shard_index` started empty after every restart
+    /// and the OSD reported 0 shards to meta even when disk.raw was
+    /// full of real data.
+    fn load_persisted_shard_index(
+        meta_store: &MetadataStore,
+    ) -> HashMap<String, ShardLocation> {
+        let prefix_key =
+            objectio_storage::MetadataKey::from_bytes(SHARD_LOC_PREFIX.to_vec());
+        let mut out = HashMap::new();
+        for (key, value) in meta_store.scan_prefix(&prefix_key) {
+            let raw = key.as_bytes();
+            let Some(stripped) = raw.strip_prefix(SHARD_LOC_PREFIX) else {
+                continue;
+            };
+            let Ok(shard_key) = std::str::from_utf8(stripped) else {
+                continue;
+            };
+            match bincode::deserialize::<ShardLocation>(&value) {
+                Ok(loc) => {
+                    out.insert(shard_key.to_string(), loc);
+                }
+                Err(e) => warn!(
+                    "skipping corrupt ShardLocation entry {shard_key}: {e}"
+                ),
+            }
+        }
+        out
+    }
+
     /// Allocate a block for writing
     #[allow(clippy::result_large_err)]
     fn allocate_block(&self, disk_idx: usize) -> Result<u64, Status> {
@@ -638,16 +730,25 @@ impl StorageService for OsdService {
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
         let timestamp = Self::current_timestamp();
 
-        self.shard_index.write().insert(
-            key,
-            ShardLocation {
-                disk_idx,
-                block_num,
-                size: req.data.len() as u32,
-                crc32c,
-                created_at: timestamp,
-            },
-        );
+        let loc = ShardLocation {
+            disk_idx,
+            block_num,
+            size: req.data.len() as u32,
+            crc32c,
+            created_at: timestamp,
+        };
+        // Persist to the WAL-backed MetadataStore before inserting into
+        // the in-memory index — if the put fails the in-memory state
+        // stays accurate to what's actually recoverable. A failure
+        // here is non-fatal (the shard bytes are on disk); log loud
+        // so we notice the drift.
+        if let Err(e) = Self::persist_shard_location(&self.meta_store, &key, &loc) {
+            warn!(
+                "Failed to persist shard_location for {key}: {e} — \
+                 in-memory only, will be lost on restart"
+            );
+        }
+        self.shard_index.write().insert(key.clone(), loc);
 
         info!(
             "Wrote shard: disk={}, block={}, size={}, crc32c={:08x}",
@@ -760,6 +861,13 @@ impl StorageService for OsdService {
         let key = Self::shard_key(&shard_id.object_id, shard_id.stripe_id, shard_id.position);
 
         let removed = self.shard_index.write().remove(&key).is_some();
+        // Mirror the removal in the persistent index so a future
+        // restart doesn't resurrect the deleted shard.
+        if removed
+            && let Err(e) = Self::forget_shard_location(&self.meta_store, &key)
+        {
+            warn!("Failed to persist shard delete for {key}: {e}");
+        }
 
         // Note: actual block space is not reclaimed in this simple implementation
         // A real implementation would mark the block as free in the bitmap
