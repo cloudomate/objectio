@@ -25,8 +25,10 @@
 //! let placements = crush.select_placement(&object_id, &template);
 //! ```
 
+pub mod copyset;
 pub mod crush;
 pub mod crush2;
+pub mod jump_hash;
 pub mod policy;
 pub mod topology;
 
@@ -43,3 +45,11 @@ pub use crush2::{
     Crush2, HrwPlacement, PlacementFeasibility, PlacementFeasibilityReport, PlacementTemplate,
     ShardRole, StripeGroup,
 };
+
+// Placement-group engine (Phase 2+). The jump-consistent-hash step
+// routes `object_id → pg_id` in constant memory; the copyset pool
+// provides the set of valid `(k+m)`-tuples the balancer assigns PGs
+// from, respecting failure domains. CRUSH2 stays available as the
+// fallback for pools with `pg_count = 0`.
+pub use copyset::{Copyset, CopysetError, CopysetPool};
+pub use jump_hash::jump_consistent_hash;

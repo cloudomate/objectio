@@ -12,6 +12,4 @@ xxhash-rust = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
-
-[dev-dependencies]
 rand = { workspace = true }
