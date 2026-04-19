@@ -638,7 +638,7 @@ impl MetaService {
     }
 
     /// Current Raft handle, if any.
-    fn raft_handle(
+    pub fn raft_handle(
         &self,
     ) -> Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>> {
         self.raft.read().clone()

@@ -1,50 +1,54 @@
-//! Placement-group balancer (Phase 4a — observation).
+//! Placement-group balancer.
 //!
 //! The balancer runs on the Raft leader and periodically evaluates
 //! every placement group against a cost function. When a PG is
-//! sufficiently overloaded on one of its OSDs relative to the ideal
-//! target, the balancer computes a candidate replacement copyset and
-//! logs the decision. **It does not yet commit moves** — executing a
-//! move requires the migration mechanics landed in Phase 5 so the
-//! existing shards can be copied to the new OSD set before the PG's
-//! `osd_ids` are flipped. Until that path exists, logging the cost
-//! function gives operators visibility into what the balancer would
-//! do without risking PGs getting stuck in a `migrating_to_osd_ids`
-//! state that no one consumes.
+//! overloaded on one of its OSDs relative to the ideal target, the
+//! balancer picks a better copyset from the precomputed pool and
+//! commits the new `osd_ids` via MultiCas.
 //!
-//! Scheduling rules the design doc commits to, implemented here:
+//! # Greenfield mode
 //!
-//! - **Hysteresis**: a PG is only considered overloaded if at least
-//!   one of its OSDs holds PGs at `>= 1.20 × target_count`. Prevents
-//!   thrash around the target value.
-//! - **Concurrent-move cap**: per tick we emit at most
-//!   `max(3, osd_count / 3)` move candidates (per pool). Keeps the
-//!   background I/O bounded once moves are wired to actually commit.
-//! - **Leader-only**: non-leader replicas skip the tick. The leader
-//!   check matches the drain observer's pattern.
+//! ObjectIO has no production data to preserve, so moves commit
+//! **directly** — `osd_ids = new_set`, `version += 1`, no
+//! `migrating_to_osd_ids` dance and no per-object shard copy. Any
+//! shards left on OSDs that dropped out of a PG are orphans; the
+//! terminal-loss GC in `drain_observer.rs` collects them. This is
+//! intentional and recorded in project memory; if production data
+//! lands, revisit before any further balancer runs.
+//!
+//! # Scheduling rules
+//!
+//! - **Hysteresis (threshold)**: a PG is only a candidate if at least
+//!   one of its OSDs carries `>= OVERLOAD_MULTIPLIER × target` PGs.
+//!   Prevents flipping around the fair-share line.
+//! - **Hysteresis (improvement)**: a move only commits when the
+//!   candidate copyset's total load is at least `IMPROVEMENT_FACTOR`
+//!   better than the PG's current total load. Stops oscillation when
+//!   two candidates are near-equal.
+//! - **Concurrent-move cap**: `max(3, osd_count / 3)` moves per pool
+//!   per tick. Bounds background state churn.
+//! - **Leader-only**: non-leader replicas skip the tick.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use objectio_common::NodeId;
-use objectio_placement::{CopysetPool, jump_consistent_hash};
+use objectio_placement::CopysetPool;
 use objectio_proto::metadata::{ErasureType, PlacementGroup, PoolConfig};
+use prost::Message;
+use rand::SeedableRng;
 use std::collections::HashMap;
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, info, warn};
 
 use crate::service::MetaService;
 
-/// How often the balancer evaluates. Non-critical timer — missing a
-/// tick just delays balancing; correctness is independent.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Don't treat a PG as overloaded until at least one of its OSDs
-/// carries this multiple of the ideal count. `1.20` means "20% above
-/// fair share" — matches the test plan's target of max/min ≤ 1.2.
 const OVERLOAD_MULTIPLIER: f64 = 1.20;
+/// A candidate copyset must be at least this much better (lower
+/// total load) than the PG's current one for the move to commit.
+/// 0.90 = ≥10% improvement required.
+const IMPROVEMENT_FACTOR: f64 = 0.90;
 
-/// Spawn the balancer. Non-blocking.
 pub fn spawn(meta: Arc<MetaService>) {
     tokio::spawn(async move {
         run(meta).await;
@@ -111,8 +115,9 @@ async fn evaluate_pool(
         return Ok(());
     }
 
-    // Per-OSD count: how many PGs currently include this OSD. Ideal
-    // is pg_count * k+m / active_osds — cluster-wide fair share.
+    // Live per-OSD PG-membership counts — updated in-place as moves
+    // commit in this tick so later PGs see the post-move state
+    // instead of over-moving onto the same OSD.
     let mut osd_counts: HashMap<[u8; 16], usize> = HashMap::new();
     for pg in &pgs {
         for osd in &pg.osd_ids {
@@ -126,12 +131,28 @@ async fn evaluate_pool(
     let target = (total_slots as f64) / (active_osds as f64);
     let threshold = target * OVERLOAD_MULTIPLIER;
 
-    // PG cost = max count across its OSDs, minus target. Positive =
-    // overloaded. Using max instead of avg highlights PGs that share
-    // the single hottest node, which is where real rebalance payoff is.
-    let mut scored: Vec<(f64, &PlacementGroup)> = pgs
-        .iter()
-        .filter(|pg| pg.migrating_to_osd_ids.is_empty())
+    // Build the copyset pool once per pass — scoring candidate
+    // replacements reuses it across every overloaded PG.
+    let fd_level = parse_failure_domain(&pool.failure_domain);
+    let seed = topology_seed(meta, pool);
+    let cs_pool = CopysetPool::build(
+        &meta.topology_snapshot(),
+        fd_level,
+        k_plus_m,
+        10,
+        seed,
+    )?;
+    if cs_pool.sets.is_empty() {
+        warn!("balancer: pool '{}' has no feasible copysets", pool.name);
+        return Ok(());
+    }
+
+    let per_tick_cap = active_osds.max(3) / 3;
+
+    // Score PGs: cost = max count across its OSDs - target. Filter
+    // by threshold. Sort hottest first.
+    let mut scored: Vec<(f64, PlacementGroup)> = pgs
+        .into_iter()
         .map(|pg| {
             let max_count = pg
                 .osd_ids
@@ -142,84 +163,144 @@ async fn evaluate_pool(
                 .unwrap_or(0);
             ((max_count as f64) - target, pg)
         })
-        .filter(|(cost, _)| *cost > 0.0)
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    // How many moves we'd emit per tick. Cap rises with cluster size
-    // so small clusters don't churn and large ones can make progress.
-    let per_tick_cap = active_osds.max(3) / 3;
-    let candidates: Vec<_> = scored
-        .into_iter()
         .filter(|(_, pg)| {
             pg.osd_ids
                 .iter()
                 .filter_map(|osd| <[u8; 16]>::try_from(osd.as_slice()).ok())
-                .any(|arr| {
-                    (*osd_counts.get(&arr).unwrap_or(&0) as f64) >= threshold
-                })
+                .any(|arr| (*osd_counts.get(&arr).unwrap_or(&0) as f64) >= threshold)
         })
-        .take(per_tick_cap)
         .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    if candidates.is_empty() {
-        debug!(
-            "balancer: pool '{}' balanced (target={target:.2}, threshold={threshold:.2}, \
-             pgs={}, osds={})",
-            pool.name,
-            pgs.len(),
-            active_osds
-        );
-        return Ok(());
-    }
+    let mut committed = 0usize;
+    for (cost, pg) in scored {
+        if committed >= per_tick_cap {
+            break;
+        }
 
-    // Build a copyset pool once per evaluation pass — scoring
-    // candidate replacements reuses it across every overloaded PG.
-    let fd_level = parse_failure_domain(&pool.failure_domain);
-    let seed = topology_seed(meta, pool);
-    let cs_pool = CopysetPool::build(
-        &meta.topology_snapshot(),
-        fd_level,
-        k_plus_m,
-        10,
-        seed,
-    )?;
+        let current_load: f64 = pg
+            .osd_ids
+            .iter()
+            .filter_map(|osd| <[u8; 16]>::try_from(osd.as_slice()).ok())
+            .map(|arr| *osd_counts.get(&arr).unwrap_or(&0) as f64)
+            .sum();
 
-    for (cost, pg) in candidates {
-        // Lower total load across candidate's OSDs = better target.
-        let mut rng = rand::rngs::StdRng::from_seed(seed_bytes(seed.wrapping_add(pg.pg_id.into())));
+        let mut rng =
+            rand::rngs::StdRng::from_seed(seed_bytes(seed.wrapping_add(pg.pg_id.into())));
+        let best_cost_cell = std::cell::Cell::new(f64::INFINITY);
         let target_set = cs_pool.pick_min_cost(&mut rng, |cs| {
-            cs.osds
+            let c: f64 = cs
+                .osds
                 .iter()
                 .map(|id| *osd_counts.get(id.as_bytes()).unwrap_or(&0) as f64)
-                .sum()
-        });
-        match target_set {
-            Some(cs) => {
-                let current: Vec<String> =
-                    pg.osd_ids.iter().map(|b| hex_short(b)).collect();
-                let proposed: Vec<String> =
-                    cs.osds.iter().map(|n| hex_short(n.as_bytes())).collect();
-                info!(
-                    "balancer[dry-run]: pool={} pg_id={} cost={:.2} overloaded \
-                     (target={target:.2}, threshold={threshold:.2}); proposed move \
-                     {current:?} -> {proposed:?}",
-                    pool.name, pg.pg_id, cost,
-                );
+                .sum();
+            if c < best_cost_cell.get() {
+                best_cost_cell.set(c);
             }
-            None => {
-                warn!(
-                    "balancer: pool={} pg_id={} overloaded but no better copyset found \
-                     (cs_pool={} sets)",
+            c
+        });
+        let Some(cs) = target_set else {
+            warn!(
+                "balancer: pool={} pg_id={} no candidate copyset",
+                pool.name, pg.pg_id
+            );
+            continue;
+        };
+        let best_cost = best_cost_cell.get();
+
+        // Improvement gate: require best candidate ≤ 90% of current.
+        if best_cost >= current_load * IMPROVEMENT_FACTOR {
+            debug!(
+                "balancer: pool={} pg_id={} improvement {}→{} below {}×; skip",
+                pool.name, pg.pg_id, current_load, best_cost, IMPROVEMENT_FACTOR
+            );
+            continue;
+        }
+
+        // Commit the move — greenfield so we rewrite osd_ids in place.
+        let old_bytes = pg.encode_to_vec();
+        let new_pg = PlacementGroup {
+            osd_ids: cs.osds.iter().map(|n| n.as_bytes().to_vec()).collect(),
+            version: pg.version.wrapping_add(1),
+            updated_at: now_unix(),
+            ..pg.clone()
+        };
+        let new_bytes = new_pg.encode_to_vec();
+
+        match commit_pg(meta, &pg, old_bytes, new_bytes).await {
+            Ok(()) => {
+                info!(
+                    "balancer: moved pool={} pg_id={} cost={:.2} load {}→{} v{}→v{}",
                     pool.name,
                     pg.pg_id,
-                    cs_pool.sets.len()
+                    cost,
+                    current_load,
+                    best_cost,
+                    pg.version,
+                    new_pg.version
+                );
+                // Update in-memory osd_counts so the next PG in this
+                // tick sees the post-commit state.
+                for osd in &pg.osd_ids {
+                    if let Ok(arr) = <[u8; 16]>::try_from(osd.as_slice())
+                        && let Some(c) = osd_counts.get_mut(&arr)
+                    {
+                        *c = c.saturating_sub(1);
+                    }
+                }
+                for n in &cs.osds {
+                    *osd_counts.entry(*n.as_bytes()).or_insert(0) += 1;
+                }
+                committed += 1;
+            }
+            Err(e) => {
+                warn!(
+                    "balancer: pool={} pg_id={} commit failed: {e}",
+                    pool.name, pg.pg_id
                 );
             }
         }
     }
 
+    if committed > 0 {
+        info!(
+            "balancer: pool '{}' committed {}/{} moves (target={:.2}, threshold={:.2})",
+            pool.name, committed, per_tick_cap, target, threshold
+        );
+    }
     Ok(())
+}
+
+async fn commit_pg(
+    meta: &Arc<MetaService>,
+    pg: &PlacementGroup,
+    old_bytes: Vec<u8>,
+    new_bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse, MetaStore};
+
+    let Some(raft) = meta.raft_handle() else {
+        return Err(anyhow::anyhow!("no raft handle — cannot commit PG move"));
+    };
+    let cmd = MetaCommand::MultiCas {
+        ops: vec![CasOp {
+            table: CasTable::PlacementGroups,
+            key: MetaStore::pg_key(&pg.pool, pg.pg_id),
+            expected: Some(old_bytes),
+            new_value: Some(new_bytes),
+        }],
+        requested_by: "balancer".into(),
+    };
+    match raft.client_write(cmd).await {
+        Ok(r) => match r.data {
+            MetaResponse::MultiCasOk => Ok(()),
+            MetaResponse::MultiCasConflict { .. } => {
+                Err(anyhow::anyhow!("pg changed concurrently — skip this tick"))
+            }
+            other => Err(anyhow::anyhow!("unexpected raft response: {other:?}")),
+        },
+        Err(e) => Err(anyhow::anyhow!("raft write failed: {e}")),
+    }
 }
 
 fn parse_failure_domain(s: &str) -> objectio_common::FailureDomain {
@@ -236,9 +317,9 @@ fn parse_failure_domain(s: &str) -> objectio_common::FailureDomain {
 }
 
 /// Deterministic per-pool seed: topology version × pool name hash.
-/// Keeps the copyset pool stable across balancer ticks that see the
-/// same topology, so proposed moves don't jitter just because the RNG
-/// reshuffled.
+/// Keeps the copyset pool stable across ticks that see the same
+/// topology, so the balancer doesn't jitter between near-equal
+/// candidates.
 fn topology_seed(meta: &Arc<MetaService>, pool: &PoolConfig) -> u64 {
     let v = meta.topology_snapshot().version;
     let name_hash = xxhash_rust::xxh64::xxh64(pool.name.as_bytes(), 0);
@@ -254,22 +335,9 @@ fn seed_bytes(seed: u64) -> [u8; 32] {
     b
 }
 
-fn hex_short(bytes: &[u8]) -> String {
-    const N: usize = 4;
-    let slice = if bytes.len() > N { &bytes[..N] } else { bytes };
-    hex::encode(slice)
-}
-
-use rand::SeedableRng;
-
-// Clippy/unused — the two re-exports below are imported for symmetry
-// with the migration phase and intentionally exported so Phase 5 can
-// reuse them without duplicating helpers.
-#[allow(dead_code)]
-pub(crate) fn pg_jump_hash(object_id_hash: u64, pg_count: u32) -> u32 {
-    jump_consistent_hash(object_id_hash, pg_count as i32) as u32
-}
-#[allow(dead_code)]
-pub(crate) fn node_id_from_bytes(b: &[u8]) -> Option<NodeId> {
-    <[u8; 16]>::try_from(b).ok().map(NodeId::from_bytes)
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
