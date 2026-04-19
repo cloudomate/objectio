@@ -259,6 +259,11 @@ export interface RebalanceStatus {
   drifts_seen_this_pass: number;
   shards_rebalanced_total: number;
   last_error: string;
+  // PG balancer counters. Optional so older gateways (pre-4.7) that
+  // don't include them still type-check; the UI falls back to 0.
+  pgs_moved_total?: number;
+  pg_candidates_last_tick?: number;
+  pgs_scanned_last_tick?: number;
 }
 
 export const rebalance = {
@@ -266,4 +271,33 @@ export const rebalance = {
     request("GET", "/_admin/rebalance-status"),
   pause: () => request<{ paused: boolean }>("POST", "/_admin/rebalance/pause"),
   resume: () => request<{ paused: boolean }>("POST", "/_admin/rebalance/resume"),
+};
+
+// ---------------------------------------------------------------------
+// Placement groups
+// ---------------------------------------------------------------------
+
+export interface PlacementGroup {
+  pool: string;
+  pg_id: number;
+  osd_ids: string[]; // hex-encoded 16-byte UUIDs
+  version: number;
+  updated_at: number;
+  migrating_to_osd_ids: string[];
+}
+
+export const placementGroups = {
+  list: (
+    pool: string,
+    opts?: { start_after?: number; max?: number },
+  ): Promise<{ pgs: PlacementGroup[]; next_pg_id: number }> => {
+    const q = new URLSearchParams();
+    if (opts?.start_after) q.set("start_after", String(opts.start_after));
+    if (opts?.max) q.set("max", String(opts.max));
+    const suffix = q.toString() ? `?${q}` : "";
+    return request(
+      "GET",
+      `/_admin/pools/${encodeURIComponent(pool)}/placement-groups${suffix}`,
+    );
+  },
 };

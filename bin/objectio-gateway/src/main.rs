@@ -782,6 +782,10 @@ async fn main() -> Result<()> {
         .route("/_admin/pools/{name}", get(admin::admin_get_pool))
         .route("/_admin/pools/{name}", put(admin::admin_update_pool))
         .route("/_admin/pools/{name}", delete(admin::admin_delete_pool))
+        .route(
+            "/_admin/pools/{name}/placement-groups",
+            get(admin::admin_list_pool_placement_groups),
+        )
         .route("/_admin/tenants", get(admin::admin_list_tenants))
         .route("/_admin/tenants", post(admin::admin_create_tenant))
         .route("/_admin/tenants/{name}", get(admin::admin_get_tenant))

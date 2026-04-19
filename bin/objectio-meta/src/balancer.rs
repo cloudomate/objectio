@@ -152,6 +152,11 @@ async fn sweep_once(meta: &Arc<MetaService>, tuning: &Tuning) -> anyhow::Result<
         debug!("balancer: not leader, skipping tick");
         return Ok(());
     }
+    // Mirror paused flag into RebalanceProgress so the UI banner
+    // reflects it even when no moves happen this tick.
+    meta.update_rebalance_progress(|p| {
+        p.paused = tuning.paused;
+    });
     if tuning.paused {
         debug!("balancer: paused via balancer/paused config");
         return Ok(());
@@ -163,15 +168,53 @@ async fn sweep_once(meta: &Arc<MetaService>, tuning: &Tuning) -> anyhow::Result<
         return Ok(());
     }
 
+    let mut committed_this_tick: u64 = 0;
+    let mut candidates_this_tick: u64 = 0;
+    let mut scanned_this_tick: u64 = 0;
+    let mut last_err = String::new();
     for pool in meta.pools_snapshot() {
         if pool.pg_count == 0 {
             continue;
         }
-        if let Err(e) = evaluate_pool(meta, &pool, active_osds, tuning).await {
-            warn!("balancer: pool '{}' evaluation failed: {e}", pool.name);
+        match evaluate_pool(meta, &pool, active_osds, tuning).await {
+            Ok(stats) => {
+                committed_this_tick += stats.committed;
+                candidates_this_tick += stats.candidates;
+                scanned_this_tick += stats.scanned;
+            }
+            Err(e) => {
+                last_err = format!("pool '{}': {e}", pool.name);
+                warn!("balancer: pool '{}' evaluation failed: {e}", pool.name);
+            }
         }
     }
+
+    meta.update_rebalance_progress(|p| {
+        p.started = true;
+        p.last_sweep_at = now_unix();
+        p.pgs_scanned_last_tick = scanned_this_tick;
+        p.pg_candidates_last_tick = candidates_this_tick;
+        p.pgs_moved_total = p.pgs_moved_total.saturating_add(committed_this_tick);
+        // Keep legacy field live so the existing UI banner still
+        // reflects activity while we migrate the console to the new
+        // pgs_moved_total field.
+        p.shards_rebalanced_total = p.pgs_moved_total;
+        if !last_err.is_empty() {
+            p.last_error = last_err;
+        } else if committed_this_tick > 0 || candidates_this_tick > 0 {
+            p.last_error.clear();
+        }
+    });
     Ok(())
+}
+
+/// Per-pool tick accounting returned by [`evaluate_pool`]. The sweep
+/// aggregates this into [`RebalanceProgress`] for UI consumption.
+#[derive(Default)]
+struct PoolStats {
+    scanned: u64,
+    candidates: u64,
+    committed: u64,
 }
 
 fn copy_count(pool: &PoolConfig) -> usize {
@@ -189,15 +232,17 @@ async fn evaluate_pool(
     pool: &PoolConfig,
     active_osds: usize,
     tuning: &Tuning,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PoolStats> {
+    let mut stats = PoolStats::default();
     let pgs = meta.placement_groups_for_pool(&pool.name);
     if pgs.is_empty() {
-        return Ok(());
+        return Ok(stats);
     }
+    stats.scanned = pgs.len() as u64;
 
     let k_plus_m = copy_count(pool);
     if k_plus_m == 0 {
-        return Ok(());
+        return Ok(stats);
     }
 
     // Live per-OSD PG-membership counts — updated in-place as moves
@@ -234,7 +279,7 @@ async fn evaluate_pool(
     )?;
     if cs_pool.sets.is_empty() {
         warn!("balancer: pool '{}' has no feasible copysets", pool.name);
-        return Ok(());
+        return Ok(stats);
     }
 
     let per_tick_cap = if tuning.per_tick_cap_override > 0 {
@@ -283,6 +328,7 @@ async fn evaluate_pool(
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    stats.candidates = scored.len() as u64;
 
     let mut committed = 0usize;
     for (cost, pg) in scored {
@@ -374,13 +420,14 @@ async fn evaluate_pool(
         }
     }
 
+    stats.committed = committed as u64;
     if committed > 0 {
         info!(
             "balancer: pool '{}' committed {}/{} moves (target={:.2}, overload>={:.2}, underload<={:.2})",
             pool.name, committed, per_tick_cap, target, overload_threshold, underload_threshold
         );
     }
-    Ok(())
+    Ok(stats)
 }
 
 async fn commit_pg(

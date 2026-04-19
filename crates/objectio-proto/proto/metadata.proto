@@ -739,6 +739,12 @@ message GetRebalanceStatusResponse {
     uint64 drifts_seen_this_pass = 5;
     uint64 shards_rebalanced_total = 6;
     string last_error = 7;
+    // Balancer (PG engine) counters. Since the greenfield cutover the
+    // balancer is the only thing moving placement; the drift fields
+    // above are kept for wire compat and now mirror pgs_moved_total.
+    uint64 pgs_moved_total = 8;
+    uint64 pg_candidates_last_tick = 9;
+    uint64 pgs_scanned_last_tick = 10;
 }
 
 // Get listing nodes for scatter-gather list operations

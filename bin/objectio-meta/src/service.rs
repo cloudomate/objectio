@@ -492,6 +492,14 @@ pub struct RebalanceProgress {
     /// Last non-empty error (transient OSD outage, etc.). Empty when
     /// the last sweep succeeded. Surfaces real failures to operators.
     pub last_error: String,
+    /// Cumulative PG moves committed by the balancer since process
+    /// start. Non-decreasing.
+    pub pgs_moved_total: u64,
+    /// PG candidates (overloaded/underloaded) found in the most
+    /// recent balancer tick. Reset per tick.
+    pub pg_candidates_last_tick: u64,
+    /// PGs scanned in the most recent balancer tick.
+    pub pgs_scanned_last_tick: u64,
 }
 
 /// Live progress for one Draining OSD.
@@ -6573,6 +6581,12 @@ impl MetadataService for MetaService {
         // `paused` is sourced from the live config each request; the
         // cached field is kept for the reconciler's fast path.
         let paused = self.is_rebalance_paused();
+        // `paused` merges two sources: the live `rebalance/paused`
+        // config (legacy gate) and `balancer/paused` (PG engine). The
+        // balancer itself mirrors its flag into `p.paused`, so OR'ing
+        // with `is_rebalance_paused()` gives a single "anything
+        // paused" signal to the UI.
+        let paused = paused || p.paused;
         Ok(Response::new(GetRebalanceStatusResponse {
             started: p.started,
             paused,
@@ -6581,6 +6595,9 @@ impl MetadataService for MetaService {
             drifts_seen_this_pass: p.drifts_seen_this_pass,
             shards_rebalanced_total: p.shards_rebalanced_total,
             last_error: p.last_error,
+            pgs_moved_total: p.pgs_moved_total,
+            pg_candidates_last_tick: p.pg_candidates_last_tick,
+            pgs_scanned_last_tick: p.pgs_scanned_last_tick,
         }))
     }
 

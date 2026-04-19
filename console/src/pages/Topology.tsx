@@ -957,10 +957,19 @@ function RebalanceBanner({
   busy: boolean;
   onToggle: () => void;
 }) {
+  // PG-era counters fall back to the legacy drift fields when the
+  // server is older. pgs_moved_total wins when present because the
+  // drift rebalancer is disabled in greenfield mode.
+  const pgsMoved = status.pgs_moved_total ?? 0;
+  const pgCandidates = status.pg_candidates_last_tick ?? 0;
+  const pgsScanned = status.pgs_scanned_last_tick ?? 0;
+
   const active =
     !status.paused &&
-    (status.drifts_seen_this_pass > 0 ||
+    (pgCandidates > 0 ||
+      status.drifts_seen_this_pass > 0 ||
       status.scanned_this_pass > 0 ||
+      pgsMoved > 0 ||
       status.shards_rebalanced_total > 0);
 
   const tone = status.paused
@@ -993,9 +1002,23 @@ function RebalanceBanner({
                 : "idle"}
           </span>
           <span className="opacity-80">
-            {status.shards_rebalanced_total.toLocaleString()} shards moved total
-            {active && status.drifts_seen_this_pass > 0 && (
-              <> · {status.drifts_seen_this_pass.toLocaleString()} drifts this pass</>
+            {pgsMoved > 0 ? (
+              <>
+                {pgsMoved.toLocaleString()} PG moves total
+                {pgsScanned > 0 && (
+                  <> · {pgsScanned.toLocaleString()} PGs scanned last tick</>
+                )}
+                {active && pgCandidates > 0 && (
+                  <> · {pgCandidates.toLocaleString()} candidates pending</>
+                )}
+              </>
+            ) : (
+              <>
+                {status.shards_rebalanced_total.toLocaleString()} shards moved total
+                {active && status.drifts_seen_this_pass > 0 && (
+                  <> · {status.drifts_seen_this_pass.toLocaleString()} drifts this pass</>
+                )}
+              </>
             )}
           </span>
         </div>

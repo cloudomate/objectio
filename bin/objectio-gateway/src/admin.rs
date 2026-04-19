@@ -613,6 +613,69 @@ pub async fn admin_get_pool(
     }
 }
 
+/// `GET /_admin/pools/{name}/placement-groups[?start_after=N&max=1000]`
+/// — paginated listing of a pool's placement groups with their OSD
+/// assignments and current version. Feeds the console's PG view.
+pub async fn admin_list_pool_placement_groups(
+    State(state): State<Arc<AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use objectio_proto::metadata::ListPlacementGroupsRequest;
+
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let start_after: u32 = params
+        .get("start_after")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let max_results: u32 = params
+        .get("max")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+
+    let mut client = state.meta_client.clone();
+    match client
+        .list_placement_groups(ListPlacementGroupsRequest {
+            pool: name,
+            start_after_pg_id: start_after,
+            max_results,
+        })
+        .await
+    {
+        Ok(resp) => {
+            let r = resp.into_inner();
+            let pgs: Vec<serde_json::Value> = r
+                .pgs
+                .iter()
+                .map(|pg| {
+                    serde_json::json!({
+                        "pool": pg.pool,
+                        "pg_id": pg.pg_id,
+                        "osd_ids": pg.osd_ids.iter().map(hex::encode).collect::<Vec<_>>(),
+                        "version": pg.version,
+                        "updated_at": pg.updated_at,
+                        "migrating_to_osd_ids": pg
+                            .migrating_to_osd_ids
+                            .iter()
+                            .map(hex::encode)
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({
+                "pgs": pgs,
+                "next_pg_id": r.next_pg_id,
+            }))
+            .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+    }
+}
+
 pub async fn admin_update_pool(
     State(state): State<Arc<AppState>>,
     auth: Option<Extension<AuthResult>>,
@@ -2154,6 +2217,11 @@ pub async fn admin_rebalance_status(
         "drifts_seen_this_pass": r.drifts_seen_this_pass,
         "shards_rebalanced_total": r.shards_rebalanced_total,
         "last_error": r.last_error,
+        // PG balancer counters — the banner uses these when
+        // pgs_moved_total > 0 to show balancer activity.
+        "pgs_moved_total": r.pgs_moved_total,
+        "pg_candidates_last_tick": r.pg_candidates_last_tick,
+        "pgs_scanned_last_tick": r.pgs_scanned_last_tick,
     }))
     .into_response()
 }
