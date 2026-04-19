@@ -116,6 +116,8 @@ fn pool_to_json(p: &PoolConfig) -> serde_json::Value {
         "enabled": p.enabled,
         "created_at": p.created_at,
         "updated_at": p.updated_at,
+        "pg_count": p.pg_count,
+        "tier": p.tier,
     })
 }
 
