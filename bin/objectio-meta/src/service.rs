@@ -2705,6 +2705,17 @@ impl MetadataService for MetaService {
             }
         }
 
+        // Add (or refresh) THIS OSD in the topology. Without this, a
+        // freshly-registered OSD whose state PVC was wiped — so it comes
+        // back with a new node_id — never joins the CRUSH placement set,
+        // because the old node_id was evicted but the new one was never
+        // inserted. Symptom on the cluster: writes and rebalance both
+        // skip the OSD forever, its shard count stays at 0. Update the
+        // topology now so `active_nodes()` sees the new node_id right
+        // away; the CRUSH engine gets rebuilt inside
+        // `update_topology_with_node`.
+        self.update_topology_with_node(&node);
+
         // Persist OSD + topology
         if let Some(store) = &self.store {
             let topology = self.topology.read().clone();
