@@ -576,6 +576,229 @@ fn now_unix() -> u64 {
 }
 
 // ---------------------------------------------------------------------
+// Phase 4c — EC reconstruction for dangling ObjectMeta shard refs
+// ---------------------------------------------------------------------
+
+/// Repair one shard whose owner is no longer in the cluster
+/// registration. Reads k surviving shards from the same stripe,
+/// reconstructs the missing one via EC, writes it to the CRUSH
+/// target, and rewrites the ObjectMeta so the dangling node_id is
+/// replaced. On success counts as a "rebalance" migration so the
+/// admin UI shows forward progress; on insufficient-survivors
+/// failure reports a distinct last_error so the operator knows
+/// the object is now degraded below k.
+async fn reconstruct_dangling_shard(
+    meta: &std::sync::Arc<crate::service::MetaService>,
+    dead_owner: &[u8; 16],
+    owner_meta_addr: &str,
+    target_node: [u8; 16],
+    object: &objectio_proto::metadata::ObjectMeta,
+    stripe_id: u64,
+    position: u32,
+) -> anyhow::Result<()> {
+    // Locate this stripe's full shard layout.
+    let stripe = object
+        .stripes
+        .iter()
+        .find(|s| s.stripe_id == stripe_id)
+        .ok_or_else(|| anyhow::anyhow!("stripe {stripe_id} missing from ObjectMeta"))?;
+
+    let ec_k = stripe.ec_k as usize;
+    let ec_m = stripe.ec_m as usize;
+    let total = ec_k + ec_m;
+    if total == 0 {
+        return Err(anyhow::anyhow!("stripe has zero k+m"));
+    }
+
+    // Build an index → node_id map and the slot for the missing
+    // position. Skip the position we're rebuilding; skip shards whose
+    // owner isn't registered (they're also dangling, can't pull from
+    // them either).
+    let registered: std::collections::HashSet<[u8; 16]> = meta
+        .osd_nodes_read()
+        .iter()
+        .map(|n| n.node_id)
+        .collect();
+
+    let target_addr = meta
+        .osd_address_by_id(&target_node)
+        .ok_or_else(|| anyhow::anyhow!("reconstruct target not registered"))?;
+
+    // Fetch surviving shards from OSDs that are alive AND registered.
+    // The loop does concurrent reads via a small FuturesUnordered
+    // bounded by `ec_k + 2` attempts — enough to tolerate a missed
+    // response while not flooding the cluster.
+    use futures::stream::FuturesUnordered;
+    use futures::StreamExt;
+
+    let mut futs: FuturesUnordered<_> = FuturesUnordered::new();
+    for shard in &stripe.shards {
+        if shard.position == position {
+            continue;
+        }
+        if shard.node_id.len() != 16 {
+            continue;
+        }
+        let mut nid = [0u8; 16];
+        nid.copy_from_slice(&shard.node_id);
+        if !registered.contains(&nid) {
+            continue; // Also dangling — skip.
+        }
+        let Some(addr) = meta.osd_address_by_id(&nid) else {
+            continue;
+        };
+        let object_id = object.object_id.clone();
+        let stripe_id = stripe.stripe_id;
+        let pos = shard.position;
+        futs.push(async move {
+            let ch = open_channel(&addr).await?;
+            let mut client = StorageServiceClient::new(ch);
+            let bytes = tokio::time::timeout(
+                PER_OSD_TIMEOUT,
+                client.read_shard(ReadShardRequest {
+                    shard_id: Some(ShardId {
+                        object_id,
+                        stripe_id,
+                        position: pos,
+                    }),
+                    offset: 0,
+                    length: 0,
+                }),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("read timeout"))??
+            .into_inner()
+            .data;
+            Ok::<(u32, Vec<u8>), anyhow::Error>((pos, bytes))
+        });
+    }
+
+    let mut survivors: Vec<Option<Vec<u8>>> = vec![None; total];
+    while let Some(r) = futs.next().await {
+        if let Ok((pos, bytes)) = r {
+            if (pos as usize) < total {
+                survivors[pos as usize] = Some(bytes);
+            }
+            if survivors.iter().filter(|s| s.is_some()).count() >= ec_k {
+                break;
+            }
+        }
+    }
+    drop(futs);
+
+    let available = survivors.iter().filter(|s| s.is_some()).count();
+    if available < ec_k {
+        return Err(anyhow::anyhow!(
+            "reconstruct: only {available} survivors available, need {ec_k}"
+        ));
+    }
+
+    // Run EC decode to regenerate the missing shard. Use a plain
+    // Reed-Solomon config with the stripe's recorded k/m — matches
+    // how the object was encoded at write time.
+    let config = objectio_common::ErasureConfig::new(ec_k as u8, ec_m as u8);
+    let codec = objectio_erasure::ErasureCodec::new(config)
+        .map_err(|e| anyhow::anyhow!("codec new: {e}"))?;
+    let mut rebuilt = codec
+        .reconstruct_shards(&survivors, &[position as usize])
+        .map_err(|e| anyhow::anyhow!("ec reconstruct: {e}"))?;
+    let reconstructed = rebuilt
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("reconstruct returned empty"))?;
+
+    // Write reconstructed bytes to the CRUSH target.
+    let shard_id = ShardId {
+        object_id: object.object_id.clone(),
+        stripe_id,
+        position,
+    };
+    let target_ch = open_channel(&target_addr).await?;
+    let mut target = StorageServiceClient::new(target_ch);
+    let write_resp = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        target.write_shard(WriteShardRequest {
+            shard_id: Some(shard_id),
+            data: reconstructed,
+            ec_k: ec_k as u32,
+            ec_m: ec_m as u32,
+            checksum: None,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("write_shard timeout"))??
+    .into_inner();
+
+    // Rewrite ObjectMeta so the dangling ShardLocation now points at
+    // the newly-written target. Use a fresh fetch to avoid racing
+    // another in-flight rebalance update.
+    let owner_ch = open_channel(owner_meta_addr).await?;
+    let mut owner = StorageServiceClient::new(owner_ch);
+    let Some(mut fresh) = tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        owner.get_object_meta(GetObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            version_id: String::new(),
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("get_object_meta timeout"))??
+    .into_inner()
+    .object
+    else {
+        return Err(anyhow::anyhow!(
+            "owner lost ObjectMeta for {}/{} mid-reconstruct",
+            object.bucket,
+            object.key
+        ));
+    };
+    for stripe in &mut fresh.stripes {
+        if stripe.stripe_id != stripe_id {
+            continue;
+        }
+        for shard in &mut stripe.shards {
+            if shard.position == position && shard.node_id == dead_owner.as_slice() {
+                let target_disk = write_resp
+                    .location
+                    .as_ref()
+                    .map(|l| l.disk_id.clone())
+                    .unwrap_or_default();
+                *shard = objectio_proto::metadata::ShardLocation {
+                    position: shard.position,
+                    node_id: target_node.to_vec(),
+                    disk_id: target_disk,
+                    offset: 0,
+                    shard_type: shard.shard_type,
+                    local_group: shard.local_group,
+                };
+            }
+        }
+    }
+    tokio::time::timeout(
+        PER_OSD_TIMEOUT,
+        owner.put_object_meta(PutObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            object: Some(fresh),
+            versioning_enabled: false,
+        }),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("put_object_meta timeout"))??;
+
+    tracing::info!(
+        "reconstruct: rebuilt {}/{} stripe={} pos={} from {} survivors onto {}",
+        object.bucket,
+        object.key,
+        stripe_id,
+        position,
+        available,
+        hex::encode(target_node),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
 // Continuous auto-rebalancer
 // ---------------------------------------------------------------------
 
@@ -871,19 +1094,27 @@ async fn migrate_rebalance_one(
     // and let the next sweep try again. Report as a transient debug
     // rather than a rebalancer error so the UI banner doesn't get
     // stuck red on a routine restart window.
-    // Return Err — NOT Ok — so the caller doesn't log "moved" or
-    // bump the success counter for migrations that didn't happen.
-    // The current_owner-not-registered case is actually the permanent
-    // "dangling reference" state: ObjectMeta still points at an OSD
-    // node_id that no longer exists in the registration. Shard reads
-    // against it also fail; this needs real repair (EC reconstruction
-    // into a live target), not just a meta rewrite. Phase 4c.
-    let Some(source_addr) = meta.osd_address_by_id(current_owner) else {
-        return Err(anyhow::anyhow!(
-            "dangling shard ref: owner {} is not in current registration",
-            hex::encode(current_owner)
-        ));
-    };
+    // Dangling-ref branch — the ObjectMeta still points at an OSD
+    // node_id that no longer exists in the registration. The shard
+    // is unreachable for a direct copy, but as long as at least k
+    // surviving shards of this stripe live on registered OSDs we
+    // can EC-reconstruct the missing one and write it to a fresh
+    // CRUSH target. This is the standard auto-repair most object
+    // stores run as a scheduled task; we fold it into rebalance
+    // so it runs at the same budget.
+    if meta.osd_address_by_id(current_owner).is_none() {
+        return reconstruct_dangling_shard(
+            meta,
+            current_owner,
+            current_owner_meta_addr,
+            target_node,
+            object,
+            stripe_id,
+            position,
+        )
+        .await;
+    }
+    let source_addr = meta.osd_address_by_id(current_owner).unwrap();
     let Some(target_addr) = meta.osd_address_by_id(&target_node) else {
         return Err(anyhow::anyhow!(
             "target {} not registered yet",

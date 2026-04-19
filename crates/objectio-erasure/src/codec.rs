@@ -326,6 +326,65 @@ impl ErasureCodec {
     /// Verify that shards are consistent
     ///
     /// Re-encodes the data shards and compares parity to verify integrity.
+    /// Reconstruct specific missing shards without decoding the full
+    /// original data.
+    ///
+    /// Used by the meta's repair path (Phase 4c): when an ObjectMeta
+    /// has a ShardLocation pointing at an unregistered OSD, we read
+    /// the surviving shards and regenerate the missing one instead of
+    /// re-uploading the object. Returns reconstructed bytes in the
+    /// same order as `missing_indices`.
+    ///
+    /// Requires at least k shards to be `Some`; returns
+    /// `InsufficientShards` otherwise.
+    ///
+    /// # Errors
+    /// Returns `InsufficientShards` if fewer than k shards are
+    /// available, and propagates any backend-level decoding error.
+    pub fn reconstruct_shards(
+        &self,
+        shards: &[Option<Vec<u8>>],
+        missing_indices: &[usize],
+    ) -> Result<Vec<Vec<u8>>> {
+        let k = self.data_shards();
+        let available = shards.iter().filter(|s| s.is_some()).count();
+        if available < k {
+            return Err(ErasureError::InsufficientShards {
+                available,
+                required: k,
+            }
+            .into());
+        }
+        let shard_size = shards
+            .iter()
+            .find_map(|s| s.as_ref().map(|v| v.len()))
+            .ok_or(ErasureError::InsufficientShards {
+                available: 0,
+                required: k,
+            })?;
+
+        match &self.backend {
+            CodecBackend::Mds(backend) => {
+                let shard_refs: Vec<Option<&[u8]>> = shards
+                    .iter()
+                    .map(|s| s.as_ref().map(|v| v.as_slice()))
+                    .collect();
+                backend
+                    .decode(&shard_refs, shard_size, missing_indices)
+                    .map_err(|e| ErasureError::DecodingFailed(e.to_string()).into())
+            }
+            CodecBackend::Lrc(backend) => {
+                let shard_refs: Vec<Option<&[u8]>> = shards
+                    .iter()
+                    .map(|s| s.as_ref().map(|v| v.as_slice()))
+                    .collect();
+                backend
+                    .decode(&shard_refs, shard_size, missing_indices)
+                    .map_err(|e| ErasureError::DecodingFailed(e.to_string()).into())
+            }
+        }
+    }
+
     pub fn verify(&self, shards: &[Vec<u8>]) -> Result<bool> {
         let total = self.total_shards();
 
