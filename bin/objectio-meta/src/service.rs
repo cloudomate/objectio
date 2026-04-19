@@ -1123,30 +1123,42 @@ impl MetaService {
 
         // Slow path — not yet set. Generate a fresh UUID and persist
         // via Raft so every replica agrees. Only the leader actually
-        // writes; followers wait for the apply-listener to populate
-        // the cache and then re-read.
+        // writes; followers return empty so the OSD skips stamping
+        // and tries again on the next register retry.
         let Some(raft) = self.raft_handle() else {
-            // No Raft (single-process dev mode) — generate but don't
-            // persist. On next boot we'll regenerate, which is only a
-            // problem if an OSD is simultaneously claiming disks.
             warn!("cluster_uuid requested before Raft handle is set — returning non-persistent value");
             return Uuid::new_v4().as_bytes().to_vec();
         };
         if !self.is_raft_leader() {
-            // Follower can't write — fall back to returning a nil
-            // marker so the OSD skips stamping this round.
             return Vec::new();
         }
 
         let fresh = Uuid::new_v4();
-        let bytes = fresh.as_bytes().to_vec();
+        let uuid_bytes = fresh.as_bytes().to_vec();
+
+        // Config entries are stored as prost-encoded ConfigEntry
+        // values. Writing raw UUID bytes makes the apply-listener
+        // drop the entry (decode failure) and the cache never
+        // observes the write — which is exactly what used to happen.
+        let version = self
+            .config_version
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let entry = ConfigEntry {
+            key: KEY.to_string(),
+            value: uuid_bytes.clone(),
+            updated_at: Self::current_timestamp(),
+            updated_by: "cluster-uuid-init".into(),
+            version,
+        };
+
         use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
         let cmd = MetaCommand::MultiCas {
             ops: vec![CasOp {
                 table: CasTable::Config,
                 key: KEY.to_string(),
                 expected: None,
-                new_value: Some(bytes.clone()),
+                new_value: Some(entry.encode_to_vec()),
             }],
             requested_by: "cluster-uuid-init".into(),
         };
@@ -1154,7 +1166,7 @@ impl MetaService {
             Ok(r) => match r.data {
                 MetaResponse::MultiCasOk => {
                     info!("Generated and persisted cluster/uuid: {fresh}");
-                    bytes
+                    uuid_bytes
                 }
                 MetaResponse::MultiCasConflict { .. } => {
                     // Another caller won the race — re-read the cache.
