@@ -328,24 +328,36 @@ pub async fn read_shard_from_osd(
 }
 
 // ============================================================================
-// Object Metadata Operations (stored on primary OSD)
+// Object Metadata Operations
+//
+// ObjectMeta is replicated on every shard-carrying OSD (MinIO xl.meta / Ceph
+// OMAP style). Writes fan out to all k+m placements and require every replica
+// to succeed. Reads try each placement in CRUSH order and return the first
+// success. Deletes are best-effort across all replicas — a surviving stale
+// copy is harmless because ObjectListingEntry is the source of truth for
+// existence, and the next drain/rebalance sweep will GC it.
 // ============================================================================
 
-/// Helper to store object metadata on the primary OSD
-pub async fn put_object_meta_to_osd(
-    pool: &OsdPool,
-    primary_placement: &NodePlacement,
-    bucket: &str,
-    key: &str,
-    object_meta: objectio_proto::metadata::ObjectMeta,
-) -> Result<(), OsdPoolError> {
-    put_object_meta_to_osd_versioned(pool, primary_placement, bucket, key, object_meta, false).await
+/// Deduplicate placements by node_id — `NodePlacement` carries a `position`
+/// alongside the node, so the same OSD appears once per shard it owns. For
+/// ObjectMeta fan-out we want one write per physical OSD.
+fn unique_node_placements(placements: &[NodePlacement]) -> Vec<NodePlacement> {
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(placements.len());
+    for p in placements {
+        if seen.insert(p.node_id.clone()) {
+            out.push(p.clone());
+        }
+    }
+    out
 }
 
-/// Helper to store object metadata on the primary OSD with versioning support
-pub async fn put_object_meta_to_osd_versioned(
+/// Write ObjectMeta to every shard-carrying OSD in parallel. Requires all
+/// replicas to accept — any failure fails the PUT and the caller surfaces a
+/// retryable error to the S3 client.
+pub async fn put_object_meta_to_all(
     pool: &OsdPool,
-    primary_placement: &NodePlacement,
+    placements: &[NodePlacement],
     bucket: &str,
     key: &str,
     object_meta: objectio_proto::metadata::ObjectMeta,
@@ -353,37 +365,133 @@ pub async fn put_object_meta_to_osd_versioned(
 ) -> Result<(), OsdPoolError> {
     use objectio_proto::storage::PutObjectMetaRequest;
 
-    let mut client = pool.get_client_for_placement(primary_placement).await?;
+    let targets = unique_node_placements(placements);
+    if targets.is_empty() {
+        return Err(OsdPoolError::NoNodesAvailable);
+    }
 
-    let request = PutObjectMetaRequest {
-        bucket: bucket.to_string(),
-        key: key.to_string(),
-        object: Some(object_meta),
-        versioning_enabled,
-    };
+    let mut futs = Vec::with_capacity(targets.len());
+    for placement in &targets {
+        let pool = pool;
+        let req = PutObjectMetaRequest {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            object: Some(object_meta.clone()),
+            versioning_enabled,
+        };
+        let p = placement.clone();
+        futs.push(async move {
+            let mut client = pool.get_client_for_placement(&p).await?;
+            let fut = client.put_object_meta(req);
+            tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+                .await
+                .map_err(|_| {
+                    error!("Timeout putting object metadata to OSD {}", p.node_address);
+                    OsdPoolError::ConnectionFailed("put_object_meta timeout".to_string())
+                })?
+                .map_err(|e| {
+                    error!(
+                        "Failed to put object metadata to OSD {}: {}",
+                        p.node_address, e
+                    );
+                    OsdPoolError::ConnectionFailed(e.to_string())
+                })?;
+            Ok::<_, OsdPoolError>(())
+        });
+    }
 
-    let put_future = client.put_object_meta(request);
-    tokio::time::timeout(std::time::Duration::from_secs(10), put_future)
-        .await
-        .map_err(|_| {
-            error!(
-                "Timeout putting object metadata to OSD {}",
-                primary_placement.node_address
-            );
-            OsdPoolError::ConnectionFailed("put_object_meta timeout".to_string())
-        })?
-        .map_err(|e| {
-            error!(
-                "Failed to put object metadata to OSD {}: {}",
-                primary_placement.node_address, e
-            );
-            OsdPoolError::ConnectionFailed(e.to_string())
-        })?;
-
+    let results = futures::future::join_all(futs).await;
+    for r in results {
+        r?;
+    }
     Ok(())
 }
 
-/// Helper to get object metadata from the primary OSD
+/// Read ObjectMeta from any shard-carrying OSD. Tries each placement in CRUSH
+/// order (nodes[0] first) and returns the first success. Returns `Ok(None)` only
+/// when every reachable replica reports not-found — a mixed outcome (some down,
+/// some report Some) returns the Some. Returns `Err` only if every replica
+/// errored (no authoritative answer).
+pub async fn get_object_meta_from_any(
+    pool: &OsdPool,
+    placements: &[NodePlacement],
+    bucket: &str,
+    key: &str,
+) -> Result<Option<objectio_proto::metadata::ObjectMeta>, OsdPoolError> {
+    use objectio_proto::storage::GetObjectMetaRequest;
+
+    let targets = unique_node_placements(placements);
+    if targets.is_empty() {
+        return Err(OsdPoolError::NoNodesAvailable);
+    }
+
+    let mut last_err: Option<OsdPoolError> = None;
+    let mut saw_not_found = false;
+    for placement in &targets {
+        let req = GetObjectMetaRequest {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version_id: String::new(),
+        };
+        let client_res = pool.get_client_for_placement(placement).await;
+        let mut client = match client_res {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    "get_object_meta: connect failed to {}: {}",
+                    placement.node_address, e
+                );
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let fut = client.get_object_meta(req);
+        match tokio::time::timeout(std::time::Duration::from_secs(10), fut).await {
+            Ok(Ok(resp)) => {
+                let inner = resp.into_inner();
+                if inner.found {
+                    tracing::debug!(
+                        "get_object_meta: hit on {} for {}/{}",
+                        placement.node_address,
+                        bucket,
+                        key
+                    );
+                    return Ok(inner.object);
+                }
+                tracing::debug!(
+                    "get_object_meta: miss on {} for {}/{}",
+                    placement.node_address,
+                    bucket,
+                    key
+                );
+                saw_not_found = true;
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "get_object_meta from {} failed: {}",
+                    placement.node_address, e
+                );
+                last_err = Some(OsdPoolError::ConnectionFailed(e.to_string()));
+            }
+            Err(_) => {
+                warn!("get_object_meta timeout from {}", placement.node_address);
+                last_err = Some(OsdPoolError::ConnectionFailed(
+                    "get_object_meta timeout".to_string(),
+                ));
+            }
+        }
+    }
+
+    if saw_not_found {
+        return Ok(None);
+    }
+    Err(last_err.unwrap_or(OsdPoolError::NoNodesAvailable))
+}
+
+/// Legacy single-node helper retained for the gRPC client wrappers that still
+/// target one OSD directly (same-OSD copy, server-side rename). Prefer the
+/// fan-out variants for object-level PUT/GET/DELETE.
+#[allow(dead_code)]
 pub async fn get_object_meta_from_osd(
     pool: &OsdPool,
     primary_placement: &NodePlacement,
@@ -426,60 +534,71 @@ pub async fn get_object_meta_from_osd(
     }
 }
 
-/// Helper to delete object metadata from the primary OSD
-pub async fn delete_object_meta_from_osd(
+/// Delete ObjectMeta from every shard-carrying OSD in parallel. Best-effort:
+/// succeeds if at least one replica accepts the delete. Failures on other
+/// replicas are logged but do not fail the S3 DELETE, because
+/// ObjectListingEntry is the authority on existence and any surviving stale
+/// copies will be reclaimed by subsequent sweeps.
+pub async fn delete_object_meta_from_all(
     pool: &OsdPool,
-    primary_placement: &NodePlacement,
-    bucket: &str,
-    key: &str,
-) -> Result<(), OsdPoolError> {
-    delete_object_meta_from_osd_versioned(pool, primary_placement, bucket, key, "").await
-}
-
-/// Delete specific version of object metadata from OSD
-pub async fn delete_object_meta_from_osd_versioned(
-    pool: &OsdPool,
-    primary_placement: &NodePlacement,
+    placements: &[NodePlacement],
     bucket: &str,
     key: &str,
     version_id: &str,
 ) -> Result<(), OsdPoolError> {
     use objectio_proto::storage::DeleteObjectMetaRequest;
 
-    let mut client = pool.get_client_for_placement(primary_placement).await?;
+    let targets = unique_node_placements(placements);
+    if targets.is_empty() {
+        return Err(OsdPoolError::NoNodesAvailable);
+    }
 
-    let request = DeleteObjectMetaRequest {
-        bucket: bucket.to_string(),
-        key: key.to_string(),
-        version_id: version_id.to_string(),
-    };
+    let mut futs = Vec::with_capacity(targets.len());
+    for placement in &targets {
+        let pool = pool;
+        let req = DeleteObjectMetaRequest {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            version_id: version_id.to_string(),
+        };
+        let p = placement.clone();
+        futs.push(async move {
+            let mut client = pool.get_client_for_placement(&p).await?;
+            let fut = client.delete_object_meta(req);
+            tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+                .await
+                .map_err(|_| OsdPoolError::ConnectionFailed("delete_object_meta timeout".into()))?
+                .map_err(|e| OsdPoolError::ConnectionFailed(e.to_string()))?;
+            Ok::<_, OsdPoolError>(p.node_address.clone())
+        });
+    }
 
-    let delete_future = client.delete_object_meta(request);
-    tokio::time::timeout(std::time::Duration::from_secs(10), delete_future)
-        .await
-        .map_err(|_| {
-            error!(
-                "Timeout deleting object metadata from OSD {}",
-                primary_placement.node_address
-            );
-            OsdPoolError::ConnectionFailed("delete_object_meta timeout".to_string())
-        })?
-        .map_err(|e| {
-            warn!(
-                "Failed to delete object metadata from OSD {}: {}",
-                primary_placement.node_address, e
-            );
-            OsdPoolError::ConnectionFailed(e.to_string())
-        })?;
-
+    let results = futures::future::join_all(futs).await;
+    let mut ok = 0;
+    let mut last_err: Option<OsdPoolError> = None;
+    for r in results {
+        match r {
+            Ok(addr) => {
+                ok += 1;
+                tracing::debug!("delete_object_meta: ok on {addr}");
+            }
+            Err(e) => {
+                warn!("delete_object_meta replica failed: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+    if ok == 0 {
+        return Err(last_err.unwrap_or(OsdPoolError::NoNodesAvailable));
+    }
     Ok(())
 }
 
-/// Fast-path metadata-only copy: copies ObjectMeta on the same OSD without moving shard data.
-///
-/// The source and destination must resolve to the same OSD (verified by caller). The shards
-/// referenced by the ObjectMeta are not touched; both source and destination will reference the
-/// same physical shards until the source ObjectMeta is deleted by a subsequent DeleteObject.
+/// Legacy same-OSD meta rename. Unused now that ObjectMeta is replicated on
+/// every shard-carrying OSD (a one-node rename would leave other replicas out
+/// of sync). Kept compiling but gated so a future rebuild with proper fan-out
+/// can re-enable it.
+#[allow(dead_code)]
 pub async fn copy_object_meta_on_osd(
     pool: &OsdPool,
     osd_placement: &NodePlacement,

@@ -5,9 +5,8 @@
 const MAX_SHARD_SIZE: usize = 4 * 1024 * 1024 - 4096; // ~4MB per shard
 
 use crate::osd_pool::{
-    OsdPool, copy_object_meta_on_osd, delete_object_meta_from_osd,
-    delete_object_meta_from_osd_versioned, get_object_meta_from_osd, put_object_meta_to_osd,
-    put_object_meta_to_osd_versioned, read_shard_from_osd, write_shard_to_osd,
+    OsdPool, delete_object_meta_from_all, get_object_meta_from_any, put_object_meta_to_all,
+    read_shard_from_osd, write_shard_to_osd,
 };
 use crate::scatter_gather::ScatterGatherEngine;
 use axum::{
@@ -1816,9 +1815,8 @@ async fn copy_sse_decision(
             StatusCode::SERVICE_UNAVAILABLE,
         ));
     }
-    let src_osd = &src_placement.nodes[0];
     let source_meta =
-        match get_object_meta_from_osd(&state.osd_pool, src_osd, source_bucket, source_key).await {
+        match get_object_meta_from_any(&state.osd_pool, &src_placement.nodes, source_bucket, source_key).await {
             Ok(Some(m)) => m,
             Ok(None) => {
                 return Err(S3Error::xml_response(
@@ -2123,7 +2121,6 @@ pub async fn put_object(
                 StatusCode::SERVICE_UNAVAILABLE,
             );
         }
-        let src_osd = &src_placement.nodes[0];
 
         // Get dest OSD via CRUSH placement
         let dst_placement = match meta_client
@@ -2153,54 +2150,37 @@ pub async fn put_object(
                 StatusCode::SERVICE_UNAVAILABLE,
             );
         }
-        let dst_osd = &dst_placement.nodes[0];
 
-        // Fast-path: copy ObjectMeta without touching shard data
-        let dest_meta = if src_osd.node_id == dst_osd.node_id {
-            // Same OSD: single atomic RPC
-            match copy_object_meta_on_osd(
+        // With ObjectMeta replicated on every shard-carrying OSD, CopyObject is
+        // always read-any + write-all. The old "same OSD fast path" using
+        // copy_object_meta_on_osd is no longer safe — it would leave the other
+        // replicas without the dest meta.
+        let dest_meta = {
+            let source_meta = match get_object_meta_from_any(
                 &state.osd_pool,
-                src_osd,
+                &src_placement.nodes,
                 source_bucket,
                 source_key,
-                &bucket,
-                &key,
             )
             .await
             {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("CopyObject: copy_object_meta failed: {}", e);
+                Ok(Some(m)) => m,
+                Ok(None) => {
                     return S3Error::xml_response(
                         "NoSuchKey",
                         "The specified key does not exist",
                         StatusCode::NOT_FOUND,
                     );
                 }
-            }
-        } else {
-            // Different OSDs: read meta from source, write to dest
-            let source_meta =
-                match get_object_meta_from_osd(&state.osd_pool, src_osd, source_bucket, source_key)
-                    .await
-                {
-                    Ok(Some(m)) => m,
-                    Ok(None) => {
-                        return S3Error::xml_response(
-                            "NoSuchKey",
-                            "The specified key does not exist",
-                            StatusCode::NOT_FOUND,
-                        );
-                    }
-                    Err(e) => {
-                        error!("CopyObject: failed to read source meta: {}", e);
-                        return S3Error::xml_response(
-                            "InternalError",
-                            &e.to_string(),
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                        );
-                    }
-                };
+                Err(e) => {
+                    error!("CopyObject: failed to read source meta: {}", e);
+                    return S3Error::xml_response(
+                        "InternalError",
+                        &e.to_string(),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
+            };
 
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2216,9 +2196,15 @@ pub async fn put_object(
                 ..source_meta
             };
 
-            if let Err(e) =
-                put_object_meta_to_osd(&state.osd_pool, dst_osd, &bucket, &key, dest_meta.clone())
-                    .await
+            if let Err(e) = put_object_meta_to_all(
+                &state.osd_pool,
+                &dst_placement.nodes,
+                &bucket,
+                &key,
+                dest_meta.clone(),
+                false,
+            )
+            .await
             {
                 error!("CopyObject: failed to write dest meta: {}", e);
                 return S3Error::xml_response(
@@ -2511,10 +2497,9 @@ pub async fn put_object(
             encryption_context: sse_encryption_context.clone(),
         };
 
-        let primary_osd = &placement.nodes[0];
-        if let Err(e) = put_object_meta_to_osd_versioned(
+        if let Err(e) = put_object_meta_to_all(
             &state.osd_pool,
-            primary_osd,
+            &placement.nodes,
             &bucket,
             &key,
             object_meta,
@@ -2522,7 +2507,7 @@ pub async fn put_object(
         )
         .await
         {
-            error!("Failed to store object metadata on OSD: {}", e);
+            error!("Failed to store object metadata on OSDs: {}", e);
             return S3Error::xml_response(
                 "InternalError",
                 &format!("Failed to store object metadata: {}", e),
@@ -2821,13 +2806,9 @@ pub async fn put_object(
         encryption_context: sse_encryption_context,
     };
 
-    // Get primary OSD (position 0 in placement)
-    let primary_osd = &placement.nodes[0];
-
-    // Store metadata on primary OSD
-    if let Err(e) = put_object_meta_to_osd_versioned(
+    if let Err(e) = put_object_meta_to_all(
         &state.osd_pool,
-        primary_osd,
+        &placement.nodes,
         &bucket,
         &key,
         object_meta,
@@ -2835,7 +2816,7 @@ pub async fn put_object(
     )
     .await
     {
-        error!("Failed to store object metadata on OSD: {}", e);
+        error!("Failed to store object metadata on OSDs: {}", e);
         return S3Error::xml_response(
             "InternalError",
             &format!("Failed to store object metadata: {}", e),
@@ -2844,8 +2825,13 @@ pub async fn put_object(
     }
 
     info!(
-        "Created object: {}/{}, size={}, stripes={}, shards_written={}, primary_osd={}",
-        bucket, key, original_size, num_stripes, total_shards_written, primary_osd.node_address,
+        "Created object: {}/{}, size={}, stripes={}, shards_written={}, replicas={}",
+        bucket,
+        key,
+        original_size,
+        num_stripes,
+        total_shards_written,
+        placement.nodes.len(),
     );
 
     let mut resp = Response::builder()
@@ -2977,15 +2963,15 @@ pub async fn get_object(
     // (e.g. topology changed), fetch all active nodes as fallback
     // This is done lazily below only if a node_id is missing from the map.
 
-    // Get object metadata from primary OSD (position 0)
-    let primary_osd = &placement.nodes[0];
-    let object = match get_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &key).await {
+    let object = match get_object_meta_from_any(&state.osd_pool, &placement.nodes, &bucket, &key)
+        .await
+    {
         Ok(Some(obj)) => obj,
         Ok(None) => {
             return S3Error::xml_response("NoSuchKey", "Object not found", StatusCode::NOT_FOUND);
         }
         Err(e) => {
-            error!("Failed to get object metadata from OSD: {}", e);
+            error!("Failed to get object metadata from OSDs: {}", e);
             return S3Error::xml_response(
                 "InternalError",
                 &e.to_string(),
@@ -3696,9 +3682,7 @@ pub async fn head_object(
             .unwrap();
     }
 
-    // Get object metadata from primary OSD
-    let primary_osd = &placement.nodes[0];
-    match get_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &key).await {
+    match get_object_meta_from_any(&state.osd_pool, &placement.nodes, &bucket, &key).await {
         Ok(Some(obj)) => {
             let mut builder = Response::builder()
                 .status(StatusCode::OK)
@@ -3806,11 +3790,9 @@ pub async fn delete_object(
             .unwrap();
     }
 
-    let primary_osd = &placement.nodes[0];
-
     // Lock enforcement: check retention and legal hold before deleting
     if let Ok(Some(meta)) =
-        get_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &key).await
+        get_object_meta_from_any(&state.osd_pool, &placement.nodes, &bucket, &key).await
     {
         // Check legal hold
         if meta.legal_hold.as_ref().is_some_and(|lh| lh.status) {
@@ -3890,9 +3872,9 @@ pub async fn delete_object(
             ..Default::default()
         };
 
-        if let Err(e) = put_object_meta_to_osd_versioned(
+        if let Err(e) = put_object_meta_to_all(
             &state.osd_pool,
-            primary_osd,
+            &placement.nodes,
             &bucket,
             &key,
             delete_marker,
@@ -3923,8 +3905,7 @@ pub async fn delete_object(
     // Non-versioned delete, or versioned delete with specific version_id
     let vid = version_id.as_deref().unwrap_or("");
     if let Err(e) =
-        delete_object_meta_from_osd_versioned(&state.osd_pool, primary_osd, &bucket, &key, vid)
-            .await
+        delete_object_meta_from_all(&state.osd_pool, &placement.nodes, &bucket, &key, vid).await
     {
         warn!("Failed to delete object metadata from OSD: {}", e);
     }
@@ -4048,13 +4029,12 @@ pub async fn delete_objects(
             continue;
         }
 
-        // Delete object metadata from primary OSD
-        let primary_osd = &placement.nodes[0];
         if let Err(e) =
-            delete_object_meta_from_osd(&state.osd_pool, primary_osd, &bucket, &obj.key).await
+            delete_object_meta_from_all(&state.osd_pool, &placement.nodes, &bucket, &obj.key, "")
+                .await
         {
             warn!(
-                "Failed to delete object {}/{} from OSD: {}",
+                "Failed to delete object {}/{} from OSDs: {}",
                 bucket, obj.key, e
             );
             // Continue anyway - might not exist, which is OK
@@ -5185,17 +5165,17 @@ async fn complete_multipart_upload_internal(
                 };
 
                 if !placement.nodes.is_empty() {
-                    let primary_osd = &placement.nodes[0];
-                    if let Err(e) = put_object_meta_to_osd(
+                    if let Err(e) = put_object_meta_to_all(
                         &state.osd_pool,
-                        primary_osd,
+                        &placement.nodes,
                         &bucket,
                         &key,
                         object.clone(),
+                        false,
                     )
                     .await
                     {
-                        error!("Failed to store object metadata on OSD: {}", e);
+                        error!("Failed to store object metadata on OSDs: {}", e);
                         return S3Error::xml_response(
                             "InternalError",
                             &format!("Failed to store object metadata: {}", e),
@@ -6356,14 +6336,13 @@ async fn put_object_retention_internal(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
-    // Get current object metadata from primary OSD, update retention, put back
-    let primary_osd = match get_primary_osd_for_object(&state, &bucket, &key).await {
-        Ok(osd) => osd,
+    let nodes = match get_placement_nodes_for_object(&state, &bucket, &key).await {
+        Ok(n) => n,
         Err(resp) => return resp,
     };
 
     let mut object_meta =
-        match get_object_meta_from_osd(&state.osd_pool, &primary_osd, &bucket, &key).await {
+        match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
             Ok(Some(meta)) => meta,
             Ok(None) => {
                 return S3Error::xml_response(
@@ -6388,7 +6367,7 @@ async fn put_object_retention_internal(
     });
 
     if let Err(e) =
-        put_object_meta_to_osd(&state.osd_pool, &primary_osd, &bucket, &key, object_meta).await
+        put_object_meta_to_all(&state.osd_pool, &nodes, &bucket, &key, object_meta, false).await
     {
         error!("Failed to update object retention: {}", e);
         return S3Error::xml_response(
@@ -6409,12 +6388,12 @@ async fn get_object_retention_internal(
     bucket: String,
     key: String,
 ) -> Response {
-    let primary_osd = match get_primary_osd_for_object(&state, &bucket, &key).await {
-        Ok(osd) => osd,
+    let nodes = match get_placement_nodes_for_object(&state, &bucket, &key).await {
+        Ok(n) => n,
         Err(resp) => return resp,
     };
 
-    match get_object_meta_from_osd(&state.osd_pool, &primary_osd, &bucket, &key).await {
+    match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
         Ok(Some(meta)) => match meta.retention {
             Some(retention) => {
                 let mode = match retention.mode() {
@@ -6476,13 +6455,13 @@ async fn put_object_legal_hold_internal(
 
     let status = req.status == "ON";
 
-    let primary_osd = match get_primary_osd_for_object(&state, &bucket, &key).await {
-        Ok(osd) => osd,
+    let nodes = match get_placement_nodes_for_object(&state, &bucket, &key).await {
+        Ok(n) => n,
         Err(resp) => return resp,
     };
 
     let mut object_meta =
-        match get_object_meta_from_osd(&state.osd_pool, &primary_osd, &bucket, &key).await {
+        match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
             Ok(Some(meta)) => meta,
             Ok(None) => {
                 return S3Error::xml_response(
@@ -6504,7 +6483,7 @@ async fn put_object_legal_hold_internal(
     object_meta.legal_hold = Some(LegalHold { status });
 
     if let Err(e) =
-        put_object_meta_to_osd(&state.osd_pool, &primary_osd, &bucket, &key, object_meta).await
+        put_object_meta_to_all(&state.osd_pool, &nodes, &bucket, &key, object_meta, false).await
     {
         error!("Failed to update legal hold: {}", e);
         return S3Error::xml_response(
@@ -6525,12 +6504,12 @@ async fn get_object_legal_hold_internal(
     bucket: String,
     key: String,
 ) -> Response {
-    let primary_osd = match get_primary_osd_for_object(&state, &bucket, &key).await {
-        Ok(osd) => osd,
+    let nodes = match get_placement_nodes_for_object(&state, &bucket, &key).await {
+        Ok(n) => n,
         Err(resp) => return resp,
     };
 
-    match get_object_meta_from_osd(&state.osd_pool, &primary_osd, &bucket, &key).await {
+    match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
         Ok(Some(meta)) => {
             let status = meta.legal_hold.as_ref().is_some_and(|lh| lh.status);
             let result = LegalHoldResponse {
@@ -6750,11 +6729,11 @@ async fn list_object_versions_internal(
 }
 
 /// Helper to get the primary OSD placement for an object
-async fn get_primary_osd_for_object(
+async fn get_placement_nodes_for_object(
     state: &AppState,
     bucket: &str,
     key: &str,
-) -> Result<objectio_proto::metadata::NodePlacement, Response> {
+) -> Result<Vec<objectio_proto::metadata::NodePlacement>, Response> {
     let placement_key = format!("{}/{}", bucket, key);
     let mut client = state.meta_client.clone();
     match client
@@ -6775,7 +6754,7 @@ async fn get_primary_osd_for_object(
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ))
             } else {
-                Ok(placement.nodes[0].clone())
+                Ok(placement.nodes)
             }
         }
         Err(e) => {

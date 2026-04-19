@@ -870,20 +870,36 @@ impl MetaService {
                 let count = nodes.len();
                 // Dedupe by address on load: if the persistent store still
                 // holds pre-cleanup duplicates from older binaries, keep
-                // only the newest entry per address (last-wins). This
-                // one-shot cleanup prevents ghost OSDs from surviving
-                // a gateway rolling upgrade.
+                // only the newest entry per address (last-wins). Also drop
+                // known-bad placeholder addresses (e.g. http://0.0.0.0:9200)
+                // that come from OSDs that never heartbeated a real
+                // address — they pollute CRUSH and cause empty-address
+                // write failures.
                 let mut by_address: std::collections::HashMap<String, OsdNode> =
                     std::collections::HashMap::new();
+                let mut bad_placeholder = 0usize;
                 for (_hex_id, node) in nodes {
+                    if node.address.is_empty()
+                        || node.address.contains("://0.0.0.0")
+                        || node.address.contains("://[::]")
+                    {
+                        bad_placeholder += 1;
+                        continue;
+                    }
                     by_address.insert(node.address.clone(), node);
                 }
                 let deduped: Vec<OsdNode> = by_address.into_values().collect();
-                let evicted = count - deduped.len();
+                let evicted = count - deduped.len() - bad_placeholder;
                 if evicted > 0 {
                     warn!(
                         "Deduped {} stale OSD entries on startup (same address, stale node_id)",
                         evicted
+                    );
+                }
+                if bad_placeholder > 0 {
+                    warn!(
+                        "Dropped {} OSD entries with placeholder addresses on startup",
+                        bad_placeholder
                     );
                 }
                 let mut osd_nodes = self.osd_nodes.write();
@@ -895,24 +911,17 @@ impl MetaService {
             Err(e) => error!("Failed to load OSD nodes: {}", e),
         }
 
-        // Topology
-        match store.load_topology() {
-            Ok(Some(topology)) => {
-                info!(
-                    "Loaded cluster topology from store (version={})",
-                    topology.version
-                );
-                *self.topology.write() = topology.clone();
-                self.crush.write().update_topology(topology);
+        // Topology — rebuild from the post-dedup OSD list so any ghost
+        // node_ids that lingered in the stored topology (from pre-cleanup
+        // binaries) don't come back into CRUSH. The stored topology is
+        // an optimization; the authoritative source is the live OSD list.
+        {
+            let nodes = self.osd_nodes.read().clone();
+            *self.topology.write() = Default::default();
+            for node in &nodes {
+                self.update_topology_with_node(node);
             }
-            Ok(None) => {
-                // Rebuild topology from OSD nodes if no stored topology
-                let nodes = self.osd_nodes.read().clone();
-                for node in &nodes {
-                    self.update_topology_with_node(node);
-                }
-            }
-            Err(e) => error!("Failed to load topology: {}", e),
+            info!("Rebuilt topology from {} live OSD nodes", nodes.len());
         }
 
         // Users

@@ -51,6 +51,86 @@ const PER_OSD_TIMEOUT: Duration = Duration::from_secs(10);
 /// can lift this into a config once we have rate-limiter plumbing.
 const SHARDS_PER_SWEEP: usize = 1;
 
+/// Fan out an ObjectMeta write to every OSD that currently holds a shard for
+/// the object. With ObjectMeta replicated on all k+m shard hosts (MinIO
+/// xl.meta / Ceph OMAP pattern), every shard migration, reconstruction, or
+/// rebalance must refresh every replica so reads from any surviving host
+/// stay consistent. `extra_addrs` lets callers (drain/rebalance) also update
+/// stale copies on OSDs that just LOST a shard — without those the old
+/// owner's local meta keeps claiming it holds the shard, the rebalancer
+/// re-spots "drift" every sweep and the migration loop never converges.
+/// Falls back to `fallback_addr` when neither source yields any addresses.
+/// Succeeds if at least one write lands.
+async fn fanout_put_object_meta(
+    meta: &Arc<MetaService>,
+    object: &objectio_proto::metadata::ObjectMeta,
+    fallback_addr: &str,
+    extra_addrs: &[&str],
+) -> anyhow::Result<()> {
+    let mut replica_ids: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    for stripe in &object.stripes {
+        for shard in &stripe.shards {
+            if !shard.node_id.is_empty() {
+                replica_ids.insert(shard.node_id.clone());
+            }
+        }
+    }
+    let mut addr_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for nid in &replica_ids {
+        if let Ok(arr) = <[u8; 16]>::try_from(nid.as_slice())
+            && let Some(addr) = meta.osd_address_by_id(&arr)
+        {
+            addr_set.insert(addr);
+        }
+    }
+    for extra in extra_addrs {
+        addr_set.insert((*extra).to_string());
+    }
+    let mut addrs: Vec<String> = addr_set.into_iter().collect();
+    if addrs.is_empty() {
+        addrs.push(fallback_addr.to_string());
+    }
+
+    let mut futs = Vec::with_capacity(addrs.len());
+    for addr in &addrs {
+        let addr = addr.clone();
+        let req = PutObjectMetaRequest {
+            bucket: object.bucket.clone(),
+            key: object.key.clone(),
+            object: Some(object.clone()),
+            versioning_enabled: false,
+        };
+        futs.push(async move {
+            let ch = open_channel(&addr).await?;
+            let mut client = StorageServiceClient::new(ch);
+            tokio::time::timeout(PER_OSD_TIMEOUT, client.put_object_meta(req))
+                .await
+                .map_err(|_| anyhow::anyhow!("put_object_meta timeout on {addr}"))??;
+            Ok::<_, anyhow::Error>(addr)
+        });
+    }
+
+    let results = futures::future::join_all(futs).await;
+    let mut ok = 0usize;
+    for r in results {
+        match r {
+            Ok(addr) => {
+                ok += 1;
+                debug!("fanout_put_object_meta: ok on {addr}");
+            }
+            Err(e) => warn!("fanout_put_object_meta replica failed: {e}"),
+        }
+    }
+    if ok == 0 {
+        return Err(anyhow::anyhow!(
+            "fanout_put_object_meta: every replica failed for {}/{}",
+            object.bucket,
+            object.key
+        ));
+    }
+    Ok(())
+}
+
 /// Spawn the drain observer. Non-blocking; returns immediately.
 pub fn spawn(meta: Arc<MetaService>) {
     tokio::spawn(async move {
@@ -370,7 +450,10 @@ async fn migrate_shard_one(
         return Err(anyhow::anyhow!("CRUSH returned the draining node itself"));
     }
 
-    // 2. Read shard from source.
+    // 2. Read shard from source. If the source reports NotFound — the meta
+    //    still references the draining OSD but the bytes are already gone —
+    //    fall through to EC reconstruct against the surviving shards and
+    //    write the rebuilt bytes to the CRUSH target.
     let shard_id = ShardId {
         object_id: item.object_id.to_vec(),
         stripe_id: item.stripe_id,
@@ -378,7 +461,7 @@ async fn migrate_shard_one(
     };
     let source_ch = open_channel(draining_addr).await?;
     let mut source = StorageServiceClient::new(source_ch);
-    let bytes = tokio::time::timeout(
+    let read_result = tokio::time::timeout(
         PER_OSD_TIMEOUT,
         source.read_shard(ReadShardRequest {
             shard_id: Some(shard_id.clone()),
@@ -387,9 +470,53 @@ async fn migrate_shard_one(
         }),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("read_shard timeout"))??
-    .into_inner()
-    .data;
+    .map_err(|_| anyhow::anyhow!("read_shard timeout"))?;
+    let bytes = match read_result {
+        Ok(resp) => resp.into_inner().data,
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            tracing::info!(
+                "drain migrator: source has no shard for {}/{} stripe={} pos={}; falling back to EC reconstruct",
+                item.bucket,
+                item.key,
+                item.stripe_id,
+                item.position
+            );
+            // Pull the current full ObjectMeta so reconstruct can see the
+            // surviving ShardLocations.
+            let owner_ch_r = open_channel(&item.owner_addr).await?;
+            let mut owner_r = StorageServiceClient::new(owner_ch_r);
+            let Some(object_for_rc) = tokio::time::timeout(
+                PER_OSD_TIMEOUT,
+                owner_r.get_object_meta(GetObjectMetaRequest {
+                    bucket: item.bucket.to_string(),
+                    key: item.key.to_string(),
+                    version_id: String::new(),
+                }),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("get_object_meta timeout"))??
+            .into_inner()
+            .object
+            else {
+                return Err(anyhow::anyhow!(
+                    "owner no longer has ObjectMeta {}/{}",
+                    item.bucket,
+                    item.key
+                ));
+            };
+            return reconstruct_dangling_shard(
+                meta,
+                draining,
+                &item.owner_addr,
+                target_node,
+                &object_for_rc,
+                item.stripe_id,
+                item.position,
+            )
+            .await;
+        }
+        Err(e) => return Err(anyhow::anyhow!("read_shard: {e}")),
+    };
 
     // 3. Write to target.
     let target_ch = open_channel(&target_addr).await?;
@@ -472,17 +599,10 @@ async fn migrate_shard_one(
         );
     }
 
-    tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        owner.put_object_meta(PutObjectMetaRequest {
-            bucket: item.bucket.to_string(),
-            key: item.key.to_string(),
-            object: Some(object),
-            versioning_enabled: false,
-        }),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("put_object_meta timeout"))??;
+    // Also refresh the draining OSD's local copy (it held the shard a
+    // moment ago). Otherwise its listing keeps reporting the stale
+    // location and the rebalancer chases the same phantom forever.
+    fanout_put_object_meta(meta, &object, item.owner_addr, &[draining_addr]).await?;
 
     // 5. Delete source shard. The OSD's shard_count drops on the next
     //    GetStatus sweep and the observer can eventually auto-finalise.
@@ -774,17 +894,15 @@ async fn reconstruct_dangling_shard(
             }
         }
     }
-    tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        owner.put_object_meta(PutObjectMetaRequest {
-            bucket: object.bucket.clone(),
-            key: object.key.clone(),
-            object: Some(fresh),
-            versioning_enabled: false,
-        }),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("put_object_meta timeout"))??;
+    // Include dead_owner's address (if it's still registered — a drain
+    // target is, a permanently-gone OSD isn't) so its stale local meta is
+    // refreshed and the rebalancer stops re-spotting the same drift.
+    let dead_owner_addr = meta.osd_address_by_id(dead_owner);
+    let mut extra: Vec<&str> = Vec::new();
+    if let Some(ref a) = dead_owner_addr {
+        extra.push(a.as_str());
+    }
+    fanout_put_object_meta(meta, &fresh, owner_meta_addr, &extra).await?;
 
     tracing::info!(
         "reconstruct: rebuilt {}/{} stripe={} pos={} from {} survivors onto {}",
@@ -1230,17 +1348,10 @@ async fn migrate_rebalance_one(
         ));
     }
 
-    tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        owner.put_object_meta(PutObjectMetaRequest {
-            bucket: object.bucket.clone(),
-            key: object.key.clone(),
-            object: Some(fresh),
-            versioning_enabled: false,
-        }),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("put_object_meta timeout"))??;
+    // Also refresh the source's local meta — it's no longer in the shard
+    // host set, so without this its listing would still claim ownership.
+    fanout_put_object_meta(meta, &fresh, current_owner_meta_addr, &[current_owner_meta_addr])
+        .await?;
 
     // 4. Delete source shard.
     tokio::time::timeout(
