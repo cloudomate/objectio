@@ -611,6 +611,12 @@ impl MetaService {
                         CasTable::IcebergTables => {
                             svc.apply_iceberg_table_event(&key, new_value.as_deref());
                         }
+                        CasTable::IcebergNamespaces => {
+                            svc.apply_iceberg_namespace_event(&key, new_value.as_deref());
+                        }
+                        CasTable::IcebergWarehouses => {
+                            svc.apply_iceberg_warehouse_event(&key, new_value.as_deref());
+                        }
                         // Tables not yet covered by a cache refresh:
                         // writers are responsible for mirroring their
                         // own writes on the leader, and followers still
@@ -711,6 +717,38 @@ impl MetaService {
             },
             None => {
                 tables.remove(key);
+            }
+        }
+    }
+
+    fn apply_iceberg_namespace_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let mut ns = self.iceberg_namespaces.write();
+        match new_value {
+            Some(bytes) => match IcebergCreateNamespaceResponse::decode(bytes) {
+                Ok(r) => {
+                    ns.insert(key.to_string(), r.properties);
+                }
+                Err(e) => warn!("apply: decode IcebergNamespace('{key}') failed: {e}"),
+            },
+            None => {
+                ns.remove(key);
+            }
+        }
+    }
+
+    fn apply_iceberg_warehouse_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let mut wh = self.iceberg_warehouses.write();
+        match new_value {
+            Some(bytes) => match IcebergWarehouse::decode(bytes) {
+                Ok(w) => {
+                    wh.insert(key.to_string(), w);
+                }
+                Err(e) => warn!("apply: decode IcebergWarehouse('{key}') failed: {e}"),
+            },
+            None => {
+                wh.remove(key);
             }
         }
     }
@@ -3674,17 +3712,43 @@ impl MetadataService for MetaService {
         }
 
         let properties = req.properties.clone();
+        let resp = IcebergCreateNamespaceResponse {
+            namespace_levels: req.namespace_levels.clone(),
+            properties: properties.clone(),
+        };
+        let new_bytes = resp.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergNamespaces,
+                    key: ns_key.clone(),
+                    expected: None,
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "iceberg-create-namespace".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("namespace already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_namespace: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_iceberg_namespace(&ns_key, &resp.encode_to_vec());
+        }
+
         self.iceberg_namespaces
             .write()
             .insert(ns_key.clone(), properties.clone());
-
-        if let Some(store) = &self.store {
-            let resp = IcebergCreateNamespaceResponse {
-                namespace_levels: req.namespace_levels.clone(),
-                properties: properties.clone(),
-            };
-            store.put_iceberg_namespace(&ns_key, &resp.encode_to_vec());
-        }
 
         info!("Created iceberg namespace: {:?}", req.namespace_levels);
 
@@ -3752,11 +3816,52 @@ impl MetadataService for MetaService {
             ));
         }
 
-        self.iceberg_namespaces.write().remove(&ns_key);
+        // Reconstruct the expected stored bytes from the in-memory
+        // properties (prost is deterministic on the same struct shape).
+        let expected_bytes = {
+            let ns_map = self.iceberg_namespaces.read();
+            let properties = ns_map
+                .get(&ns_key)
+                .cloned()
+                .ok_or_else(|| Status::not_found("namespace not found"))?;
+            let stored = IcebergCreateNamespaceResponse {
+                namespace_levels: req.namespace_levels.clone(),
+                properties,
+            };
+            stored.encode_to_vec()
+        };
 
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergNamespaces,
+                    key: ns_key.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: None,
+                }],
+                requested_by: "iceberg-drop-namespace".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "namespace changed since read; retry drop",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for drop_namespace: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_iceberg_namespace(&ns_key);
         }
+
+        self.iceberg_namespaces.write().remove(&ns_key);
 
         info!("Dropped iceberg namespace: {:?}", req.namespace_levels);
 
@@ -3856,38 +3961,84 @@ impl MetadataService for MetaService {
         let req = request.into_inner();
         let ns_key = Self::iceberg_ns_key_wh(&req.warehouse, &req.namespace_levels);
 
-        let mut ns_map = self.iceberg_namespaces.write();
-        let properties = ns_map
-            .get_mut(&ns_key)
-            .ok_or_else(|| Status::not_found("namespace not found"))?;
+        // Compute the before/after snapshot under a read lock so the
+        // CAS can roll back cleanly on a concurrent mutation.
+        let (expected_bytes, new_bytes, new_properties, updated, removed, missing) = {
+            let ns_map = self.iceberg_namespaces.read();
+            let current = ns_map
+                .get(&ns_key)
+                .cloned()
+                .ok_or_else(|| Status::not_found("namespace not found"))?;
 
-        let mut updated = Vec::new();
-        let mut removed = Vec::new();
-        let mut missing = Vec::new();
-
-        // Apply removals
-        for key in &req.removals {
-            if properties.remove(key).is_some() {
-                removed.push(key.clone());
-            } else {
-                missing.push(key.clone());
+            let expected = IcebergCreateNamespaceResponse {
+                namespace_levels: req.namespace_levels.clone(),
+                properties: current.clone(),
             }
-        }
+            .encode_to_vec();
 
-        // Apply updates
-        for (key, value) in &req.updates {
-            properties.insert(key.clone(), value.clone());
-            updated.push(key.clone());
-        }
+            let mut new_props = current;
+            let mut updated = Vec::new();
+            let mut removed = Vec::new();
+            let mut missing = Vec::new();
+            for key in &req.removals {
+                if new_props.remove(key).is_some() {
+                    removed.push(key.clone());
+                } else {
+                    missing.push(key.clone());
+                }
+            }
+            for (key, value) in &req.updates {
+                new_props.insert(key.clone(), value.clone());
+                updated.push(key.clone());
+            }
+            let new_bytes = IcebergCreateNamespaceResponse {
+                namespace_levels: req.namespace_levels.clone(),
+                properties: new_props.clone(),
+            }
+            .encode_to_vec();
+            (expected, new_bytes, new_props, updated, removed, missing)
+        };
 
-        // Persist
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergNamespaces,
+                    key: ns_key.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "iceberg-update-namespace-properties".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "namespace properties changed since read; retry",
+                        ));
+                    }
+                    other => {
+                        error!(
+                            "unexpected raft response for update_namespace_properties: {:?}",
+                            other
+                        );
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             let resp = IcebergCreateNamespaceResponse {
                 namespace_levels: req.namespace_levels.clone(),
-                properties: properties.clone(),
+                properties: new_properties.clone(),
             };
             store.put_iceberg_namespace(&ns_key, &resp.encode_to_vec());
         }
+
+        self.iceberg_namespaces
+            .write()
+            .insert(ns_key.clone(), new_properties);
 
         Ok(Response::new(IcebergUpdateNamespacePropertiesResponse {
             updated,
@@ -3933,14 +4084,39 @@ impl MetadataService for MetaService {
             metadata_json: req.metadata_json.clone(),
             policy_json: Vec::new(),
         };
+        let new_bytes = entry.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergTables,
+                    key: table_key.clone(),
+                    expected: None,
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "iceberg-create-table".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("table already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_table: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_iceberg_table(&table_key, &entry.encode_to_vec());
+        }
 
         self.iceberg_tables
             .write()
             .insert(table_key.clone(), entry.clone());
-
-        if let Some(store) = &self.store {
-            store.put_iceberg_table(&table_key, &entry.encode_to_vec());
-        }
 
         info!(
             "Created iceberg table: {:?}.{}",
@@ -4234,14 +4410,46 @@ impl MetadataService for MetaService {
         let table_key =
             Self::iceberg_table_key_wh(&req.warehouse, &req.namespace_levels, &req.table_name);
 
-        let removed = self.iceberg_tables.write().remove(&table_key);
-        if removed.is_none() {
-            return Err(Status::not_found("table not found"));
-        }
+        let expected_bytes = {
+            let tables = self.iceberg_tables.read();
+            tables
+                .get(&table_key)
+                .cloned()
+                .ok_or_else(|| Status::not_found("table not found"))?
+                .encode_to_vec()
+        };
 
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::IcebergTables,
+                    key: table_key.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: None,
+                }],
+                requested_by: "iceberg-drop-table".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "table changed since read; retry drop",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for drop_table: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_iceberg_table(&table_key);
         }
+
+        self.iceberg_tables.write().remove(&table_key);
 
         info!(
             "Dropped iceberg table: {:?}.{} (purge={})",
@@ -4274,25 +4482,64 @@ impl MetadataService for MetaService {
             return Err(Status::not_found("destination namespace not found"));
         }
 
-        let mut tables = self.iceberg_tables.write();
+        // Rename is two ops in one atomic MultiCas: delete src + insert
+        // dst. If either side conflicts the whole rename aborts.
+        let (expected_src_bytes, entry_bytes, entry) = {
+            let tables = self.iceberg_tables.read();
+            let entry = tables
+                .get(&src_key)
+                .cloned()
+                .ok_or_else(|| Status::not_found("source table not found"))?;
+            if tables.contains_key(&dst_key) {
+                return Err(Status::already_exists("destination table already exists"));
+            }
+            let bytes = entry.encode_to_vec();
+            (bytes.clone(), bytes, entry)
+        };
 
-        // Check source exists
-        let entry = tables
-            .remove(&src_key)
-            .ok_or_else(|| Status::not_found("source table not found"))?;
-
-        // Check destination doesn't exist
-        if tables.contains_key(&dst_key) {
-            // Put source back
-            tables.insert(src_key, entry);
-            return Err(Status::already_exists("destination table already exists"));
-        }
-
-        tables.insert(dst_key.clone(), entry.clone());
-
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: src_key.clone(),
+                        expected: Some(expected_src_bytes),
+                        new_value: None,
+                    },
+                    CasOp {
+                        table: CasTable::IcebergTables,
+                        key: dst_key.clone(),
+                        expected: None,
+                        new_value: Some(entry_bytes),
+                    },
+                ],
+                requested_by: "iceberg-rename-table".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::aborted(format!(
+                            "rename conflict at ops {failed_indices:?}; retry"
+                        )));
+                    }
+                    other => {
+                        error!("unexpected raft response for rename_table: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_iceberg_table(&src_key);
             store.put_iceberg_table(&dst_key, &entry.encode_to_vec());
+        }
+
+        {
+            let mut tables = self.iceberg_tables.write();
+            tables.remove(&src_key);
+            tables.insert(dst_key.clone(), entry);
         }
 
         info!(
@@ -4459,13 +4706,40 @@ impl MetadataService for MetaService {
             member_user_ids: Vec::new(),
             created_at: now,
         };
+        let group_bytes = bincode::serialize(&group)
+            .map_err(|e| Status::internal(format!("group encode: {e}")))?;
 
-        self.groups.write().insert(group_id.clone(), group.clone());
-
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Groups,
+                    key: group_id.clone(),
+                    expected: None,
+                    new_value: Some(group_bytes),
+                }],
+                requested_by: "create-group".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists(
+                            "group_id collision (retry with fresh id)",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_group: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_group(&group_id, &group);
         }
 
+        self.groups.write().insert(group_id.clone(), group.clone());
         info!("Created group: {}", req.group_name);
 
         Ok(Response::new(CreateGroupResponse {
@@ -4484,16 +4758,44 @@ impl MetadataService for MetaService {
         request: Request<DeleteGroupRequest>,
     ) -> Result<Response<DeleteGroupResponse>, Status> {
         let req = request.into_inner();
+        let expected_bytes = {
+            let groups = self.groups.read();
+            let g = groups
+                .get(&req.group_id)
+                .ok_or_else(|| Status::not_found("group not found"))?;
+            bincode::serialize(g)
+                .map_err(|e| Status::internal(format!("group encode: {e}")))?
+        };
 
-        let removed = self.groups.write().remove(&req.group_id);
-        if removed.is_none() {
-            return Err(Status::not_found("group not found"));
-        }
-
-        if let Some(store) = &self.store {
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Groups,
+                    key: req.group_id.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: None,
+                }],
+                requested_by: "delete-group".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("group changed since read; retry delete"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_group: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.delete_group(&req.group_id);
         }
 
+        self.groups.write().remove(&req.group_id);
         info!("Deleted group: {}", req.group_id);
 
         Ok(Response::new(DeleteGroupResponse { success: true }))
@@ -5396,8 +5698,7 @@ impl MetadataService for MetaService {
         if pool.name.is_empty() {
             return Err(Status::invalid_argument("pool name is required"));
         }
-        let mut pools = self.pools.write();
-        if pools.contains_key(&pool.name) {
+        if self.pools.read().contains_key(&pool.name) {
             return Err(Status::already_exists(format!(
                 "pool '{}' already exists",
                 pool.name
@@ -5406,10 +5707,37 @@ impl MetadataService for MetaService {
         let mut pool = pool;
         pool.created_at = Self::current_timestamp();
         pool.updated_at = pool.created_at;
-        if let Some(store) = &self.store {
+        let bytes = pool.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Pools,
+                    key: pool.name.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "create-pool".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("pool already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_pool: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_pool(&pool.name, &pool.encode_to_vec());
         }
-        pools.insert(pool.name.clone(), pool.clone());
+
+        self.pools.write().insert(pool.name.clone(), pool.clone());
         info!("Created pool: {}", pool.name);
         Ok(Response::new(CreatePoolResponse { pool: Some(pool) }))
     }
@@ -5446,20 +5774,49 @@ impl MetadataService for MetaService {
         &self,
         request: Request<UpdatePoolRequest>,
     ) -> Result<Response<UpdatePoolResponse>, Status> {
-        let pool = request
+        let mut pool = request
             .into_inner()
             .pool
             .ok_or_else(|| Status::invalid_argument("missing pool"))?;
-        let mut pools = self.pools.write();
-        if !pools.contains_key(&pool.name) {
-            return Err(Status::not_found(format!("pool '{}' not found", pool.name)));
-        }
-        let mut pool = pool;
+        let expected_bytes = {
+            let pools = self.pools.read();
+            pools
+                .get(&pool.name)
+                .ok_or_else(|| Status::not_found(format!("pool '{}' not found", pool.name)))?
+                .encode_to_vec()
+        };
         pool.updated_at = Self::current_timestamp();
-        if let Some(store) = &self.store {
+        let new_bytes = pool.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Pools,
+                    key: pool.name.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "update-pool".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("pool changed since read; retry update"));
+                    }
+                    other => {
+                        error!("unexpected raft response for update_pool: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_pool(&pool.name, &pool.encode_to_vec());
         }
-        pools.insert(pool.name.clone(), pool.clone());
+
+        self.pools.write().insert(pool.name.clone(), pool.clone());
         info!("Updated pool: {}", pool.name);
         Ok(Response::new(UpdatePoolResponse { pool: Some(pool) }))
     }
@@ -5472,14 +5829,42 @@ impl MetadataService for MetaService {
         if name == "default" {
             return Err(Status::invalid_argument("cannot delete the default pool"));
         }
-        let removed = self.pools.write().remove(&name).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_pool(&name);
-            }
-            info!("Deleted pool: {}", name);
+        let expected_bytes = self.pools.read().get(&name).map(|p| p.encode_to_vec());
+        if expected_bytes.is_none() {
+            return Ok(Response::new(DeletePoolResponse { success: false }));
         }
-        Ok(Response::new(DeletePoolResponse { success: removed }))
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Pools,
+                    key: name.clone(),
+                    expected: expected_bytes,
+                    new_value: None,
+                }],
+                requested_by: "delete-pool".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("pool changed since read; retry delete"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_pool: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_pool(&name);
+        }
+
+        self.pools.write().remove(&name);
+        info!("Deleted pool: {}", name);
+        Ok(Response::new(DeletePoolResponse { success: true }))
     }
 
     // ============ Tenants ============
@@ -5495,8 +5880,7 @@ impl MetadataService for MetaService {
         if tenant.name.is_empty() {
             return Err(Status::invalid_argument("tenant name is required"));
         }
-        let mut tenants = self.tenants.write();
-        if tenants.contains_key(&tenant.name) {
+        if self.tenants.read().contains_key(&tenant.name) {
             return Err(Status::already_exists(format!(
                 "tenant '{}' already exists",
                 tenant.name
@@ -5505,10 +5889,39 @@ impl MetadataService for MetaService {
         let mut tenant = tenant;
         tenant.created_at = Self::current_timestamp();
         tenant.updated_at = tenant.created_at;
-        if let Some(store) = &self.store {
+        let bytes = tenant.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Tenants,
+                    key: tenant.name.clone(),
+                    expected: None,
+                    new_value: Some(bytes),
+                }],
+                requested_by: "create-tenant".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::already_exists("tenant already exists"));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_tenant: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_tenant(&tenant.name, &tenant.encode_to_vec());
         }
-        tenants.insert(tenant.name.clone(), tenant.clone());
+
+        self.tenants
+            .write()
+            .insert(tenant.name.clone(), tenant.clone());
         info!("Created tenant: {}", tenant.name);
         Ok(Response::new(CreateTenantResponse {
             tenant: Some(tenant),
@@ -5547,23 +5960,53 @@ impl MetadataService for MetaService {
         &self,
         request: Request<UpdateTenantRequest>,
     ) -> Result<Response<UpdateTenantResponse>, Status> {
-        let tenant = request
+        let mut tenant = request
             .into_inner()
             .tenant
             .ok_or_else(|| Status::invalid_argument("missing tenant"))?;
-        let mut tenants = self.tenants.write();
-        if !tenants.contains_key(&tenant.name) {
-            return Err(Status::not_found(format!(
-                "tenant '{}' not found",
-                tenant.name
-            )));
-        }
-        let mut tenant = tenant;
+        let expected_bytes = {
+            let tenants = self.tenants.read();
+            tenants
+                .get(&tenant.name)
+                .ok_or_else(|| {
+                    Status::not_found(format!("tenant '{}' not found", tenant.name))
+                })?
+                .encode_to_vec()
+        };
         tenant.updated_at = Self::current_timestamp();
-        if let Some(store) = &self.store {
+        let new_bytes = tenant.encode_to_vec();
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Tenants,
+                    key: tenant.name.clone(),
+                    expected: Some(expected_bytes),
+                    new_value: Some(new_bytes),
+                }],
+                requested_by: "update-tenant".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("tenant changed since read; retry update"));
+                    }
+                    other => {
+                        error!("unexpected raft response for update_tenant: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
             store.put_tenant(&tenant.name, &tenant.encode_to_vec());
         }
-        tenants.insert(tenant.name.clone(), tenant.clone());
+
+        self.tenants
+            .write()
+            .insert(tenant.name.clone(), tenant.clone());
         info!("Updated tenant: {}", tenant.name);
         Ok(Response::new(UpdateTenantResponse {
             tenant: Some(tenant),
@@ -5575,7 +6018,6 @@ impl MetadataService for MetaService {
         request: Request<DeleteTenantRequest>,
     ) -> Result<Response<DeleteTenantResponse>, Status> {
         let name = request.into_inner().name;
-        // Check no buckets belong to this tenant
         let has_buckets = self.buckets.read().values().any(|b| b.tenant == name);
         if has_buckets {
             return Err(Status::failed_precondition(format!(
@@ -5583,14 +6025,46 @@ impl MetadataService for MetaService {
                 name
             )));
         }
-        let removed = self.tenants.write().remove(&name).is_some();
-        if removed {
-            if let Some(store) = &self.store {
-                store.delete_tenant(&name);
-            }
-            info!("Deleted tenant: {}", name);
+        let expected_bytes = self
+            .tenants
+            .read()
+            .get(&name)
+            .map(|t| t.encode_to_vec());
+        if expected_bytes.is_none() {
+            return Ok(Response::new(DeleteTenantResponse { success: false }));
         }
-        Ok(Response::new(DeleteTenantResponse { success: removed }))
+
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![CasOp {
+                    table: CasTable::Tenants,
+                    key: name.clone(),
+                    expected: expected_bytes,
+                    new_value: None,
+                }],
+                requested_by: "delete-tenant".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted("tenant changed since read; retry delete"));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_tenant: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_tenant(&name);
+        }
+
+        self.tenants.write().remove(&name);
+        info!("Deleted tenant: {}", name);
+        Ok(Response::new(DeleteTenantResponse { success: true }))
     }
 
     // ============================================================
@@ -5640,30 +6114,67 @@ impl MetadataService for MetaService {
             quota_objects: 0,
             object_lock: None,
         };
+        let bucket_bytes = bucket.encode_to_vec();
+
+        let warehouse = IcebergWarehouse {
+            name: req.name.clone(),
+            bucket: bucket_name.clone(),
+            location,
+            tenant: req.tenant.clone(),
+            created_at: now,
+            properties: req.properties.clone(),
+        };
+        let warehouse_bytes = warehouse.encode_to_vec();
+
+        // Two-op atomic MultiCas: warehouse row + backing bucket. If
+        // either side conflicts the whole creation aborts, avoiding
+        // the half-state where a warehouse exists without its bucket
+        // (or a lingering orphan bucket from a failed warehouse create).
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let cmd = MetaCommand::MultiCas {
+                ops: vec![
+                    CasOp {
+                        table: CasTable::IcebergWarehouses,
+                        key: req.name.clone(),
+                        expected: None,
+                        new_value: Some(warehouse_bytes),
+                    },
+                    CasOp {
+                        table: CasTable::Buckets,
+                        key: bucket_name.clone(),
+                        expected: None,
+                        new_value: Some(bucket_bytes),
+                    },
+                ],
+                requested_by: "iceberg-create-warehouse".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { failed_indices } => {
+                        return Err(Status::already_exists(format!(
+                            "warehouse or backing bucket already exists (conflicts at {failed_indices:?})"
+                        )));
+                    }
+                    other => {
+                        error!("unexpected raft response for create_warehouse: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.put_bucket(&bucket_name, &bucket);
+            store.put_warehouse(&req.name, &warehouse_bytes);
+        }
+
         self.buckets
             .write()
             .insert(bucket_name.clone(), bucket.clone());
-        if let Some(store) = &self.store {
-            store.put_bucket(&bucket_name, &bucket);
-        }
-
-        // Create warehouse entry
-        let warehouse = IcebergWarehouse {
-            name: req.name.clone(),
-            bucket: bucket_name,
-            location,
-            tenant: req.tenant,
-            created_at: now,
-            properties: req.properties,
-        };
-
-        let bytes = warehouse.encode_to_vec();
         self.iceberg_warehouses
             .write()
             .insert(req.name.clone(), warehouse.clone());
-        if let Some(store) = &self.store {
-            store.put_warehouse(&req.name, &bytes);
-        }
 
         info!(
             "Created warehouse: {} (bucket: {})",
@@ -5695,21 +6206,72 @@ impl MetadataService for MetaService {
         request: Request<IcebergDeleteWarehouseRequest>,
     ) -> Result<Response<IcebergDeleteWarehouseResponse>, Status> {
         let name = request.into_inner().name;
-        let removed = self.iceberg_warehouses.write().remove(&name);
-        if let Some(wh) = removed {
-            // Also remove the backing bucket
-            self.buckets.write().remove(&wh.bucket);
-            if let Some(store) = &self.store {
-                store.delete_warehouse(&name);
-                store.delete_bucket(&wh.bucket);
+
+        let (wh, wh_bytes, bucket_bytes) = {
+            let warehouses = self.iceberg_warehouses.read();
+            let wh = warehouses
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| Status::not_found(format!("warehouse '{}' not found", name)))?;
+            let wh_bytes = wh.encode_to_vec();
+            let bucket_bytes = self
+                .buckets
+                .read()
+                .get(&wh.bucket)
+                .map(|b| b.encode_to_vec());
+            (wh, wh_bytes, bucket_bytes)
+        };
+
+        // Atomic dual delete: warehouse row + backing bucket. If the
+        // bucket has already been removed separately, skip its op so
+        // we don't spuriously fail on expected=Some but actual=None.
+        if let Some(raft) = self.raft_handle() {
+            use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
+            let mut ops = vec![CasOp {
+                table: CasTable::IcebergWarehouses,
+                key: name.clone(),
+                expected: Some(wh_bytes),
+                new_value: None,
+            }];
+            if let Some(bucket_bytes) = bucket_bytes {
+                ops.push(CasOp {
+                    table: CasTable::Buckets,
+                    key: wh.bucket.clone(),
+                    expected: Some(bucket_bytes),
+                    new_value: None,
+                });
             }
-            info!("Deleted warehouse: {} (bucket: {})", name, wh.bucket);
-            Ok(Response::new(IcebergDeleteWarehouseResponse {
-                success: true,
-            }))
-        } else {
-            Err(Status::not_found(format!("warehouse '{}' not found", name)))
+            let cmd = MetaCommand::MultiCas {
+                ops,
+                requested_by: "iceberg-delete-warehouse".into(),
+            };
+            match raft.client_write(cmd).await {
+                Ok(r) => match r.data {
+                    MetaResponse::MultiCasOk => {}
+                    MetaResponse::MultiCasConflict { .. } => {
+                        return Err(Status::aborted(
+                            "warehouse or bucket changed since read; retry delete",
+                        ));
+                    }
+                    other => {
+                        error!("unexpected raft response for delete_warehouse: {:?}", other);
+                        return Err(Status::internal("raft commit wrong variant"));
+                    }
+                },
+                Err(e) => return Err(raft_write_to_status(&e)),
+            }
+        } else if let Some(store) = &self.store {
+            store.delete_warehouse(&name);
+            store.delete_bucket(&wh.bucket);
         }
+
+        self.iceberg_warehouses.write().remove(&name);
+        self.buckets.write().remove(&wh.bucket);
+
+        info!("Deleted warehouse: {} (bucket: {})", name, wh.bucket);
+        Ok(Response::new(IcebergDeleteWarehouseResponse {
+            success: true,
+        }))
     }
 
     // Bucket Versioning
