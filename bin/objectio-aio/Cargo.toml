@@ -1,0 +1,24 @@
+[package]
+name = "objectio-aio"
+description = "ObjectIO all-in-one — single-command supervisor for meta + OSD + gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "objectio-aio"
+path = "src/main.rs"
+
+[dependencies]
+# aio spawns the existing service bins as child processes — no Rust
+# link-level dependency; the binaries must be available on PATH or
+# in the same directory as `objectio-aio` at runtime (both are true
+# in the Dockerfile `all` stage and in `cargo install --path bin/*`).
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+which = "6"
+tempfile = "3"
