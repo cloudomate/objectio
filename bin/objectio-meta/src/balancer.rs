@@ -343,8 +343,7 @@ async fn evaluate_pool(
             .map(|arr| *osd_counts.get(&arr).unwrap_or(&0) as f64)
             .sum();
 
-        let mut rng =
-            rand::rngs::StdRng::from_seed(seed_bytes(seed.wrapping_add(pg.pg_id.into())));
+        let mut rng = rand::rngs::StdRng::from_seed(seed_bytes(seed.wrapping_add(pg.pg_id.into())));
         let best_cost_cell = std::cell::Cell::new(f64::INFINITY);
         let target_set = cs_pool.pick_min_cost(&mut rng, |cs| {
             let c: f64 = cs
@@ -389,13 +388,7 @@ async fn evaluate_pool(
             Ok(()) => {
                 info!(
                     "balancer: moved pool={} pg_id={} cost={:.2} load {}→{} v{}→v{}",
-                    pool.name,
-                    pg.pg_id,
-                    cost,
-                    current_load,
-                    best_cost,
-                    pg.version,
-                    new_pg.version
+                    pool.name, pg.pg_id, cost, current_load, best_cost, pg.version, new_pg.version
                 );
                 // Update in-memory osd_counts so the next PG in this
                 // tick sees the post-commit state.

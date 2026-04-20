@@ -101,6 +101,8 @@ impl MetaStore {
             let _t = write_txn.open_table(tables::ICEBERG_WAREHOUSES)?;
             let _t = write_txn.open_table(tables::OBJECT_LOCK_CONFIGS)?;
             let _t = write_txn.open_table(tables::LIFECYCLE_CONFIGS)?;
+            let _t = write_txn.open_table(tables::BUCKET_ENCRYPTION_CONFIGS)?;
+            let _t = write_txn.open_table(tables::KMS_KEYS)?;
         }
         write_txn.commit()?;
 
@@ -658,7 +660,6 @@ impl MetaStore {
         format!("{pool}\0{pg_id:010}")
     }
 
-
     /// Range scan over OBJECT_LISTINGS for one bucket with an optional
     /// prefix filter. Returns up to `max_keys` entries (bucket/key/ver
     /// strings plus raw prost-encoded ObjectListingEntry bytes) in
@@ -938,6 +939,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::CONFIG) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open config table: {}", e);
                 return Vec::new();
@@ -976,6 +982,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::POOLS) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open pools table: {}", e);
                 return Vec::new();
@@ -1014,6 +1025,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::TENANTS) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open tenants table: {}", e);
                 return Vec::new();
@@ -1052,6 +1068,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::IAM_POLICIES) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open IAM policies table: {}", e);
                 return Vec::new();
@@ -1106,6 +1127,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::POLICY_ATTACHMENTS) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open policy attachments table: {}", e);
                 return Vec::new();
@@ -1144,6 +1170,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::ICEBERG_WAREHOUSES) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open warehouses table: {}", e);
                 return Vec::new();
@@ -1188,6 +1219,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::OBJECT_LOCK_CONFIGS) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open object lock configs table: {}", e);
                 return Vec::new();
@@ -1226,6 +1262,11 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::LIFECYCLE_CONFIGS) {
             Ok(t) => t,
+            // Fresh db — table auto-creates on first write. Empty read is
+
+            // the expected state, not an error.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+
             Err(e) => {
                 error!("Failed to open lifecycle configs table: {}", e);
                 return Vec::new();
@@ -1273,6 +1314,10 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::BUCKET_ENCRYPTION_CONFIGS) {
             Ok(t) => t,
+            // "Table 'X' does not exist" is the normal state on a
+            // fresh redb — no bucket has ever set an encryption
+            // config. Treat as empty, don't scare operators.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
             Err(e) => {
                 error!("Failed to open bucket encryption configs table: {}", e);
                 return Vec::new();
@@ -1311,6 +1356,8 @@ impl MetaStore {
         };
         let table = match read_txn.open_table(tables::KMS_KEYS) {
             Ok(t) => t,
+            // No KMS keys registered yet — normal on fresh install.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
             Err(e) => {
                 error!("Failed to open KMS keys table: {}", e);
                 return Vec::new();

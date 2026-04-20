@@ -114,13 +114,13 @@ impl MetaRaftStorage {
         let txn = self.db.begin_read().map_err(read_err)?;
         let table = match txn.open_table(tables::RAFT_STATE) {
             Ok(t) => t,
-            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(RaftPersistentState::default()),
+            Err(redb::TableError::TableDoesNotExist(_)) => {
+                return Ok(RaftPersistentState::default());
+            }
             Err(e) => return Err(read_err(e)),
         };
         match table.get("state").map_err(read_err)? {
-            Some(v) => {
-                serde_json::from_slice(v.value()).map_err(|e| decode_err("raft_state", e))
-            }
+            Some(v) => serde_json::from_slice(v.value()).map_err(|e| decode_err("raft_state", e)),
             None => Ok(RaftPersistentState::default()),
         }
     }
@@ -166,7 +166,8 @@ impl MetaRaftStorage {
                 let txn = self.db.begin_write().map_err(write_err)?;
                 {
                     let mut t = txn.open_table(tables::CONFIG).map_err(write_err)?;
-                    t.insert(key.as_str(), bytes.as_slice()).map_err(write_err)?;
+                    t.insert(key.as_str(), bytes.as_slice())
+                        .map_err(write_err)?;
                 }
                 txn.commit().map_err(write_err)?;
                 state.last_applied = Some(log_id);
@@ -406,14 +407,20 @@ fn read_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> StorageError<
     }
 }
 
-fn decode_err<E: std::error::Error + Send + Sync + 'static>(what: &str, e: E) -> StorageError<NodeId> {
+fn decode_err<E: std::error::Error + Send + Sync + 'static>(
+    what: &str,
+    e: E,
+) -> StorageError<NodeId> {
     let tagged = std::io::Error::other(format!("decode {what}: {e}"));
     StorageError::IO {
         source: StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Read, AnyError::new(&tagged)),
     }
 }
 
-fn encode_err<E: std::error::Error + Send + Sync + 'static>(what: &str, e: E) -> StorageError<NodeId> {
+fn encode_err<E: std::error::Error + Send + Sync + 'static>(
+    what: &str,
+    e: E,
+) -> StorageError<NodeId> {
     let tagged = std::io::Error::other(format!("encode {what}: {e}"));
     StorageError::IO {
         source: StorageIOError::new(ErrorSubject::Logs, ErrorVerb::Write, AnyError::new(&tagged)),
@@ -451,8 +458,8 @@ impl RaftLogReader<MetaTypeConfig> for MetaRaftStorage {
         let mut out = Vec::new();
         for row in table.range(start..end).map_err(read_err)? {
             let (_, v) = row.map_err(read_err)?;
-            let entry: Entry = serde_json::from_slice(v.value())
-                .map_err(|e| decode_err("raft_logs entry", e))?;
+            let entry: Entry =
+                serde_json::from_slice(v.value()).map_err(|e| decode_err("raft_logs entry", e))?;
             out.push(entry);
         }
         Ok(out)
@@ -470,10 +477,7 @@ impl RaftSnapshotBuilder<MetaTypeConfig> for MetaRaftStorage {
         // keep growing in R1, which is fine for config-scale workloads.
         let snapshot_id = format!(
             "meta-snap-{}",
-            state
-                .last_applied
-                .map(|id| id.index)
-                .unwrap_or_default()
+            state.last_applied.map(|id| id.index).unwrap_or_default()
         );
         Ok(Snapshot {
             meta: SnapshotMeta {
@@ -569,7 +573,8 @@ impl RaftStorage<MetaTypeConfig> for MetaRaftStorage {
         {
             let mut t = txn.open_table(tables::RAFT_LOGS).map_err(write_err)?;
             for entry in &entries {
-                let bytes = serde_json::to_vec(entry).map_err(|e| encode_err("raft_logs entry", e))?;
+                let bytes =
+                    serde_json::to_vec(entry).map_err(|e| encode_err("raft_logs entry", e))?;
                 t.insert(entry.log_id.index, bytes.as_slice())
                     .map_err(write_err)?;
             }
@@ -598,10 +603,7 @@ impl RaftStorage<MetaTypeConfig> for MetaRaftStorage {
         txn.commit().map_err(write_err)
     }
 
-    async fn purge_logs_upto(
-        &mut self,
-        log_id: LogId<NodeId>,
-    ) -> Result<(), StorageError<NodeId>> {
+    async fn purge_logs_upto(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
         // Purge [0, log_id.index]. Also advance `last_purged` in state.
         let txn = self.db.begin_write().map_err(write_err)?;
         {
@@ -623,13 +625,7 @@ impl RaftStorage<MetaTypeConfig> for MetaRaftStorage {
 
     async fn last_applied_state(
         &mut self,
-    ) -> Result<
-        (
-            Option<LogId<NodeId>>,
-            StoredMembership<NodeId, Node>,
-        ),
-        StorageError<NodeId>,
-    > {
+    ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, Node>), StorageError<NodeId>> {
         let state = self.load_state()?;
         Ok((state.last_applied, state.membership))
     }
@@ -802,7 +798,10 @@ mod tests {
         assert_eq!(last.unwrap().index, 1);
 
         let r = s.apply_to_state_machine(&[del]).await.unwrap();
-        assert!(matches!(r[0], MetaResponse::ConfigDeleted { existed: true }));
+        assert!(matches!(
+            r[0],
+            MetaResponse::ConfigDeleted { existed: true }
+        ));
     }
 
     #[tokio::test]
@@ -1082,4 +1081,3 @@ mod tests {
         }
     }
 }
-

@@ -20,6 +20,7 @@
 //!   - replication = 1 (no redundancy)
 //!   - tempdir data (wiped on exit) unless --data is passed
 
+use std::io::Read;
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -91,10 +92,47 @@ async fn wait_ctrl_c(tx: broadcast::Sender<()>) {
 }
 
 /// Build a broadcast-receiver → Output=() future for a subsystem.
-fn sub_shutdown(tx: &broadcast::Sender<()>) -> impl std::future::Future<Output = ()> + Send + 'static {
+fn sub_shutdown(
+    tx: &broadcast::Sender<()>,
+) -> impl std::future::Future<Output = ()> + Send + 'static {
     let mut rx = tx.subscribe();
     async move {
         let _ = rx.recv().await;
+    }
+}
+
+/// Poll a closure every 100ms until it returns `Some`, or give up
+/// after `max`. Used by the admin-creds reader since meta writes
+/// the file asynchronously after start-up.
+async fn for_a_moment<T>(mut f: impl FnMut() -> Option<T>, max: Duration) -> Option<T> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < max {
+        if let Some(v) = f() {
+            return Some(v);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Parse KEY=VAL lines from meta's admin-creds.env.
+fn parse_creds(path: &std::path::Path) -> Option<(String, String)> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut ak = None;
+    let mut sk = None;
+    for line in body.lines() {
+        let line = line.trim_start_matches("export ").trim();
+        if let Some((k, v)) = line.split_once('=') {
+            match k {
+                "AWS_ACCESS_KEY_ID" => ak = Some(v.trim().to_string()),
+                "AWS_SECRET_ACCESS_KEY" => sk = Some(v.trim().to_string()),
+                _ => {}
+            }
+        }
+    }
+    match (ak, sk) {
+        (Some(a), Some(s)) => Some((a, s)),
+        _ => None,
     }
 }
 
@@ -103,7 +141,10 @@ fn sub_shutdown(tx: &broadcast::Sender<()>) -> impl std::future::Future<Output =
 /// resolve buckets until OSD is up.
 async fn wait_listening(port: u16, label: &str, max: u64) -> Result<()> {
     for i in 0..(max * 10) {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         if i % 10 == 0 {
@@ -114,19 +155,16 @@ async fn wait_listening(port: u16, label: &str, max: u64) -> Result<()> {
     Err(anyhow!("{label} did not listen on :{port} within {max}s"))
 }
 
-/// POST /init to the meta raft admin port so the single-voter cluster
-/// bootstraps itself. 200 = first-time init, 409 = already done.
-async fn bootstrap_raft(port: u16) -> Result<()> {
+/// Minimal HTTP GET/POST over a one-shot TCP connection. Returns (status_line, body).
+async fn http_oneshot(
+    port: u16,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<(String, String)> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let body = b"{}".as_ref();
     let req = format!(
-        "POST /init HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
@@ -134,9 +172,11 @@ async fn bootstrap_raft(port: u16) -> Result<()> {
         .await
         .context("raft admin connect")?;
     s.write_all(req.as_bytes()).await?;
-    s.write_all(body).await?;
-    let mut resp = Vec::with_capacity(512);
-    let mut buf = [0u8; 512];
+    if !body.is_empty() {
+        s.write_all(body).await?;
+    }
+    let mut resp = Vec::with_capacity(1024);
+    let mut buf = [0u8; 1024];
     loop {
         match s.read(&mut buf).await {
             Ok(0) => break,
@@ -144,15 +184,42 @@ async fn bootstrap_raft(port: u16) -> Result<()> {
             Err(_) => break,
         }
     }
-    let head = String::from_utf8_lossy(&resp[..resp.len().min(128)]);
-    if head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.1 409") {
-        info!("raft bootstrap: {}", head.lines().next().unwrap_or(""));
+    let raw = String::from_utf8_lossy(&resp).into_owned();
+    let status = raw.lines().next().unwrap_or("").to_string();
+    let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+    let body = raw[body_start..].to_string();
+    Ok((status, body))
+}
+
+/// Bootstrap the meta raft cluster as a single voter. Idempotent: skips
+/// `/init` when `/status` shows voters already present (warm restart).
+async fn bootstrap_raft(port: u16) -> Result<()> {
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Warm-restart shortcut: if /status reports any voters, the cluster
+    // is already initialized — skip /init to avoid openraft's internal
+    // "Can not initialize" ERROR log on every restart.
+    if let Ok((status, body)) = http_oneshot(port, "GET", "/status", &[]).await
+        && status.starts_with("HTTP/1.1 200")
+        && body.contains("\"voters\"")
+        && !body.contains("\"voters\":[]")
+    {
+        info!("raft already initialized — skipping /init");
+        return Ok(());
+    }
+    let (status, _body) = http_oneshot(port, "POST", "/init", b"{}").await?;
+    if status.starts_with("HTTP/1.1 200") || status.starts_with("HTTP/1.1 409") {
+        info!("raft bootstrap: {}", status);
         Ok(())
     } else {
-        Err(anyhow!(
-            "raft bootstrap failed: {}",
-            head.lines().next().unwrap_or("<empty>")
-        ))
+        Err(anyhow!("raft bootstrap failed: {}", status))
     }
 }
 
@@ -200,8 +267,7 @@ async fn main() -> Result<()> {
         warn!(
             "{}:{} in use — S3 API falling back to ephemeral port {p}. \
              Pass --strict-port to fail instead.",
-            args.listen_addr,
-            args.port
+            args.listen_addr, args.port
         );
         p
     };
@@ -209,6 +275,42 @@ async fn main() -> Result<()> {
     let meta_grpc = ephemeral_port()?;
     let meta_admin = ephemeral_port()?;
     let osd_base = ephemeral_port()?;
+
+    // ------------------------------------------------------------
+    // SSE master key. Gateway's bin logs a scary warning when this
+    // env var isn't set and then generates an in-memory key that
+    // renders every SSE-encrypted object unreadable across restart.
+    // For aio we persist one in the data root so SSE just works —
+    // subsequent runs against the same --data dir reuse it, temp-
+    // dir runs get a fresh key (and nothing to decrypt post-reset).
+    // ------------------------------------------------------------
+    let master_key_path = data_root.join("master_key");
+    let master_key_b64 = match std::fs::read_to_string(&master_key_path) {
+        Ok(s) if s.trim().len() == 44 => s.trim().to_string(),
+        _ => {
+            use std::io::Write;
+            let mut k = [0u8; 32];
+            // Minimal RNG — we already depend on `tempfile` which pulls
+            // `rand`, but we avoid it at this layer to stay dep-light.
+            // Use /dev/urandom (macOS + linux).
+            std::fs::File::open("/dev/urandom")
+                .context("open /dev/urandom")?
+                .read(&mut k)
+                .context("read /dev/urandom")?;
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(k);
+            let mut f = std::fs::File::create(&master_key_path)?;
+            f.write_all(b64.as_bytes())?;
+            info!("Generated SSE master key at {}", master_key_path.display());
+            b64
+        }
+    };
+    // SAFETY: setting env vars is unsafe in Rust 2024 because another
+    // thread might be reading them concurrently. We're still on the
+    // single main thread here — no other tasks have been spawned yet.
+    unsafe {
+        std::env::set_var("OBJECTIO_MASTER_KEY", &master_key_b64);
+    }
 
     // Shutdown broadcast — every subsystem subscribes, Ctrl-C fans out.
     let (shutdown_tx, _) = broadcast::channel::<()>(4);
@@ -226,13 +328,20 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&meta_data)?;
     let meta_args = <objectio_meta::Args as clap::Parser>::parse_from([
         "objectio-meta",
-        "--node-id", "1",
-        "--listen", &format!("127.0.0.1:{meta_grpc}"),
-        "--replication", "1",
-        "--data-dir", &meta_data.display().to_string(),
-        "--metrics-port", "0",
-        "--admin-port", &meta_admin.to_string(),
-        "--log-level", &args.log_level,
+        "--node-id",
+        "1",
+        "--listen",
+        &format!("127.0.0.1:{meta_grpc}"),
+        "--replication",
+        "1",
+        "--data-dir",
+        &meta_data.display().to_string(),
+        "--metrics-port",
+        "0",
+        "--admin-port",
+        &meta_admin.to_string(),
+        "--log-level",
+        &args.log_level,
     ]);
     let meta_handle: JoinHandle<Result<()>> = {
         let sd = sub_shutdown(&shutdown_tx);
@@ -240,6 +349,14 @@ async fn main() -> Result<()> {
     };
     wait_listening(meta_grpc, "meta gRPC", 20).await?;
     bootstrap_raft(meta_admin).await?;
+
+    // Meta writes admin-creds.env to its data dir on first boot (and
+    // on every subsequent boot when an admin user already exists).
+    // Read it so we can surface AK/SK in the banner.
+    let creds_path = meta_data.join("admin-creds.env");
+    let (ak, sk) = for_a_moment(|| parse_creds(&creds_path), Duration::from_secs(5))
+        .await
+        .unwrap_or_default();
 
     // ------------------------------------------------------------
     // OSDs.
@@ -256,12 +373,18 @@ async fn main() -> Result<()> {
 
         let osd_args = <objectio_osd::Args as clap::Parser>::parse_from([
             "objectio-osd",
-            "--listen", &format!("127.0.0.1:{port}"),
-            "--meta-endpoint", &format!("http://127.0.0.1:{meta_grpc}"),
-            "--data-dir", &state.display().to_string(),
-            "--disks", &disk.display().to_string(),
-            "--advertise-addr", &format!("http://127.0.0.1:{port}"),
-            "--log-level", &args.log_level,
+            "--listen",
+            &format!("127.0.0.1:{port}"),
+            "--meta-endpoint",
+            &format!("http://127.0.0.1:{meta_grpc}"),
+            "--data-dir",
+            &state.display().to_string(),
+            "--disks",
+            &disk.display().to_string(),
+            "--advertise-addr",
+            &format!("http://127.0.0.1:{port}"),
+            "--log-level",
+            &args.log_level,
         ]);
         let sd = sub_shutdown(&shutdown_tx);
         osd_handles.push(tokio::spawn(async move {
@@ -285,11 +408,15 @@ async fn main() -> Result<()> {
     };
     let gw_args = <objectio_gateway::Args as clap::Parser>::parse_from([
         "objectio-gateway",
-        "--listen", &format!("{}:{}", args.listen_addr, gateway_port),
-        "--meta-endpoint", &format!("http://127.0.0.1:{meta_grpc}"),
-        "--external-endpoint", &format!("http://{external_host}:{gateway_port}"),
+        "--listen",
+        &format!("{}:{}", args.listen_addr, gateway_port),
+        "--meta-endpoint",
+        &format!("http://127.0.0.1:{meta_grpc}"),
+        "--external-endpoint",
+        &format!("http://{external_host}:{gateway_port}"),
         "--no-auth",
-        "--log-level", &args.log_level,
+        "--log-level",
+        &args.log_level,
     ]);
     let gw_handle: JoinHandle<Result<()>> = {
         let sd = sub_shutdown(&shutdown_tx);
@@ -307,12 +434,8 @@ async fn main() -> Result<()> {
     };
     eprintln!();
     eprintln!("━━━ ObjectIO ready ━━━");
-    eprintln!(
-        "  S3 / Iceberg / Delta Sharing : http://{display_host}:{gateway_port}"
-    );
-    eprintln!(
-        "  Console                       : http://{display_host}:{gateway_port}/_console/"
-    );
+    eprintln!("  S3 / Iceberg / Delta Sharing : http://{display_host}:{gateway_port}");
+    eprintln!("  Console                       : http://{display_host}:{gateway_port}/_console/");
     if args.listen_addr == "0.0.0.0" {
         eprintln!(
             "  LAN bind                      : 0.0.0.0 — reachable from \
@@ -324,11 +447,25 @@ async fn main() -> Result<()> {
         "  Internals (loopback only)     : meta=:{meta_grpc} osd={osd_ports:?} \
          (monolith — same process)"
     );
-    eprintln!();
+    if !ak.is_empty() {
+        eprintln!("  Admin access key              : {ak}");
+        eprintln!("  Admin secret key              : {sk}");
+    }
     eprintln!(
-        "  aws --endpoint-url http://{display_host}:{gateway_port} --no-sign-request \
-         s3 mb s3://test"
+        "  SSE master key                : persisted at {} (set OBJECTIO_MASTER_KEY \
+         to override)",
+        data_root.join("master_key").display()
     );
+    eprintln!();
+    if !ak.is_empty() {
+        eprintln!("  AWS_ACCESS_KEY_ID={ak} AWS_SECRET_ACCESS_KEY={sk} \\");
+        eprintln!("    aws --endpoint-url http://{display_host}:{gateway_port} s3 mb s3://test");
+    } else {
+        eprintln!(
+            "  aws --endpoint-url http://{display_host}:{gateway_port} --no-sign-request \
+             s3 mb s3://test"
+        );
+    }
     eprintln!();
 
     // Wait for Ctrl-C → broadcast shutdown → join every task.

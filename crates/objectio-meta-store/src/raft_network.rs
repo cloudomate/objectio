@@ -23,13 +23,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use openraft::BasicNode;
 use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, Unreachable};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::BasicNode;
 use parking_lot::Mutex;
 use tonic::transport::Channel;
 
@@ -54,9 +54,7 @@ impl ChannelCache {
         let channel = Channel::from_shared(uri)
             .map_err(|e| format!("invalid meta address `{addr}`: {e}"))?
             .connect_lazy();
-        self.inner
-            .lock()
-            .insert(addr.to_string(), channel.clone());
+        self.inner.lock().insert(addr.to_string(), channel.clone());
         Ok(channel)
     }
 }
@@ -120,7 +118,9 @@ impl MetaRaftNetwork {
             .channels
             .get_or_connect(&self.target_addr)
             .map_err(TransportErr)?;
-        Ok(objectio_proto::raft::raft_rpc_client::RaftRpcClient::new(ch))
+        Ok(objectio_proto::raft::raft_rpc_client::RaftRpcClient::new(
+            ch,
+        ))
     }
 
     fn envelope(&self, payload: Vec<u8>) -> objectio_proto::raft::RaftEnvelope {
@@ -217,10 +217,7 @@ mod tests {
     #[test]
     fn normalize_uri_adds_http_prefix() {
         assert_eq!(normalize_uri("127.0.0.1:9100"), "http://127.0.0.1:9100");
-        assert_eq!(
-            normalize_uri("http://meta-0:9100"),
-            "http://meta-0:9100"
-        );
+        assert_eq!(normalize_uri("http://meta-0:9100"), "http://meta-0:9100");
         assert_eq!(
             normalize_uri("https://meta.example.com:9100"),
             "https://meta.example.com:9100"

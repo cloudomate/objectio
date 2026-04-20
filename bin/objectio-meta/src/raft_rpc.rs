@@ -68,10 +68,7 @@ impl RaftRpc for RaftRpcService {
         Ok(Response::new(self.envelope(&resp)?))
     }
 
-    async fn vote(
-        &self,
-        req: Request<RaftEnvelope>,
-    ) -> Result<Response<RaftEnvelope>, Status> {
+    async fn vote(&self, req: Request<RaftEnvelope>) -> Result<Response<RaftEnvelope>, Status> {
         let bytes = req.into_inner().payload;
         let req: VoteRequest<u64> = serde_json::from_slice(&bytes)
             .map_err(|e| Status::invalid_argument(format!("decode vote: {e}")))?;

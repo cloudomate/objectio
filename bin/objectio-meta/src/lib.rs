@@ -153,6 +153,25 @@ pub async fn run(
         info!("  Access Key ID:     {}", access_key_id);
         info!("  Secret Access Key: {}", secret_access_key);
         info!("============================================");
+
+        // Also drop them on disk next to the redb so aio (or any
+        // wrapper) can surface them in a banner without parsing logs.
+        // shell-compatible format: two KEY=VAL lines + a commented
+        // `source`-hint. Any caller that doesn't want this file can
+        // ignore it; a production deployment wouldn't mount the dir.
+        let creds_path = args.data_dir.join("admin-creds.env");
+        let body = format!(
+            "# Created by objectio-meta on first boot. Safe to delete.\n\
+             export AWS_ACCESS_KEY_ID={access_key_id}\n\
+             export AWS_SECRET_ACCESS_KEY={secret_access_key}\n"
+        );
+        match std::fs::write(&creds_path, body) {
+            Ok(()) => info!("Wrote admin creds to {}", creds_path.display()),
+            Err(e) => error!(
+                "Failed to write admin creds to {}: {e}",
+                creds_path.display()
+            ),
+        }
     } else {
         info!("Admin user '{}' already exists", args.admin_user);
     }
@@ -238,8 +257,7 @@ pub async fn run(
     let (apply_tx, apply_rx) =
         tokio::sync::mpsc::unbounded_channel::<objectio_meta_store::ApplyEvent>();
     meta_service.spawn_apply_listener(apply_rx);
-    let raft_storage =
-        objectio_meta_store::MetaRaftStorage::with_apply_listener(raft_db, apply_tx);
+    let raft_storage = objectio_meta_store::MetaRaftStorage::with_apply_listener(raft_db, apply_tx);
     let (log_store, state_machine) = openraft::storage::Adaptor::new(raft_storage);
     let raft_config = Arc::new(
         openraft::Config {

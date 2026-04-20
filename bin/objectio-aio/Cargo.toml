@@ -18,6 +18,7 @@ objectio-osd = { path = "../objectio-osd" }
 objectio-gateway = { path = "../objectio-gateway" }
 
 anyhow = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

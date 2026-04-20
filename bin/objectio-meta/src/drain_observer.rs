@@ -174,8 +174,7 @@ async fn sweep_once(meta: &Arc<MetaService>) -> anyhow::Result<()> {
     {
         let draining_ids: std::collections::HashSet<[u8; 16]> =
             draining.iter().map(|(id, _)| *id).collect();
-        let existing: Vec<[u8; 16]> =
-            meta.drain_statuses_snapshot().keys().copied().collect();
+        let existing: Vec<[u8; 16]> = meta.drain_statuses_snapshot().keys().copied().collect();
         for id in existing {
             if !draining_ids.contains(&id) {
                 meta.clear_drain_progress(&id);
@@ -242,9 +241,7 @@ async fn sweep_once(meta: &Arc<MetaService>) -> anyhow::Result<()> {
         }
 
         // Shards remain — migrate one per sweep.
-        if let Err(e) =
-            migrate_one_shard(meta, node_id, &address, SHARDS_PER_SWEEP).await
-        {
+        if let Err(e) = migrate_one_shard(meta, node_id, &address, SHARDS_PER_SWEEP).await {
             warn!(
                 "drain observer: migration step for {} failed: {e}",
                 hex::encode(node_id)
@@ -272,12 +269,9 @@ async fn query_shard_count(address: &str) -> anyhow::Result<u64> {
     .map_err(|_| anyhow::anyhow!("connect timeout"))??;
 
     let mut client = StorageServiceClient::new(channel);
-    let resp = tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        client.get_status(GetStatusRequest {}),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("get_status timeout"))??;
+    let resp = tokio::time::timeout(PER_OSD_TIMEOUT, client.get_status(GetStatusRequest {}))
+        .await
+        .map_err(|_| anyhow::anyhow!("get_status timeout"))??;
 
     Ok(resp.into_inner().shard_count)
 }
@@ -315,8 +309,7 @@ async fn migrate_one_shard(
     // returned object so step 4 can update meta on the right node.
     // Each (owner_addr, AffectedObject) stays distinct.
     let owners = meta.all_osd_addresses();
-    let mut candidates: Vec<(String, objectio_proto::storage::AffectedObject)> =
-        Vec::new();
+    let mut candidates: Vec<(String, objectio_proto::storage::AffectedObject)> = Vec::new();
     for (addr, _id) in &owners {
         match find_affected_objects(addr, &draining, batch as u32 * 4).await {
             Ok(objs) => {
@@ -328,9 +321,7 @@ async fn migrate_one_shard(
                 }
             }
             Err(e) => {
-                debug!(
-                    "drain migrator: find_affected on {addr} failed: {e} (ignoring)"
-                );
+                debug!("drain migrator: find_affected on {addr} failed: {e} (ignoring)");
             }
         }
     }
@@ -359,8 +350,7 @@ async fn migrate_one_shard(
     }
     let mut work: Vec<WorkItem> = Vec::new();
     for (owner_addr, obj) in candidates {
-        let Ok(object_id): Result<[u8; 16], _> = obj.object_id.as_slice().try_into()
-        else {
+        let Ok(object_id): Result<[u8; 16], _> = obj.object_id.as_slice().try_into() else {
             continue;
         };
         for s in obj.shards {
@@ -564,8 +554,7 @@ async fn migrate_shard_one(
             continue;
         }
         for shard in &mut stripe.shards {
-            if shard.position == item.position && shard.node_id == draining.as_slice()
-            {
+            if shard.position == item.position && shard.node_id == draining.as_slice() {
                 let target_disk = write_resp
                     .location
                     .as_ref()
@@ -666,12 +655,9 @@ async fn find_affected_objects(
 
 async fn open_channel(address: &str) -> anyhow::Result<Channel> {
     let uri = canonical_uri(address);
-    let channel = tokio::time::timeout(
-        PER_OSD_TIMEOUT,
-        Channel::from_shared(uri)?.connect(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("connect timeout"))??;
+    let channel = tokio::time::timeout(PER_OSD_TIMEOUT, Channel::from_shared(uri)?.connect())
+        .await
+        .map_err(|_| anyhow::anyhow!("connect timeout"))??;
     Ok(channel)
 }
 
@@ -729,11 +715,8 @@ async fn reconstruct_dangling_shard(
     // position. Skip the position we're rebuilding; skip shards whose
     // owner isn't registered (they're also dangling, can't pull from
     // them either).
-    let registered: std::collections::HashSet<[u8; 16]> = meta
-        .osd_nodes_read()
-        .iter()
-        .map(|n| n.node_id)
-        .collect();
+    let registered: std::collections::HashSet<[u8; 16]> =
+        meta.osd_nodes_read().iter().map(|n| n.node_id).collect();
 
     let target_addr = meta
         .osd_address_by_id(&target_node)
@@ -743,8 +726,8 @@ async fn reconstruct_dangling_shard(
     // The loop does concurrent reads via a small FuturesUnordered
     // bounded by `ec_k + 2` attempts — enough to tolerate a missed
     // response while not flooding the cluster.
-    use futures::stream::FuturesUnordered;
     use futures::StreamExt;
+    use futures::stream::FuturesUnordered;
 
     let mut futs: FuturesUnordered<_> = FuturesUnordered::new();
     for shard in &stripe.shards {
@@ -955,4 +938,3 @@ async fn reconstruct_dangling_shard(
     );
     Ok(())
 }
-

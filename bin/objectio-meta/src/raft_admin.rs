@@ -75,10 +75,27 @@ async fn init(State(s): State<Arc<RaftAdminState>>) -> impl IntoResponse {
             .into_response()
         }
         Err(e) => {
-            warn!("raft init failed: {}", e);
+            let msg = e.to_string();
+            // Idempotent restart: cluster is already initialized. Treat as 409 so
+            // callers (notably objectio-aio) don't have to distinguish cold boot
+            // from warm boot.
+            let already =
+                msg.contains("not allowed to initialize") || msg.contains("already initialized");
+            if already {
+                info!("raft init: already initialized — idempotent restart");
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "already_initialized": true,
+                    })),
+                )
+                    .into_response();
+            }
+            warn!("raft init failed: {}", msg);
             (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e.to_string() })),
+                Json(serde_json::json!({ "error": msg })),
             )
                 .into_response()
         }
@@ -99,7 +116,13 @@ async fn add_learner(
 ) -> impl IntoResponse {
     match s
         .raft
-        .add_learner(body.node_id, BasicNode { addr: body.addr.clone() }, true)
+        .add_learner(
+            body.node_id,
+            BasicNode {
+                addr: body.addr.clone(),
+            },
+            true,
+        )
         .await
     {
         Ok(resp) => {

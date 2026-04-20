@@ -22,6 +22,8 @@ use objectio_proto::metadata::{
     AttachPolicyRequest,
     AttachPolicyResponse,
     BucketMeta,
+    // Bucket SSE types
+    BucketSseConfiguration,
     CompleteMultipartUploadRequest,
     CompleteMultipartUploadResponse,
     // Config types
@@ -34,11 +36,12 @@ use objectio_proto::metadata::{
     CreateDataFilterResponse,
     CreateGroupRequest,
     CreateGroupResponse,
+    CreateKmsKeyRequest,
+    CreateKmsKeyResponse,
     CreateMultipartUploadRequest,
     CreateMultipartUploadResponse,
     CreateObjectRequest,
     CreateObjectResponse,
-    ObjectListingEntry,
     CreatePolicyRequest,
     CreatePolicyResponse,
     // Pool types
@@ -51,14 +54,8 @@ use objectio_proto::metadata::{
     CreateUserResponse,
     DeleteAccessKeyRequest,
     DeleteAccessKeyResponse,
-    // Bucket SSE types
-    BucketSseConfiguration,
-    CreateKmsKeyRequest,
-    CreateKmsKeyResponse,
     DeleteBucketEncryptionRequest,
     DeleteBucketEncryptionResponse,
-    DeleteKmsKeyRequest,
-    DeleteKmsKeyResponse,
     // Lifecycle types
     DeleteBucketLifecycleRequest,
     DeleteBucketLifecycleResponse,
@@ -72,6 +69,8 @@ use objectio_proto::metadata::{
     DeleteDataFilterResponse,
     DeleteGroupRequest,
     DeleteGroupResponse,
+    DeleteKmsKeyRequest,
+    DeleteKmsKeyResponse,
     DeleteObjectRequest,
     DeleteObjectResponse,
     DeletePolicyRequest,
@@ -110,6 +109,7 @@ use objectio_proto::metadata::{
     DeltaShareTableEntry,
     DetachPolicyRequest,
     DetachPolicyResponse,
+    DrainStatus as ProtoDrainStatus,
     ErasureType,
     GetAccessKeyForAuthRequest,
     GetAccessKeyForAuthResponse,
@@ -127,10 +127,12 @@ use objectio_proto::metadata::{
     GetConfigRequest,
     GetConfigResponse,
     GetDataFiltersForPrincipalRequest,
-    GetListingNodesRequest,
-    GetListingNodesResponse,
+    GetDrainStatusRequest,
+    GetDrainStatusResponse,
     GetKmsKeyRequest,
     GetKmsKeyResponse,
+    GetListingNodesRequest,
+    GetListingNodesResponse,
     GetMultipartUploadRequest,
     GetMultipartUploadResponse,
     // Object lock types
@@ -138,12 +140,16 @@ use objectio_proto::metadata::{
     GetObjectLockConfigResponse,
     GetObjectRequest,
     GetObjectResponse,
+    GetPlacementGroupRequest,
+    GetPlacementGroupResponse,
     GetPlacementRequest,
     GetPlacementResponse,
     GetPolicyRequest,
     GetPolicyResponse,
     GetPoolRequest,
     GetPoolResponse,
+    GetRebalanceStatusRequest,
+    GetRebalanceStatusResponse,
     GetTenantRequest,
     GetTenantResponse,
     GetUserGroupsRequest,
@@ -198,8 +204,6 @@ use objectio_proto::metadata::{
     KeyStatus,
     KmsKey,
     LifecycleConfiguration,
-    ListKmsKeysRequest,
-    ListKmsKeysResponse,
     ListAccessKeysRequest,
     ListAccessKeysResponse,
     ListAttachedPoliciesRequest,
@@ -212,12 +216,16 @@ use objectio_proto::metadata::{
     ListDataFiltersResponse,
     ListGroupsRequest,
     ListGroupsResponse,
+    ListKmsKeysRequest,
+    ListKmsKeysResponse,
     ListMultipartUploadsRequest,
     ListMultipartUploadsResponse,
     ListObjectsRequest,
     ListObjectsResponse,
     ListPartsRequest,
     ListPartsResponse,
+    ListPlacementGroupsRequest,
+    ListPlacementGroupsResponse,
     ListPoliciesRequest,
     ListPoliciesResponse,
     ListPoolsRequest,
@@ -229,15 +237,12 @@ use objectio_proto::metadata::{
     ListingNode,
     MultipartUpload,
     NodePlacement,
+    ObjectListingEntry,
     ObjectLockConfiguration,
     ObjectMeta,
     PartMeta,
-    PolicyObject,
-    GetPlacementGroupRequest,
-    GetPlacementGroupResponse,
-    ListPlacementGroupsRequest,
-    ListPlacementGroupsResponse,
     PlacementGroup,
+    PolicyObject,
     PoolConfig,
     PutBucketEncryptionRequest,
     PutBucketEncryptionResponse,
@@ -259,11 +264,6 @@ use objectio_proto::metadata::{
     SetConfigResponse,
     SetOsdAdminStateRequest,
     SetOsdAdminStateResponse,
-    GetDrainStatusRequest,
-    GetDrainStatusResponse,
-    DrainStatus as ProtoDrainStatus,
-    GetRebalanceStatusRequest,
-    GetRebalanceStatusResponse,
     ShardType,
     TenantConfig,
     UpdatePoolRequest,
@@ -638,17 +638,12 @@ impl MetaService {
     /// Config mutations routed through Raft become linearizable; without
     /// a handle set, they fall back to the legacy direct-redb path
     /// (useful for in-memory tests).
-    pub fn set_raft(
-        &self,
-        raft: Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>,
-    ) {
+    pub fn set_raft(&self, raft: Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>) {
         *self.raft.write() = Some(raft);
     }
 
     /// Current Raft handle, if any.
-    pub fn raft_handle(
-        &self,
-    ) -> Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>> {
+    pub fn raft_handle(&self) -> Option<Arc<openraft::Raft<objectio_meta_store::MetaTypeConfig>>> {
         self.raft.read().clone()
     }
 
@@ -928,11 +923,11 @@ impl MetaService {
             .wrapping_add(u64::from(pool.pg_count));
         // scatter_width matches the balancer's knob so pre-alloc and
         // later rebalance see copyset pools of equivalent shape.
-        let scatter_width = self.config_parsed::<usize>("balancer/scatter_width", 10).max(1);
+        let scatter_width = self
+            .config_parsed::<usize>("balancer/scatter_width", 10)
+            .max(1);
         let cs_pool = CopysetPool::build(&topology, fd_level, copy_count, scatter_width, seed)
-            .map_err(|e| {
-                Status::failed_precondition(format!("copyset pool build failed: {e}"))
-            })?;
+            .map_err(|e| Status::failed_precondition(format!("copyset pool build failed: {e}")))?;
         if cs_pool.sets.is_empty() {
             return Err(Status::failed_precondition(
                 "no feasible copysets for current topology",
@@ -1078,11 +1073,7 @@ impl MetaService {
 
     /// Mutate a single OSD's drain progress. Creates a default entry
     /// if absent. Background-task entrypoint — not exposed over gRPC.
-    pub fn update_drain_progress<F: FnOnce(&mut DrainProgress)>(
-        &self,
-        node_id: [u8; 16],
-        f: F,
-    ) {
+    pub fn update_drain_progress<F: FnOnce(&mut DrainProgress)>(&self, node_id: [u8; 16], f: F) {
         let mut statuses = self.drain_statuses.write();
         let entry = statuses.entry(node_id).or_default();
         f(entry);
@@ -1102,10 +1093,7 @@ impl MetaService {
     }
 
     /// Mutate rebalance progress. Used by the reconciler sweep.
-    pub fn update_rebalance_progress<F: FnOnce(&mut RebalanceProgress)>(
-        &self,
-        f: F,
-    ) {
+    pub fn update_rebalance_progress<F: FnOnce(&mut RebalanceProgress)>(&self, f: F) {
         let mut p = self.rebalance_progress.write();
         f(&mut p);
     }
@@ -1159,7 +1147,9 @@ impl MetaService {
         // writes; followers return empty so the OSD skips stamping
         // and tries again on the next register retry.
         let Some(raft) = self.raft_handle() else {
-            warn!("cluster_uuid requested before Raft handle is set — returning non-persistent value");
+            warn!(
+                "cluster_uuid requested before Raft handle is set — returning non-persistent value"
+            );
             return Uuid::new_v4().as_bytes().to_vec();
         };
         if !self.is_raft_leader() {
@@ -1214,7 +1204,9 @@ impl MetaService {
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
-                    warn!("cluster_uuid conflict but cache never populated — giving up for this call");
+                    warn!(
+                        "cluster_uuid conflict but cache never populated — giving up for this call"
+                    );
                     Vec::new()
                 }
                 other => {
@@ -1266,7 +1258,6 @@ impl MetaService {
             .collect()
     }
 
-
     /// Compute a CRUSH replacement for a single shard at `position` in
     /// the placement set for `object_id`, excluding the `exclude` node
     /// (typically the draining / current-owner OSD). Only returns
@@ -1286,21 +1277,15 @@ impl MetaService {
     ) -> Option<[u8; 16]> {
         use objectio_placement::crush2::PlacementTemplate;
 
-        let template =
-            PlacementTemplate::mds(self.default_ec_k as u8, self.default_ec_m as u8);
+        let template = PlacementTemplate::mds(self.default_ec_k as u8, self.default_ec_m as u8);
 
         let crush = self.crush.read();
-        let obj_id =
-            objectio_common::ObjectId::from_uuid(uuid::Uuid::from_bytes(*object_id));
+        let obj_id = objectio_common::ObjectId::from_uuid(uuid::Uuid::from_bytes(*object_id));
         let placements = crush.select_placement(&obj_id, &template);
         drop(crush);
 
-        let registered: std::collections::HashSet<[u8; 16]> = self
-            .osd_nodes
-            .read()
-            .iter()
-            .map(|n| n.node_id)
-            .collect();
+        let registered: std::collections::HashSet<[u8; 16]> =
+            self.osd_nodes.read().iter().map(|n| n.node_id).collect();
 
         let eligible = |cand: &[u8; 16]| cand != exclude && registered.contains(cand);
 
@@ -2399,9 +2384,7 @@ impl MetadataService for MetaService {
                 Ok(resp) => match resp.data {
                     MetaResponse::MultiCasOk => {}
                     MetaResponse::MultiCasConflict { .. } => {
-                        return Err(Status::aborted(
-                            "bucket changed since read; retry delete",
-                        ));
+                        return Err(Status::aborted("bucket changed since read; retry delete"));
                     }
                     other => {
                         error!("unexpected raft response for delete_bucket: {:?}", other);
@@ -2588,7 +2571,8 @@ impl MetadataService for MetaService {
             }
         } else if let Some(store) = &self.store {
             // Legacy non-raft path: direct redb delete.
-            store.delete_object_listing(&format!("{}\0{}\0{}", req.bucket, req.key, req.version_id));
+            store
+                .delete_object_listing(&format!("{}\0{}\0{}", req.bucket, req.key, req.version_id));
         }
 
         Ok(Response::new(DeleteObjectResponse {
@@ -2825,8 +2809,8 @@ impl MetadataService for MetaService {
         if pool_pg_count > 0 && !pool_name.is_empty() {
             let key_str = format!("{}/{}", req.bucket, req.key);
             let key_hash = xxhash_rust::xxh64::xxh64(key_str.as_bytes(), 0);
-            let pg_id = objectio_placement::jump_consistent_hash(key_hash, pool_pg_count as i32)
-                as u32;
+            let pg_id =
+                objectio_placement::jump_consistent_hash(key_hash, pool_pg_count as i32) as u32;
             if let Some(pg) = self.placement_group(&pool_name, pg_id) {
                 let expected_shards = match ec_type {
                     ErasureType::ErasureMds => ec_k as usize + ec_global_parity as usize,
@@ -2842,7 +2826,9 @@ impl MetadataService for MetaService {
                         .iter()
                         .enumerate()
                         .map(|(pos, osd_bytes)| {
-                            let node = nodes_snap.iter().find(|n| n.node_id.as_slice() == osd_bytes.as_slice());
+                            let node = nodes_snap
+                                .iter()
+                                .find(|n| n.node_id.as_slice() == osd_bytes.as_slice());
                             let (node_address, disk_id) = match node {
                                 Some(n) => (
                                     n.address.clone(),
@@ -3427,12 +3413,13 @@ impl MetadataService for MetaService {
                 Ok(resp) => match resp.data {
                     MetaResponse::MultiCasOk => {}
                     MetaResponse::MultiCasConflict { .. } => {
-                        return Err(Status::aborted(
-                            "bucket policy changed since read; retry",
-                        ));
+                        return Err(Status::aborted("bucket policy changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for set_bucket_policy: {:?}", other);
+                        error!(
+                            "unexpected raft response for set_bucket_policy: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit returned wrong variant"));
                     }
                 },
@@ -3506,9 +3493,7 @@ impl MetadataService for MetaService {
                 Ok(resp) => match resp.data {
                     MetaResponse::MultiCasOk => {}
                     MetaResponse::MultiCasConflict { .. } => {
-                        return Err(Status::aborted(
-                            "bucket policy changed since read; retry",
-                        ));
+                        return Err(Status::aborted("bucket policy changed since read; retry"));
                     }
                     other => {
                         error!(
@@ -3607,7 +3592,8 @@ impl MetadataService for MetaService {
                     )));
                 }
                 if license.max_raw_capacity_bytes != 0
-                    && current_capacity.saturating_add(new_capacity) > license.max_raw_capacity_bytes
+                    && current_capacity.saturating_add(new_capacity)
+                        > license.max_raw_capacity_bytes
                 {
                     warn!(
                         "register_osd refused: capacity cap {} B exceeded (current={} + new={})",
@@ -3919,8 +3905,8 @@ impl MetadataService for MetaService {
         // Replicate through Raft. expected=None ensures the user_id
         // hasn't collided with a concurrent create (cryptographically
         // unlikely for UUIDs, but tested correctly by the state machine).
-        let user_bytes = bincode::serialize(&user)
-            .map_err(|e| Status::internal(format!("user encode: {e}")))?;
+        let user_bytes =
+            bincode::serialize(&user).map_err(|e| Status::internal(format!("user encode: {e}")))?;
         if let Some(raft) = self.raft_handle() {
             use objectio_meta_store::{CasOp, CasTable, MetaCommand, MetaResponse};
             let cmd = MetaCommand::MultiCas {
@@ -4210,7 +4196,10 @@ impl MetadataService for MetaService {
                         ));
                     }
                     other => {
-                        error!("unexpected raft response for create_access_key: {:?}", other);
+                        error!(
+                            "unexpected raft response for create_access_key: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit returned wrong variant"));
                     }
                 },
@@ -4311,7 +4300,10 @@ impl MetadataService for MetaService {
                         ));
                     }
                     other => {
-                        error!("unexpected raft response for delete_access_key: {:?}", other);
+                        error!(
+                            "unexpected raft response for delete_access_key: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit returned wrong variant"));
                     }
                 },
@@ -4543,9 +4535,7 @@ impl MetadataService for MetaService {
                 Ok(r) => match r.data {
                     MetaResponse::MultiCasOk => {}
                     MetaResponse::MultiCasConflict { .. } => {
-                        return Err(Status::aborted(
-                            "namespace changed since read; retry drop",
-                        ));
+                        return Err(Status::aborted("namespace changed since read; retry drop"));
                     }
                     other => {
                         error!("unexpected raft response for drop_namespace: {:?}", other);
@@ -5062,7 +5052,13 @@ impl MetadataService for MetaService {
             // Raft branch above.
             let ops: Vec<(String, Vec<u8>, Vec<u8>)> = prepared
                 .iter()
-                .map(|p| (p.table_key.clone(), p.old_bytes.clone(), p.new_bytes.clone()))
+                .map(|p| {
+                    (
+                        p.table_key.clone(),
+                        p.old_bytes.clone(),
+                        p.new_bytes.clone(),
+                    )
+                })
                 .collect();
             match store.cas_iceberg_tables_multi(&ops) {
                 Ok(failed) if failed.is_empty() => {}
@@ -5096,7 +5092,9 @@ impl MetadataService for MetaService {
             committed.len()
         );
 
-        Ok(Response::new(IcebergCommitTransactionResponse { committed }))
+        Ok(Response::new(IcebergCommitTransactionResponse {
+            committed,
+        }))
     }
 
     async fn iceberg_drop_table(
@@ -5131,9 +5129,7 @@ impl MetadataService for MetaService {
                 Ok(r) => match r.data {
                     MetaResponse::MultiCasOk => {}
                     MetaResponse::MultiCasConflict { .. } => {
-                        return Err(Status::aborted(
-                            "table changed since read; retry drop",
-                        ));
+                        return Err(Status::aborted("table changed since read; retry drop"));
                     }
                     other => {
                         error!("unexpected raft response for drop_table: {:?}", other);
@@ -5460,8 +5456,7 @@ impl MetadataService for MetaService {
             let g = groups
                 .get(&req.group_id)
                 .ok_or_else(|| Status::not_found("group not found"))?;
-            bincode::serialize(g)
-                .map_err(|e| Status::internal(format!("group encode: {e}")))?
+            bincode::serialize(g).map_err(|e| Status::internal(format!("group encode: {e}")))?
         };
 
         if let Some(raft) = self.raft_handle() {
@@ -5588,7 +5583,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("group changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for add_user_to_group: {:?}", other);
+                        error!(
+                            "unexpected raft response for add_user_to_group: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -5598,9 +5596,7 @@ impl MetadataService for MetaService {
             store.put_group(&req.group_id, &new_group);
         }
 
-        self.groups
-            .write()
-            .insert(req.group_id.clone(), new_group);
+        self.groups.write().insert(req.group_id.clone(), new_group);
         info!("Added user {} to group {}", req.user_id, req.group_id);
         Ok(Response::new(AddUserToGroupResponse { success: true }))
     }
@@ -5660,9 +5656,7 @@ impl MetadataService for MetaService {
             store.put_group(&req.group_id, &new_group);
         }
 
-        self.groups
-            .write()
-            .insert(req.group_id.clone(), new_group);
+        self.groups.write().insert(req.group_id.clone(), new_group);
         info!("Removed user {} from group {}", req.user_id, req.group_id);
         Ok(Response::new(RemoveUserFromGroupResponse { success: true }))
     }
@@ -5741,7 +5735,10 @@ impl MetadataService for MetaService {
                         return Err(Status::already_exists("filter_id collision"));
                     }
                     other => {
-                        error!("unexpected raft response for create_data_filter: {:?}", other);
+                        error!(
+                            "unexpected raft response for create_data_filter: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -5838,7 +5835,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("filter changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for delete_data_filter: {:?}", other);
+                        error!(
+                            "unexpected raft response for delete_data_filter: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -5933,7 +5933,10 @@ impl MetadataService for MetaService {
                         return Err(Status::already_exists("share already exists"));
                     }
                     other => {
-                        error!("unexpected raft response for delta_create_share: {:?}", other);
+                        error!(
+                            "unexpected raft response for delta_create_share: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -6155,7 +6158,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("table changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for delta_remove_table: {:?}", other);
+                        error!(
+                            "unexpected raft response for delta_remove_table: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -6240,7 +6246,10 @@ impl MetadataService for MetaService {
                         return Err(Status::already_exists("recipient already exists"));
                     }
                     other => {
-                        error!("unexpected raft response for delta_create_recipient: {:?}", other);
+                        error!(
+                            "unexpected raft response for delta_create_recipient: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -6328,7 +6337,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("recipient changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for delta_drop_recipient: {:?}", other);
+                        error!(
+                            "unexpected raft response for delta_drop_recipient: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -6418,17 +6430,11 @@ impl MetadataService for MetaService {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs())
                             .unwrap_or(0);
-                        match objectio_license::License::load_from_bytes(
-                            &entry.value,
-                            now_secs,
-                        ) {
+                        match objectio_license::License::load_from_bytes(&entry.value, now_secs) {
                             Ok(l) => {
                                 info!(
                                     "meta license reloaded: tier={} licensee={} max_nodes={} max_raw_capacity_bytes={}",
-                                    l.tier,
-                                    l.licensee,
-                                    l.max_nodes,
-                                    l.max_raw_capacity_bytes
+                                    l.tier, l.licensee, l.max_nodes, l.max_raw_capacity_bytes
                                 );
                                 *self.license.write() = Arc::new(l);
                             }
@@ -6485,7 +6491,10 @@ impl MetadataService for MetaService {
                 Err(e) => warn!("license/active rejected on set_config: {}", e),
             }
         }
-        info!("Config set (legacy path): key={}, version={}", req.key, version);
+        info!(
+            "Config set (legacy path): key={}, version={}",
+            req.key, version
+        );
         Ok(Response::new(SetConfigResponse { entry: Some(entry) }))
     }
 
@@ -6548,9 +6557,11 @@ impl MetadataService for MetaService {
         let req = request.into_inner();
 
         // node_id must be 16 bytes (UUID).
-        let node_id: [u8; 16] = req.node_id.as_slice().try_into().map_err(|_| {
-            Status::invalid_argument("node_id must be 16 bytes")
-        })?;
+        let node_id: [u8; 16] = req
+            .node_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("node_id must be 16 bytes"))?;
 
         // Map wire enum → internal enum. Proto's numeric `i32` reaches us
         // here; rely on the generated accessor to handle unknown values.
@@ -6945,7 +6956,10 @@ impl MetadataService for MetaService {
         } else {
             0
         };
-        Ok(Response::new(ListPlacementGroupsResponse { pgs, next_pg_id }))
+        Ok(Response::new(ListPlacementGroupsResponse {
+            pgs,
+            next_pg_id,
+        }))
     }
 
     // ============ Tenants ============
@@ -7049,9 +7063,7 @@ impl MetadataService for MetaService {
             let tenants = self.tenants.read();
             tenants
                 .get(&tenant.name)
-                .ok_or_else(|| {
-                    Status::not_found(format!("tenant '{}' not found", tenant.name))
-                })?
+                .ok_or_else(|| Status::not_found(format!("tenant '{}' not found", tenant.name)))?
                 .encode_to_vec()
         };
         tenant.updated_at = Self::current_timestamp();
@@ -7106,11 +7118,7 @@ impl MetadataService for MetaService {
                 name
             )));
         }
-        let expected_bytes = self
-            .tenants
-            .read()
-            .get(&name)
-            .map(|t| t.encode_to_vec());
+        let expected_bytes = self.tenants.read().get(&name).map(|t| t.encode_to_vec());
         if expected_bytes.is_none() {
             return Ok(Response::new(DeleteTenantResponse { success: false }));
         }
@@ -7405,7 +7413,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("bucket changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for put_bucket_versioning: {:?}", other);
+                        error!(
+                            "unexpected raft response for put_bucket_versioning: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7484,7 +7495,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("object lock config changed; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for put_object_lock_config: {:?}", other);
+                        error!(
+                            "unexpected raft response for put_object_lock_config: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7564,7 +7578,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("lifecycle config changed; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for put_bucket_lifecycle: {:?}", other);
+                        error!(
+                            "unexpected raft response for put_bucket_lifecycle: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7637,7 +7654,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("lifecycle changed since read; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for delete_bucket_lifecycle: {:?}", other);
+                        error!(
+                            "unexpected raft response for delete_bucket_lifecycle: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7649,7 +7669,9 @@ impl MetadataService for MetaService {
 
         self.lifecycle_configs.write().remove(&bucket);
         info!("Deleted lifecycle config for bucket '{}'", bucket);
-        Ok(Response::new(DeleteBucketLifecycleResponse { success: true }))
+        Ok(Response::new(DeleteBucketLifecycleResponse {
+            success: true,
+        }))
     }
 
     // ============================================================
@@ -7697,7 +7719,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("encryption config changed; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for put_bucket_encryption: {:?}", other);
+                        error!(
+                            "unexpected raft response for put_bucket_encryption: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7766,7 +7791,10 @@ impl MetadataService for MetaService {
                         return Err(Status::aborted("encryption config changed; retry"));
                     }
                     other => {
-                        error!("unexpected raft response for delete_bucket_encryption: {:?}", other);
+                        error!(
+                            "unexpected raft response for delete_bucket_encryption: {:?}",
+                            other
+                        );
                         return Err(Status::internal("raft commit wrong variant"));
                     }
                 },
@@ -7778,7 +7806,9 @@ impl MetadataService for MetaService {
 
         self.bucket_encryption_configs.write().remove(&bucket);
         info!("Deleted bucket encryption config for bucket '{}'", bucket);
-        Ok(Response::new(DeleteBucketEncryptionResponse { success: true }))
+        Ok(Response::new(DeleteBucketEncryptionResponse {
+            success: true,
+        }))
     }
 
     // ============================================================
@@ -8191,10 +8221,7 @@ impl MetadataService for MetaService {
                 return Ok(Response::new(DetachPolicyResponse { success: false }));
             }
             let old_bytes = current.join(",").into_bytes();
-            let after: Vec<String> = current
-                .into_iter()
-                .filter(|p| p != &policy_name)
-                .collect();
+            let after: Vec<String> = current.into_iter().filter(|p| p != &policy_name).collect();
             (old_bytes, after)
         };
 
