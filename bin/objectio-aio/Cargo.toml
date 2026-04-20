@@ -10,10 +10,12 @@ name = "objectio-aio"
 path = "src/main.rs"
 
 [dependencies]
-# aio spawns the existing service bins as child processes — no Rust
-# link-level dependency; the binaries must be available on PATH or
-# in the same directory as `objectio-aio` at runtime (both are true
-# in the Dockerfile `all` stage and in `cargo install --path bin/*`).
+# aio links directly against each service crate's lib — they run as
+# tokio tasks in the same process, not as child processes. One
+# tracing subscriber, one Ctrl-C handler, one memory space.
+objectio-meta = { path = "../objectio-meta" }
+objectio-osd = { path = "../objectio-osd" }
+objectio-gateway = { path = "../objectio-gateway" }
 
 anyhow = { workspace = true }
 clap = { workspace = true }

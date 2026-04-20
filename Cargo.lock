@@ -2063,6 +2063,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "objectio-gateway",
+ "objectio-meta",
+ "objectio-osd",
  "tempfile",
  "tokio",
  "tracing",

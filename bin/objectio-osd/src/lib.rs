@@ -169,7 +169,7 @@ fn default_weight() -> f64 {
     1.0
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 struct StorageConfig {
     #[serde(default)]
     disks: Vec<String>,
@@ -177,6 +177,20 @@ struct StorageConfig {
     block_size: usize,
     #[serde(default = "default_data_dir")]
     data_dir: String,
+}
+
+// Hand-roll Default so `Config::default()` (hit when the config file
+// is absent) still honors default_block_size — the derive(Default)
+// version would produce block_size: 0 and OSD init would panic on
+// `disk_size / block_size` during superblock computation.
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            disks: Vec::new(),
+            block_size: default_block_size(),
+            data_dir: default_data_dir(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
