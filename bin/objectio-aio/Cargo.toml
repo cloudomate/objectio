@@ -25,3 +25,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 which = "6"
 tempfile = "3"
+include_dir = "0.7"

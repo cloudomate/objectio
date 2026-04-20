@@ -22,15 +22,30 @@
 
 use std::io::Read;
 use std::net::TcpListener as StdTcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use include_dir::{Dir, include_dir};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Pre-built console SPA, baked into the binary at compile time.
+/// Built via `cd console && npm run build` before `cargo build`.
+static CONSOLE_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../console/dist");
+
+/// Extract the embedded console SPA into `dst`. Idempotent: safe to
+/// call on an existing directory (files are overwritten).
+fn extract_embedded_console(dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    CONSOLE_DIST
+        .extract(dst)
+        .with_context(|| format!("extracting console bundle to {}", dst.display()))?;
+    Ok(())
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "objectio-aio")]
@@ -321,6 +336,24 @@ async fn main() -> Result<()> {
     // single main thread here — no other tasks have been spawned yet.
     unsafe {
         std::env::set_var("OBJECTIO_MASTER_KEY", &master_key_b64);
+    }
+
+    // ------------------------------------------------------------
+    // Console SPA — embedded at build time. The gateway serves it from
+    // $OBJECTIO_CONSOLE_DIR (default /usr/share/objectio/console, not
+    // present on a developer laptop). Extract the embedded tree to a
+    // per-run dir under the data root so the gateway's ServeDir finds
+    // it. Callers can override OBJECTIO_CONSOLE_DIR themselves if they
+    // want to serve a locally-built tree instead (e.g. during frontend
+    // dev against this aio binary).
+    // ------------------------------------------------------------
+    if std::env::var("OBJECTIO_CONSOLE_DIR").is_err() {
+        let console_dst = data_root.join("console");
+        extract_embedded_console(&console_dst)?;
+        // SAFETY: same as above — no tasks have been spawned yet.
+        unsafe {
+            std::env::set_var("OBJECTIO_CONSOLE_DIR", &console_dst);
+        }
     }
 
     // Shutdown broadcast — every subsystem subscribes, Ctrl-C fans out.
