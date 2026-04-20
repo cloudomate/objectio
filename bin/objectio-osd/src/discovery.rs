@@ -114,14 +114,33 @@ pub fn discover(
             continue;
         }
 
+        // Explicit operator-supplied paths get through even if the
+        // backing file doesn't exist yet — OsdService::new is the one
+        // that creates disk.raw on first boot, so rejecting here
+        // breaks the "PVC mounted but empty dir" flow in k8s. Globs
+        // still require a probe-able disk (otherwise we'd try to
+        // claim literal match strings).
+        let is_explicit = explicit.iter().any(|p| p == &disp);
         let size = match probe_size(&path) {
             Ok(s) => s,
+            Err(e) if is_explicit => {
+                debug!(
+                    "discovery: {disp} not yet readable ({e}) — \
+                     explicit path, will be initialised by OsdService"
+                );
+                out.push(DiscoveredDisk {
+                    path,
+                    size_bytes: 0,
+                    state: DiskState::Blank,
+                });
+                continue;
+            }
             Err(e) => {
                 debug!("discovery: cannot probe {disp}: {e}");
                 continue;
             }
         };
-        if size < min_size {
+        if size < min_size && !is_explicit {
             debug!(
                 "discovery: skipping {disp} — size {size} below min {min_size}"
             );

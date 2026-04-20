@@ -262,14 +262,25 @@ async fn main() -> Result<()> {
         let mut claim = Vec::new();
         for d in &discovered {
             let path = d.path.display().to_string();
+            let is_explicit = explicit_disks.iter().any(|p| p == &path);
             match &d.state {
                 discovery::DiskState::Claimed { .. } => {
                     info!("discovery: claiming {path} ({} bytes)", d.size_bytes);
                     claim.push(path);
                 }
                 discovery::DiskState::Blank => {
-                    if args.init_blank_disks {
-                        info!("discovery: initialising blank disk {path} (--init-blank-disks)");
+                    // Explicit `--disk` paths bypass the --init-blank-disks
+                    // gate — operator passed the path verbatim, so the
+                    // intent is "use this". The gate only governs
+                    // glob-discovered disks where auto-format could be
+                    // destructive.
+                    if is_explicit || args.init_blank_disks {
+                        let reason = if is_explicit {
+                            "explicit --disk"
+                        } else {
+                            "--init-blank-disks"
+                        };
+                        info!("discovery: initialising blank disk {path} ({reason})");
                         claim.push(path);
                     } else {
                         warn!(
