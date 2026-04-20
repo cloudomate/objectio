@@ -227,11 +227,22 @@ async fn bootstrap_raft(port: u16) -> Result<()> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Single tracing subscriber for everyone.
+    // Single tracing subscriber for everyone. Default: --log-level for
+    // our own crates, warn for the noisy deps (hyper, h2, tower, tonic,
+    // openraft internals). Override via RUST_LOG — e.g.
+    //   RUST_LOG=debug          everything
+    //   RUST_LOG=objectio=debug just our crates
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("{},warn", args.log_level).into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!(
+                    "{lvl},hyper=warn,h2=warn,tower=warn,tonic=warn,\
+                     openraft::raft::core=warn,\
+                     tokio_util=warn,reqwest=warn",
+                    lvl = args.log_level
+                )
+                .into()
+            }),
         )
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
@@ -471,22 +482,44 @@ async fn main() -> Result<()> {
     // Wait for Ctrl-C → broadcast shutdown → join every task.
     wait_ctrl_c(shutdown_tx.clone()).await;
 
-    // Collect results; warn on any task that errored, don't propagate
-    // (best-effort shutdown).
-    for (label, handle) in [("meta", meta_handle), ("gateway", gw_handle)]
-        .into_iter()
-        .chain(
-            osd_handles
-                .into_iter()
-                .enumerate()
-                .map(|(i, h)| (Box::leak(format!("osd-{i}").into_boxed_str()) as &str, h)),
-        )
-    {
-        match handle.await {
-            Ok(Ok(())) => info!("{label} exited cleanly"),
-            Ok(Err(e)) => warn!("{label} error: {e}"),
-            Err(e) => warn!("{label} join error: {e}"),
+    // Second Ctrl-C = hard exit. Some background tasks (OSD chunk
+    // flushes, meta raft machinery) occasionally refuse to yield in
+    // under a couple of seconds; the user shouldn't have to wait.
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!("\n[aio] second Ctrl-C — forcing exit");
+            std::process::exit(130);
         }
+    });
+
+    // Collect results under a hard deadline. If a service refuses to
+    // shut down within `graceful` seconds, we exit the process anyway
+    // — leaking the task beats hanging the shell.
+    let graceful = Duration::from_secs(5);
+    let join_all = async {
+        for (label, handle) in [("meta", meta_handle), ("gateway", gw_handle)]
+            .into_iter()
+            .chain(osd_handles.into_iter().enumerate().map(|(i, h)| {
+                (Box::leak(format!("osd-{i}").into_boxed_str()) as &str, h)
+            }))
+        {
+            match handle.await {
+                Ok(Ok(())) => info!("{label} exited cleanly"),
+                Ok(Err(e)) => warn!("{label} error: {e}"),
+                Err(e) => warn!("{label} join error: {e}"),
+            }
+        }
+    };
+    match tokio::time::timeout(graceful, join_all).await {
+        Ok(()) => info!("all services shut down cleanly"),
+        Err(_) => eprintln!(
+            "[aio] graceful shutdown timed out after {}s — exiting",
+            graceful.as_secs()
+        ),
     }
-    Ok(())
+    // Explicitly exit. Services spawn detached background tasks
+    // (metrics timers, openraft background workers, tonic keepalives)
+    // that don't get joined; without this, the runtime keeps the
+    // process alive even after every run() returned.
+    std::process::exit(0);
 }
