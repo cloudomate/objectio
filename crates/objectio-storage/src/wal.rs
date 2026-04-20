@@ -571,11 +571,6 @@ impl WriteAheadLog {
         Ok(committed)
     }
 
-    /// Get current write offset
-    pub fn write_offset(&self) -> u64 {
-        self.header.lock().write_offset
-    }
-
     /// Get last committed transaction ID
     pub fn last_committed_txn(&self) -> u64 {
         self.header.lock().last_committed_txn

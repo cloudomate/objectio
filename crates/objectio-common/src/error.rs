@@ -143,16 +143,6 @@ impl Error {
         Self::Internal(msg.into())
     }
 
-    /// Create a not implemented error
-    pub fn not_implemented(feature: impl Into<String>) -> Self {
-        Self::NotImplemented(feature.into())
-    }
-
-    /// Create an invalid request error
-    pub fn invalid_request(msg: impl Into<String>) -> Self {
-        Self::InvalidRequest(msg.into())
-    }
-
     /// Create an invalid argument error
     pub fn invalid_argument(msg: impl Into<String>) -> Self {
         Self::InvalidArgument(msg.into())
@@ -248,27 +238,6 @@ impl Error {
         }
     }
 
-    /// Get S3 error code for API compatibility
-    #[must_use]
-    pub fn s3_error_code(&self) -> &'static str {
-        match self {
-            Self::AccessDenied => "AccessDenied",
-            Self::InvalidAccessKey => "InvalidAccessKeyId",
-            Self::SignatureDoesNotMatch => "SignatureDoesNotMatch",
-            Self::BucketNotFound(_) => "NoSuchBucket",
-            Self::BucketAlreadyExists(_) => "BucketAlreadyExists",
-            Self::ObjectNotFound { .. } => "NoSuchKey",
-            Self::InvalidBucketName(_) => "InvalidBucketName",
-            Self::InvalidRequest(_) | Self::InvalidArgument(_) => "InvalidArgument",
-            Self::EntityTooLarge { .. } => "EntityTooLarge",
-            Self::NoSuchUpload { .. } => "NoSuchUpload",
-            Self::InvalidPart { .. } => "InvalidPart",
-            Self::InvalidPartOrder => "InvalidPartOrder",
-            Self::NotImplemented(_) => "NotImplemented",
-            Self::ServiceUnavailable(_) | Self::Timeout => "ServiceUnavailable",
-            _ => "InternalError",
-        }
-    }
 }
 
 #[cfg(test)]

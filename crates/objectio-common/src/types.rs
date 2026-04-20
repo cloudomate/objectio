@@ -69,12 +69,6 @@ impl BucketName {
         Ok(Self(name))
     }
 
-    /// Create without validation (internal use only)
-    #[must_use]
-    pub fn new_unchecked(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-
     /// Get the bucket name as a string slice
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -160,12 +154,6 @@ impl ObjectKey {
         let key = key.into();
         Self::validate(&key)?;
         Ok(Self(key))
-    }
-
-    /// Create without validation (internal use only)
-    #[must_use]
-    pub fn new_unchecked(key: impl Into<String>) -> Self {
-        Self(key.into())
     }
 
     /// Get the object key as a string slice

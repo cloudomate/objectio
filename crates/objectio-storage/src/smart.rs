@@ -125,19 +125,6 @@ impl SmartMonitor {
             .unwrap_or(false)
     }
 
-    /// Check if a device supports SMART
-    pub fn device_supports_smart(device: &str) -> bool {
-        Command::new("smartctl")
-            .args(["-i", device])
-            .output()
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.contains("SMART support is: Available")
-                    || stdout.contains("SMART support is: Enabled")
-            })
-            .unwrap_or(false)
-    }
-
     /// Check all registered disks if interval has elapsed
     pub fn check_if_needed(&self, devices: &[String]) -> bool {
         let now = Instant::now();
@@ -361,34 +348,6 @@ impl SmartMonitor {
 
         // No predicted failure
         None
-    }
-
-    /// Get health status for a specific disk
-    pub fn get_disk_health(&self, device: &str) -> Option<DiskSmartHealth> {
-        self.disks.read().unwrap().get(device).cloned()
-    }
-
-    /// Get health status for all disks
-    pub fn get_all_health(&self) -> HashMap<String, DiskSmartHealth> {
-        self.disks.read().unwrap().clone()
-    }
-
-    /// Check if any disk has warnings
-    pub fn has_warnings(&self) -> bool {
-        self.disks
-            .read()
-            .unwrap()
-            .values()
-            .any(|h| h.health_score < 80 || h.predicted_failure_days.is_some())
-    }
-
-    /// Check if any disk has critical issues
-    pub fn has_critical(&self) -> bool {
-        self.disks
-            .read()
-            .unwrap()
-            .values()
-            .any(|h| h.health_score < 50 || !h.smart_passed)
     }
 
     /// Export metrics in Prometheus format
