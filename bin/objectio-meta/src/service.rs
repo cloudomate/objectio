@@ -693,6 +693,9 @@ impl MetaService {
                         CasTable::PlacementGroups => {
                             svc.apply_placement_group_event(&key, new_value.as_deref());
                         }
+                        CasTable::Config => {
+                            svc.apply_config_event(&key, new_value.as_deref());
+                        }
                         // Tables not yet covered by a cache refresh:
                         // writers are responsible for mirroring their
                         // own writes on the leader, and followers still
@@ -702,6 +705,30 @@ impl MetaService {
                 }
             }
         });
+    }
+
+    /// Mirror a Raft-committed Config write into the in-memory cache.
+    /// Writes made via direct handlers (set_config, rebalance/pause,
+    /// balancer knobs) update the cache themselves and then the
+    /// Raft commit re-applies this same event — idempotent, harmless.
+    /// Writes made via cluster_uuid()'s direct Raft path rely entirely
+    /// on this handler to populate the cache.
+    fn apply_config_event(&self, key: &str, new_value: Option<&[u8]>) {
+        use prost::Message;
+        let mut map = self.config.write();
+        match new_value {
+            Some(bytes) => match ConfigEntry::decode(bytes) {
+                Ok(entry) => {
+                    map.insert(key.to_string(), entry);
+                }
+                Err(e) => {
+                    warn!("apply: decode ConfigEntry('{key}') failed: {e}");
+                }
+            },
+            None => {
+                map.remove(key);
+            }
+        }
     }
 
     fn apply_bucket_event(&self, key: &str, new_value: Option<&[u8]>) {
@@ -1171,16 +1198,24 @@ impl MetaService {
         match raft.client_write(cmd).await {
             Ok(r) => match r.data {
                 MetaResponse::MultiCasOk => {
-                    info!("Generated and persisted cluster/uuid: {fresh}");
+                    info!("Generated and persisted cluster/id: {fresh}");
                     uuid_bytes
                 }
                 MetaResponse::MultiCasConflict { .. } => {
-                    // Another caller won the race — re-read the cache.
-                    self.config
-                        .read()
-                        .get(KEY)
-                        .map(|e| e.value.clone())
-                        .unwrap_or_default()
+                    // Another caller won the race (or a pre-existing
+                    // corrupt entry sits at this key). Poll the config
+                    // cache briefly — the apply listener populates it
+                    // shortly after the raft commit.
+                    for _ in 0..20 {
+                        if let Some(entry) = self.config.read().get(KEY)
+                            && entry.value.len() == 16
+                        {
+                            return entry.value.clone();
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    warn!("cluster_uuid conflict but cache never populated — giving up for this call");
+                    Vec::new()
                 }
                 other => {
                     warn!("cluster_uuid generation got unexpected raft response: {other:?}");
