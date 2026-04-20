@@ -15,7 +15,6 @@ gateway:
     tag: latest
   replicas: 1
   noAuth: true                             # no SigV4 required for testing
-  warehouseLocation: s3://objectio-warehouse
   region: us-east-1
   logLevel: info
   # Public URL for OIDC callback / Iceberg vended creds / Delta Sharing

@@ -53,8 +53,6 @@ services:
       - "3"
       - "--ec-m"
       - "2"
-      - "--warehouse-location"
-      - "s3://objectio-warehouse"
       - "--no-auth"
       - "--log-level"
       - "info"

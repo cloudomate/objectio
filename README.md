@@ -236,7 +236,11 @@ curl -s $ENDPOINT/namespaces/analytics/tables | jq .
 curl -s $ENDPOINT/namespaces/analytics/tables/events | jq .
 ```
 
-Use `--warehouse-location` on the gateway to set the S3 URL prefix for table data (default: `s3://objectio-warehouse`).
+Every table operation must name an existing warehouse (via `?warehouse=X`
+on `/iceberg/v1/config`). Warehouses are created via
+`POST /_admin/warehouses {"name":"X"}` — meta auto-provisions a backing
+bucket `iceberg-X` and records its S3 location. Omitting `?warehouse=` or
+naming one that doesn't exist returns 400.
 
 ### User Management
 

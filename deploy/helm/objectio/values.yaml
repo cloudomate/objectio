@@ -12,7 +12,6 @@ gateway:
     port: 9000
   noAuth: true
   logLevel: info
-  warehouseLocation: s3://objectio-warehouse
   region: us-east-1
   # Gateway's own topological position. Feeds locality-aware read routing:
   # shards on OSDs that share enclosing failure-domain levels are pulled

@@ -24,7 +24,6 @@ gateway:
   deltaSharing:
     externalEndpoint: "https://s3.imys.in"
   logLevel: info
-  warehouseLocation: s3://objectio-warehouse
   region: us-east-1
   # Gateway sits in the same failure domain as the OSDs in this single-site
   # datacore cluster, so every shard read is "same-rack" — good baseline to

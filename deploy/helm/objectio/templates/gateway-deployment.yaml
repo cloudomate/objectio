@@ -34,8 +34,6 @@ spec:
             - {{ .Values.ec.k | quote }}
             - "--ec-m"
             - {{ .Values.ec.m | quote }}
-            - "--warehouse-location"
-            - {{ .Values.gateway.warehouseLocation | quote }}
             - "--region"
             - {{ .Values.gateway.region | quote }}
             {{- if .Values.gateway.noAuth }}

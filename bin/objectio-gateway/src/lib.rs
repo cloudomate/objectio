@@ -196,10 +196,6 @@ pub struct Args {
     #[arg(long, default_value = "us-east-1")]
     pub region: String,
 
-    /// Iceberg REST Catalog warehouse location (S3 URL prefix for table data)
-    #[arg(long, default_value = "s3://objectio-warehouse")]
-    pub warehouse_location: String,
-
     /// Public URL the gateway is reachable at (e.g. https://s3.example.com).
     /// Consumed by three features:
     ///   • Iceberg vended credentials — included as the `s3.endpoint` in
@@ -477,7 +473,6 @@ pub async fn run(
     let iceberg_router = {
         let router = objectio_iceberg::router(
             meta_client.clone(),
-            args.warehouse_location.clone(),
             PolicyEvaluator::new(),
             admin_principals,
             Some(sts_provider),

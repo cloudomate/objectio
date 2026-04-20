@@ -563,12 +563,11 @@ async fn apply_put_sse(
 /// which can't pass SSE-C headers on every read. Hard-block SSE-C writes
 /// here rather than letting data land that's later unreadable.
 ///
-/// Heuristic: buckets auto-provisioned by the Iceberg REST Catalog start
-/// with `iceberg-`. The gateway's `--warehouse-location` flag also names
-/// a catchall warehouse bucket (default `objectio-warehouse`); honor that
-/// too.
+/// Iceberg warehouses are auto-provisioned as `iceberg-<name>` by the
+/// `iceberg_create_warehouse` path in meta — that prefix is the canonical
+/// marker for a warehouse bucket.
 fn is_warehouse_bucket(bucket: &str) -> bool {
-    bucket.starts_with("iceberg-") || bucket == "objectio-warehouse"
+    bucket.starts_with("iceberg-")
 }
 
 /// Extract user metadata from request headers (x-amz-meta-* headers)

@@ -126,7 +126,7 @@ The gateway hosts an Apache Iceberg REST Catalog API at `/iceberg/v1/*`, impleme
 - **Access control**: IAM-style policies at namespace and table level, reusing `PolicyEvaluator`/`BucketPolicy` from `objectio-auth`. Actions use `iceberg:` prefix (e.g., `iceberg:LoadTable`), resources use `arn:obio:iceberg:::` ARNs. Namespace policies stored in properties under `__policy` key; table policies in proto `policy_json` field.
 - **Policy management**: `PUT /iceberg/v1/namespaces/{ns}/policy` and `PUT /iceberg/v1/namespaces/{ns}/tables/{table}/policy` (admin only)
 - **Metrics**: `objectio_iceberg_requests_total{operation,status}` counter and `objectio_iceberg_request_duration_seconds{operation}` histogram exported at `/metrics`
-- **Gateway flag**: `--warehouse-location` sets the S3 URL prefix for table data (default: `s3://objectio-warehouse`)
+- **Warehouses**: created via `POST /_admin/warehouses {"name":"X"}` — meta auto-provisions backing bucket `iceberg-X` and records its S3 location. Every Iceberg REST request must pass `?warehouse=X`; missing/unknown → 400. There is no gateway-level fallback.
 
 ### Delta Sharing
 

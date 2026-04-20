@@ -29,7 +29,6 @@ use tonic::transport::Channel;
 #[allow(clippy::too_many_lines)]
 pub fn router(
     meta_client: MetadataServiceClient<Channel>,
-    warehouse_location: String,
     policy_evaluator: PolicyEvaluator,
     admin_principals: Vec<String>,
     sts_provider: Option<objectio_auth::sts::StsProvider>,
@@ -38,7 +37,6 @@ pub fn router(
     let catalog = IcebergCatalog::new(meta_client);
     let state = Arc::new(IcebergState {
         catalog,
-        warehouse_location,
         policy_evaluator,
         admin_principals,
         sts_provider,

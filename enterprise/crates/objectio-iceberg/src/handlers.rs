@@ -60,7 +60,6 @@ impl From<WarehousePathParam> for WarehouseParam {
 /// Shared state for Iceberg handlers — wraps the catalog.
 pub struct IcebergState {
     pub catalog: IcebergCatalog,
-    pub warehouse_location: String,
     pub policy_evaluator: PolicyEvaluator,
     /// ARN patterns that grant admin access (e.g., OIDC groups/roles).
     /// Matched against both `user_arn` and `group_arns` in `AuthResult`.
@@ -72,27 +71,38 @@ pub struct IcebergState {
     pub s3_endpoint: String,
 }
 
-/// Resolve the warehouse's S3 location. Falls back to the state default
-/// when the warehouse is unspecified, the meta lookup fails, or the
-/// warehouse isn't found in the catalog.
-async fn resolve_warehouse_location(state: &IcebergState, warehouse: &str) -> String {
+/// Resolve the warehouse's S3 location from meta. Every table operation
+/// must name an existing warehouse — we don't carry a gateway-level
+/// fallback any more, since real Iceberg clients always pass
+/// `?warehouse=X` on `/v1/config` and warehouse creation auto-provisions
+/// the backing bucket + location (see `iceberg_create_warehouse` in meta).
+///
+/// Returns:
+///   400 if the warehouse name is empty
+///   404 if meta doesn't know this warehouse
+///   503 if meta is unreachable
+async fn resolve_warehouse_location(
+    state: &IcebergState,
+    warehouse: &str,
+) -> Result<String> {
     if warehouse.is_empty() {
-        return state.warehouse_location.clone();
+        return Err(IcebergError::bad_request(
+            "warehouse query parameter is required",
+        ));
     }
     let mut client = state.catalog.meta_client();
-    let Ok(resp) = client
+    let resp = client
         .iceberg_list_warehouses(objectio_proto::metadata::IcebergListWarehousesRequest {
             tenant: String::new(),
         })
         .await
-    else {
-        return state.warehouse_location.clone();
-    };
+        .map_err(|e| IcebergError::internal(format!("meta unavailable: {e}")))?;
     resp.into_inner()
         .warehouses
-        .iter()
+        .into_iter()
         .find(|w| w.name == warehouse)
-        .map_or_else(|| state.warehouse_location.clone(), |w| w.location.clone())
+        .map(|w| w.location)
+        .ok_or_else(|| IcebergError::bad_request(format!("unknown warehouse '{warehouse}'")))
 }
 
 /// Load the catalog-level default policy (from `__catalog` namespace).
@@ -238,20 +248,18 @@ async fn check_table_policy(
 pub async fn get_config(
     State(state): State<Arc<IcebergState>>,
     Query(wh): Query<WarehouseParam>,
-) -> impl IntoResponse {
-    let warehouse_loc = resolve_warehouse_location(&state, &wh.warehouse).await;
+) -> Result<Json<CatalogConfig>> {
+    let warehouse_loc = resolve_warehouse_location(&state, &wh.warehouse).await?;
 
     let mut overrides = HashMap::new();
     // Set prefix so PyIceberg prepends warehouse name to all URL paths
-    if !wh.warehouse.is_empty() {
-        overrides.insert("prefix".to_string(), format!("ws/{}", wh.warehouse));
-    }
+    overrides.insert("prefix".to_string(), format!("ws/{}", wh.warehouse));
 
     let config = CatalogConfig {
         defaults: HashMap::from([("warehouse".to_string(), warehouse_loc)]),
         overrides,
     };
-    Json(config)
+    Ok(Json(config))
 }
 
 // ---- Namespace handlers ----
@@ -530,7 +538,7 @@ pub async fn create_table(
     // Build initial table metadata (Iceberg v2 format)
     let table_uuid = uuid::Uuid::new_v4().to_string();
 
-    let wh_location = resolve_warehouse_location(&state, &wh.warehouse).await;
+    let wh_location = resolve_warehouse_location(&state, &wh.warehouse).await?;
 
     let location = req.location.unwrap_or_else(|| {
         let ns_path = levels.join("/");
