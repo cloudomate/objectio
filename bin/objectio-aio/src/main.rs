@@ -20,7 +20,7 @@
 //!   - replication = 1 (no redundancy)
 //!   - tempdir data (wiped on exit) unless --data is passed
 
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -40,6 +40,13 @@ struct Args {
     /// endpoint. The only port the caller needs to know about.
     #[arg(long, default_value_t = 9000)]
     port: u16,
+
+    /// Interface the S3 endpoint binds to. Defaults to `0.0.0.0`
+    /// so the cluster is reachable from other hosts on the LAN —
+    /// pass `127.0.0.1` to restrict to loopback (useful for CI
+    /// runners or shared dev boxes).
+    #[arg(long, default_value = "0.0.0.0")]
+    listen_addr: String,
 
     /// Root data directory. Meta + each OSD get subdirs. Empty =
     /// tempdir (wiped on exit).
@@ -70,8 +77,8 @@ fn ephemeral_port() -> Result<u16> {
     Ok(port)
 }
 
-fn port_free(port: u16) -> bool {
-    StdTcpListener::bind(("0.0.0.0", port)).is_ok()
+fn port_free(addr: &str, port: u16) -> bool {
+    StdTcpListener::bind((addr, port)).is_ok()
 }
 
 /// Listen for Ctrl-C on the task that owns main, then broadcast
@@ -176,19 +183,24 @@ async fn main() -> Result<()> {
     };
     std::fs::create_dir_all(&data_root)?;
 
-    // Gateway port — the one user-facing knob.
-    let gateway_port = if port_free(args.port) {
+    // Gateway port — the one user-facing knob. Check availability
+    // on the requested bind address (not just 0.0.0.0), so e.g.
+    // --listen-addr 127.0.0.1 --port 9000 doesn't fight with another
+    // process that bound 0.0.0.0:9000 (which would block loopback).
+    let gateway_port = if port_free(&args.listen_addr, args.port) {
         args.port
     } else if args.strict_port {
         return Err(anyhow!(
-            "port {} in use and --strict-port set",
+            "{}:{} in use and --strict-port set",
+            args.listen_addr,
             args.port
         ));
     } else {
         let p = ephemeral_port()?;
         warn!(
-            "port {} in use — S3 API falling back to ephemeral port {p}. \
+            "{}:{} in use — S3 API falling back to ephemeral port {p}. \
              Pass --strict-port to fail instead.",
+            args.listen_addr,
             args.port
         );
         p
@@ -262,11 +274,20 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------
     // Gateway.
     // ------------------------------------------------------------
+    // Gateway binds on the caller's requested interface. external-endpoint
+    // (used for OIDC callback + Iceberg vended creds + Delta Sharing
+    // presign) stays as `localhost` when loopback-only; otherwise falls
+    // back to the bind address for LAN-reachable mode.
+    let external_host = if args.listen_addr == "127.0.0.1" || args.listen_addr == "localhost" {
+        "localhost".to_string()
+    } else {
+        args.listen_addr.clone()
+    };
     let gw_args = <objectio_gateway::Args as clap::Parser>::parse_from([
         "objectio-gateway",
-        "--listen", &format!("0.0.0.0:{gateway_port}"),
+        "--listen", &format!("{}:{}", args.listen_addr, gateway_port),
         "--meta-endpoint", &format!("http://127.0.0.1:{meta_grpc}"),
-        "--external-endpoint", &format!("http://localhost:{gateway_port}"),
+        "--external-endpoint", &format!("http://{external_host}:{gateway_port}"),
         "--no-auth",
         "--log-level", &args.log_level,
     ]);
@@ -276,12 +297,28 @@ async fn main() -> Result<()> {
     };
     wait_listening(gateway_port, "gateway", 20).await?;
 
-    // Banner.
-    let addr: SocketAddr = format!("127.0.0.1:{gateway_port}").parse()?;
+    // Banner — show the address the caller can actually reach us at.
+    let display_host = if args.listen_addr == "0.0.0.0" {
+        // Bound to all interfaces: show localhost for the copy-paste
+        // curl/aws hint, but also tell the user LAN access is on.
+        "localhost".to_string()
+    } else {
+        args.listen_addr.clone()
+    };
     eprintln!();
     eprintln!("━━━ ObjectIO ready ━━━");
-    eprintln!("  S3 / Iceberg / Delta Sharing : http://{addr}");
-    eprintln!("  Console                       : http://{addr}/_console/");
+    eprintln!(
+        "  S3 / Iceberg / Delta Sharing : http://{display_host}:{gateway_port}"
+    );
+    eprintln!(
+        "  Console                       : http://{display_host}:{gateway_port}/_console/"
+    );
+    if args.listen_addr == "0.0.0.0" {
+        eprintln!(
+            "  LAN bind                      : 0.0.0.0 — reachable from \
+             other hosts on the network"
+        );
+    }
     eprintln!("  Data directory                : {}", data_root.display());
     eprintln!(
         "  Internals (loopback only)     : meta=:{meta_grpc} osd={osd_ports:?} \
@@ -289,7 +326,7 @@ async fn main() -> Result<()> {
     );
     eprintln!();
     eprintln!(
-        "  aws --endpoint-url http://localhost:{gateway_port} --no-sign-request \
+        "  aws --endpoint-url http://{display_host}:{gateway_port} --no-sign-request \
          s3 mb s3://test"
     );
     eprintln!();
