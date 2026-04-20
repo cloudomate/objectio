@@ -264,8 +264,16 @@ async fn main() -> Result<()> {
             let path = d.path.display().to_string();
             let is_explicit = explicit_disks.iter().any(|p| p == &path);
             match &d.state {
-                discovery::DiskState::Claimed { .. } => {
-                    info!("discovery: claiming {path} ({} bytes)", d.size_bytes);
+                discovery::DiskState::Claimed {
+                    cluster_uuid,
+                    node_id,
+                } => {
+                    info!(
+                        "discovery: claiming {path} ({} bytes, cluster={}, node_id={})",
+                        d.size_bytes,
+                        cluster_uuid,
+                        hex::encode(node_id)
+                    );
                     claim.push(path);
                 }
                 discovery::DiskState::Blank => {

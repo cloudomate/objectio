@@ -1266,52 +1266,6 @@ impl MetaService {
             .collect()
     }
 
-    /// CRUSH's canonical top-pick for `(object_id, position)`, no
-    /// exclusion applied. Used by the **rebalancer** to answer the
-    /// single question that matters: *is the current owner the one
-    /// CRUSH would pick today?* Comparing current == ideal is the
-    /// drift check; if they differ, `ideal` is the migration target.
-    ///
-    /// Unlike `pick_migration_target`, we don't filter by "anything
-    /// but X" — if we did, every successful rebalance would look like
-    /// drift on the next sweep (current became the previous target,
-    /// `exclude=current` would then pick a different node, and so on).
-    ///
-    /// Returns `None` if CRUSH can't place this position at all
-    /// (cluster too small) or its pick isn't currently registered.
-    pub fn crush_ideal_for_position(
-        &self,
-        object_id: &[u8; 16],
-        position: u32,
-    ) -> Option<[u8; 16]> {
-        use objectio_placement::crush2::PlacementTemplate;
-
-        let template =
-            PlacementTemplate::mds(self.default_ec_k as u8, self.default_ec_m as u8);
-
-        let crush = self.crush.read();
-        let obj_id =
-            objectio_common::ObjectId::from_uuid(uuid::Uuid::from_bytes(*object_id));
-        let placements = crush.select_placement(&obj_id, &template);
-        drop(crush);
-
-        let registered: std::collections::HashSet<[u8; 16]> = self
-            .osd_nodes
-            .read()
-            .iter()
-            .map(|n| n.node_id)
-            .collect();
-
-        for p in &placements {
-            if p.position as u32 == position {
-                let cand = *p.node_id.as_bytes();
-                if registered.contains(&cand) {
-                    return Some(cand);
-                }
-            }
-        }
-        None
-    }
 
     /// Compute a CRUSH replacement for a single shard at `position` in
     /// the placement set for `object_id`, excluding the `exclude` node

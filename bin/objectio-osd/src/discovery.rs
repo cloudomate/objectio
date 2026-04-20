@@ -29,14 +29,6 @@ use objectio_storage::layout::{MAGIC, SUPERBLOCK_SIZE, Superblock};
 use objectio_storage::raw_io::{AlignedBuffer, RawFile};
 use tracing::{debug, info, warn};
 
-/// Minimum disk size we consider for OSD use. Prevents accidentally
-/// claiming a 512 MB EFI System Partition or a recovery image.
-///
-/// Overridable via `--disk-min-size`. Default is 1 GiB to match the
-/// storage layout's `MIN_DISK_SIZE` — anything below is rejected by
-/// `Superblock::new` anyway, so this cuts noise early.
-pub const DEFAULT_MIN_SIZE: u64 = 1024 * 1024 * 1024;
-
 /// What discovery found for a single candidate path.
 #[derive(Clone, Debug)]
 pub enum DiskState {
