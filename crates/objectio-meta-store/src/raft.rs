@@ -16,7 +16,7 @@
 //! Only [`MetaCommand::SetConfig`] and [`MetaCommand::DeleteConfig`] go
 //! through consensus in the first phase. The rest of the 40+ mutation
 //! handlers still write directly to redb and are not quorum-safe yet;
-//! see the migration plan in `docs/FEATURES.md`.
+//! see the migration plan in `FEATURES.md` in the sibling `objectio-docs` repo.
 
 use openraft::{BasicNode, declare_raft_types};
 use serde::{Deserialize, Serialize};

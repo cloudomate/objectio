@@ -46,5 +46,5 @@ admin endpoints return a structured 403 with
 `"error": "EnterpriseLicenseRequired"`. Install a license through the
 console or `PUT /_admin/license` to unlock them.
 
-The licensing model and code split are documented in the root
-[`docs/FEATURES.md`](../docs/FEATURES.md#10-licensing--tiering).
+The licensing model and code split are documented in `FEATURES.md`
+(section 10, Licensing & Tiering) in the sibling `objectio-docs` repo.

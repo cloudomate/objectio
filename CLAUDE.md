@@ -224,7 +224,7 @@ npm run lint     # eslint
 
 ## Documentation
 
-Design docs and user-facing reference live in `docs/` (`DESIGN.md`, `FEATURES.md`, `architecture/`, `api/`, `deployment/`, `operations/`, `storage/`, `getting-started.md`). Check these before inventing explanations — design rationale for erasure coding, placement, and storage layout is already written down. The `examples/` directory has pyiceberg client scripts and sample config files.
+Design docs and user-facing reference live in a separate sibling repo `../objectio-docs/` (`DESIGN.md`, `FEATURES.md`, `architecture/`, `api/`, `deployment/`, `operations/`, `storage/`, `getting-started.md`). Clone it next to this repo. Check these before inventing explanations — design rationale for erasure coding, placement, and storage layout is already written down. The `examples/` directory (in this repo) has pyiceberg client scripts and sample config files.
 
 ## Ports
 

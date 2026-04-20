@@ -450,13 +450,15 @@ Key metric families: `objectio_s3_requests_total`, `objectio_s3_request_duration
 
 ## Documentation
 
-- [Architecture](docs/architecture/README.md) — system design, data flow, CRUSH placement
-- [Block Storage](docs/architecture/block-storage.md) — volumes, snapshots, QoS, protocols
-- [Data Protection](docs/architecture/data-protection.md) — erasure coding, LRC, replication
-- [Storage Engine](docs/storage/README.md) — raw disk I/O, WAL, caching
-- [Deployment Guide](docs/deployment/README.md) — Docker, bare-metal, topologies
-- [API Reference](docs/api/README.md) — S3 operations, Iceberg REST Catalog, authentication
-- [Operations](docs/operations/README.md) — monitoring, failure recovery
+Design docs and user-facing reference live in a separate sibling repo,
+[`objectio-docs`](../objectio-docs/) — clone it next to this repo:
+
+- `DESIGN.md`, `FEATURES.md`, `TOPOLOGY-ROADMAP.md` — design rationale + feature matrix
+- `architecture/` — system design, data flow, CRUSH placement, block storage, data protection
+- `storage/` — raw disk I/O, WAL, caching
+- `deployment/` — Docker, bare-metal, topologies
+- `api/` — S3 operations, Iceberg REST Catalog, authentication
+- `operations/` — monitoring, failure recovery
 
 ## Development
 
@@ -499,14 +501,15 @@ Enterprise features (Iceberg catalog, Delta Sharing, SSE-KMS external
 backends, multi-tenancy, OIDC registration, LRC erasure coding) are also
 gated at runtime by an Ed25519-signed license file. Without a valid
 Enterprise license installed, those endpoints return `403
-EnterpriseLicenseRequired`. See
-[docs/FEATURES.md](docs/FEATURES.md#10-licensing--tiering) for the full
-tier matrix and gate details.
+EnterpriseLicenseRequired`. See `FEATURES.md` in the
+[`objectio-docs`](../objectio-docs/) sibling repo (section 10,
+Licensing & Tiering) for the full tier matrix and gate details.
 
 ## Roadmap
 
-See [docs/TOPOLOGY-ROADMAP.md](docs/TOPOLOGY-ROADMAP.md) for the
-multi-phase topology and maintenance-ergonomics roadmap:
+See `TOPOLOGY-ROADMAP.md` in the [`objectio-docs`](../objectio-docs/)
+sibling repo for the multi-phase topology and maintenance-ergonomics
+roadmap:
 
 - **Phase 1 ✓** — 5-level failure domains, hard-enforced placement, console topology page
 - **Phase 2 ✓** — locality-aware EC reads, `/_admin/cluster-info`, cross-zone metrics

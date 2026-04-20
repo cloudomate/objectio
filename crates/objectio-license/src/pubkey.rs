@@ -1,7 +1,8 @@
 //! Baked-in Ed25519 public key used to verify license signatures.
 //!
 //! The **private** counterpart stays strictly off-repo — see
-//! `docs/LICENSE.md` for the keygen procedure. A build-time all-zero
+//! `LICENSE.md` in the sibling `objectio-docs` repo for the keygen
+//! procedure. A build-time all-zero
 //! placeholder means "no licenses will ever verify" and every license load
 //! will fail with [`crate::LicenseError::MissingPublicKey`].
 //!

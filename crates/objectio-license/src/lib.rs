@@ -1,6 +1,6 @@
 //! `ObjectIO` license — signed tier attestation loaded by the gateway to unlock
-//! Enterprise features. See `docs/LICENSE.md` for the threat model and wire
-//! format.
+//! Enterprise features. See `LICENSE.md` in the sibling `objectio-docs`
+//! repo for the threat model and wire format.
 //!
 //! Two tiers exist: [`Tier::Community`] (default, no license) and
 //! [`Tier::Enterprise`] (requires a valid, unexpired, signature-verified
