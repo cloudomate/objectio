@@ -85,7 +85,8 @@ cleanly.
 ### Production — helm chart on Kubernetes
 
 ```sh
-helm install objectio oci://ghcr.io/cloudomate/objectio --version 0.1.0 \
+helm install objectio oci://ghcr.io/cloudomate/charts/objectio \
+  --version 0.1.0 \
   -f your-values.yaml
 ```
 
