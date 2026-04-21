@@ -62,7 +62,7 @@ pub enum LicenseError {
 ///   features (Iceberg, Delta Sharing, multi-tenancy, OIDC, external
 ///   KMS, LRC) return `403 EnterpriseLicenseRequired`.
 ///
-/// - **Free** — signed license, no cost. All Enterprise features
+/// - **Developer** — signed license, no cost. All Enterprise features
 ///   unlocked, but capped at `max_nodes = 1` (see note: "nodes" is
 ///   enforced as unique *hosts*, not OSDs — a single machine with
 ///   many disks counts as one). For evaluation, home labs, appliance
@@ -75,7 +75,7 @@ pub enum LicenseError {
 pub enum Tier {
     #[default]
     Community,
-    Free,
+    Developer,
     Enterprise,
 }
 
@@ -84,16 +84,16 @@ impl Tier {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Community => "community",
-            Self::Free => "free",
+            Self::Developer => "developer",
             Self::Enterprise => "enterprise",
         }
     }
 
     /// True iff the tier is eligible to unlock Enterprise features
-    /// (Free and Enterprise both do; Community does not).
+    /// (Developer and Enterprise both do; Community does not).
     #[must_use]
     pub const fn unlocks_features(self) -> bool {
-        matches!(self, Self::Free | Self::Enterprise)
+        matches!(self, Self::Developer | Self::Enterprise)
     }
 }
 
@@ -160,8 +160,8 @@ pub struct LicensePayload {
     /// Cap on the number of distinct **hosts** (physical/virtual machines)
     /// the cluster may run OSDs on. `0` means no cap.
     ///
-    /// One machine with many disks counts as one host — the Free tier
-    /// issues licenses with `max_nodes: 1` which permits a single machine
+    /// One machine with many disks counts as one host — the Developer
+    /// tier issues licenses with `max_nodes: 1` which permits a single machine
     /// to run any number of OSDs (one per disk) but refuses a second
     /// machine. Counted by unique `failure_domain.host` values at
     /// `register_osd`; OSDs that never declared a host count as their
@@ -277,9 +277,9 @@ impl License {
         })
     }
 
-    /// True iff the tier can unlock the named feature. Free and Enterprise
-    /// both qualify (Free is just a capped Enterprise). Community never
-    /// does.
+    /// True iff the tier can unlock the named feature. Developer and
+    /// Enterprise both qualify (Developer is just a capped Enterprise).
+    /// Community never does.
     ///
     /// An empty `features` list on the payload means "all features" — so
     /// both a stock Enterprise license and a stock Free license light up
@@ -303,8 +303,8 @@ impl License {
     }
 
     #[must_use]
-    pub const fn is_free(&self) -> bool {
-        matches!(self.tier, Tier::Free)
+    pub const fn is_developer(&self) -> bool {
+        matches!(self.tier, Tier::Developer)
     }
 }
 

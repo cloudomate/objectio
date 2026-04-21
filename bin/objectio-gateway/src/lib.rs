@@ -631,8 +631,8 @@ pub async fn run(
             "License: Enterprise — licensee='{}' expires_at={} max_nodes={}",
             license.licensee, license.expires_at, license.max_nodes
         ),
-        objectio_license::Tier::Free => info!(
-            "License: Free — licensee='{}' expires_at={} max_nodes={} (single-host)",
+        objectio_license::Tier::Developer => info!(
+            "License: Developer — licensee='{}' expires_at={} max_nodes={} (single-host)",
             license.licensee, license.expires_at, license.max_nodes
         ),
         objectio_license::Tier::Community => {

@@ -58,10 +58,10 @@ pub fn enterprise_required(feature: Feature) -> Response {
     let body = serde_json::json!({
         "error": "EnterpriseLicenseRequired",
         "feature": feature.as_str(),
-        "tier_required": "free-or-enterprise",
+        "tier_required": "developer-or-enterprise",
         "message": format!(
-            "The '{}' feature requires a Free or Enterprise license. \
-             Get a Free license (single-host cap, no cost) or an \
+            "The '{}' feature requires a Developer or Enterprise license. \
+             Get a Developer license (single-host cap, no cost) or an \
              Enterprise license (commercial, multi-host), then \
              install via PUT /_admin/license or set $OBJECTIO_LICENSE.",
             feature.as_str()

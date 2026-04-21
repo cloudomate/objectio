@@ -3575,8 +3575,8 @@ impl MetadataService for MetaService {
                 let snapshot = self.osd_nodes.read();
 
                 // `max_nodes` counts unique *hosts*, not OSDs. One
-                // machine with 12 disks is one host (Free tier allows
-                // it). An OSD that never declared `failure_domain.host`
+                // machine with 12 disks is one host (Developer tier
+                // allows it). An OSD that never declared `failure_domain.host`
                 // counts as its own distinct host so several of them
                 // don't collapse into the empty-string bucket.
                 let host_key_of = |n: &objectio_meta_store::types::OsdNode| -> String {
