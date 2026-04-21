@@ -143,16 +143,16 @@ jobs:
             features: ""
             ext: ""
             archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-13            # Intel
-            features: ""
-            ext: ""
-            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14            # Apple Silicon
             features: ""
             ext: ""
             archive: tar.gz
+          # x86_64-apple-darwin (Intel Mac) is intentionally not in the
+          # matrix — Intel Mac runners are queue-bound on GitHub and
+          # nobody deploying ObjectIO is running on a 2020-era Intel
+          # Mac. If someone needs one, they can build from source.
+          #
           # Windows is intentionally not in the matrix: the raw-disk
           # I/O engine (crates/objectio-storage, used by osd / meta /
           # block-gateway / aio) depends on unix-only APIs — ioctl
