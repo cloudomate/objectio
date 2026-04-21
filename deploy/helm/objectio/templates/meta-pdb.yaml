@@ -1,0 +1,17 @@
+{{- if and .Values.meta.podDisruptionBudget.enabled (gt (int .Values.meta.replicas) 1) }}
+# Only render the PDB when meta is actually a multi-voter cluster —
+# single-pod dev mode doesn't need (or survive) eviction protection.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "objectio.meta.fullname" . }}
+  labels:
+    {{- include "objectio.labels" . | nindent 4 }}
+    app.kubernetes.io/component: meta
+spec:
+  maxUnavailable: {{ .Values.meta.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "objectio.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: meta
+{{- end }}

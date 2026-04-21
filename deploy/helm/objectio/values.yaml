@@ -6,7 +6,25 @@ gateway:
   image:
     repository: objectio-gateway
     tag: latest
-  replicas: 1
+  # Gateway is stateless — two replicas is the HA floor. Production
+  # should sit at ≥ 3; dev/kind can drop to 1 via --set gateway.replicas=1.
+  replicas: 2
+  # Autoscale the gateway tier based on CPU. Opt-in because the default
+  # install shouldn't create K8s objects the cluster may not support.
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    # Leave memory target at 0 to disable — ObjectIO gateways are
+    # CPU-bound (SigV4 + EC encode), not memory-bound.
+    targetMemoryUtilizationPercentage: 0
+  # Keep at least one gateway up during voluntary disruptions (node
+  # drains, rolling upgrades). Rejects pod evictions that would leave
+  # zero ready replicas.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   service:
     type: ClusterIP
     port: 9000
@@ -89,11 +107,16 @@ meta:
   image:
     repository: objectio-meta
     tag: latest
-  # Meta runs a Raft cluster. Single-pod = single-voter cluster
-  # (no election drama, same operational behavior as pre-Raft meta).
-  # 3+ pods = real quorum; survives (N-1)/2 pod losses.
-  # Post-install Job bootstraps the cluster automatically.
-  replicas: 1
+  # Raft cluster. `replicas: 3` survives a single pod loss (the
+  # standard quorum floor). `replicas: 1` is a single-voter cluster
+  # for dev/kind — no election drama but zero fault tolerance; set
+  # via --set meta.replicas=1. Post-install Job bootstraps automatically.
+  replicas: 3
+  podDisruptionBudget:
+    enabled: true
+    # Keep a majority (2/3) up during voluntary disruptions so Raft
+    # retains quorum. Always 1 less than the voter count.
+    maxUnavailable: 1
   service:
     port: 9100          # gRPC (MetadataService + RaftRpc)
     metricsPort: 9101   # Prometheus
