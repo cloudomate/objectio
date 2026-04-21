@@ -1,0 +1,312 @@
+# Manual release pipeline.
+#
+# How to run:
+#   GitHub UI → Actions → "Release" → "Run workflow"
+#     - version:    semver, no leading 'v' (e.g. 0.1.1)
+#     - prerelease: tick if this is an RC / beta
+#
+# What it does:
+#   1. Validates the version, bumps [workspace.package].version in
+#      Cargo.toml on main, commits "chore: release v<version>",
+#      creates tag v<version>, pushes both.
+#   2. Matrix-builds binaries for:
+#        linux-x86_64 (with ISA-L)
+#        linux-aarch64
+#        macos-x86_64
+#        macos-aarch64
+#        windows-x86_64
+#      Tarball / zip each, with LICENSE + NOTICE + README.
+#   3. Builds the universal multi-arch image (Dockerfile target `all`,
+#      linux/amd64 + linux/arm64) and pushes to
+#      ghcr.io/<owner>/objectio:v<version> and :latest.
+#   4. Creates a GitHub Release with every tarball/zip + a
+#      SHA256SUMS.txt, using auto-generated release notes.
+#
+# Required repo settings:
+#   - "Actions → General → Workflow permissions" = "Read and write"
+#     (needed to push the version-bump commit + tag + create release).
+#   - Package visibility on GHCR: the image is created under the repo
+#     owner; the first push creates the package, then configure it
+#     as public under Packages → objectio → Package settings.
+#
+# Can only be dispatched from the main branch.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (semver, no leading 'v'; e.g. 0.1.1)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.event.inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # push commit, push tag, create release
+  packages: write   # push image to ghcr.io
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/objectio
+  BINARIES: "objectio-aio objectio-gateway objectio-meta objectio-osd objectio-block-gateway objectio-cli objectio-install"
+
+jobs:
+  # ------------------------------------------------------------
+  # 1. Tag the release from main
+  # ------------------------------------------------------------
+  prepare:
+    name: Bump version and tag
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Validate version
+        run: |
+          VER="${{ inputs.version }}"
+          if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VER' is not valid semver (expected X.Y.Z or X.Y.Z-prerelease)"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail if tag already exists
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::tag v${{ inputs.version }} already exists"
+            exit 1
+          fi
+
+      - name: Install Rust (for cargo update)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump workspace version
+        run: |
+          # [workspace.package].version is the single source of truth
+          # for every crate (all crates use version.workspace = true).
+          sed -i -E \
+            '/^\[workspace\.package\]/,/^\[/{s/^version = "[^"]*"$/version = "${{ inputs.version }}"/}' \
+            Cargo.toml
+          grep -A1 '^\[workspace.package\]' Cargo.toml | head -5
+          cargo update --workspace
+
+      - name: Commit, tag, push
+        id: tag
+        run: |
+          git config user.name  "objectio-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: release v${{ inputs.version }}"
+          git tag -a "v${{ inputs.version }}" -m "v${{ inputs.version }}"
+          git push origin main
+          git push origin "v${{ inputs.version }}"
+          echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------
+  # 2. Build per-platform binaries from the tag
+  # ------------------------------------------------------------
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            features: "isal"
+            ext: ""
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm   # GitHub-hosted arm64 runner
+            features: ""
+            ext: ""
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13            # Intel
+            features: ""
+            ext: ""
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-14            # Apple Silicon
+            features: ""
+            ext: ""
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: ""
+            ext: ".exe"
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install ISA-L build deps (linux-x86_64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm autoconf automake libtool libclang-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          BINS=""
+          for b in ${BINARIES}; do BINS="${BINS} --bin ${b}"; done
+          FEAT=""
+          if [ -n "${{ matrix.features }}" ]; then FEAT="--features ${{ matrix.features }}"; fi
+          cargo build --release --target ${{ matrix.target }} ${BINS} ${FEAT}
+
+      - name: Package
+        shell: bash
+        run: |
+          VER="${{ inputs.version }}"
+          NAME="objectio-v${VER}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          for b in ${BINARIES}; do
+            cp "target/${{ matrix.target }}/release/${b}${{ matrix.ext }}" "dist/${NAME}/"
+          done
+          cp LICENSE NOTICE README.md "dist/${NAME}/"
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a -tzip "${NAME}.zip" "${NAME}" >/dev/null
+          else
+            tar czf "${NAME}.tar.gz" "${NAME}"
+          fi
+          ls -lh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # 3. Build the universal multi-arch docker image
+  # ------------------------------------------------------------
+  build-image:
+    name: Build and push universal image
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: all                   # the Dockerfile stage used by helm
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ needs.prepare.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ------------------------------------------------------------
+  # 4. Create the GitHub release
+  # ------------------------------------------------------------
+  release:
+    name: Create GitHub release
+    needs: [prepare, build-binaries, build-image]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd dist
+          shasum -a 256 *.tar.gz *.zip 2>/dev/null | tee SHA256SUMS.txt
+          ls -lh
+
+      - name: Prepend image info to release notes
+        run: |
+          cat > /tmp/header.md <<EOF
+          ### Docker image
+
+          \`\`\`
+          docker pull ${{ env.IMAGE }}:${{ needs.prepare.outputs.tag }}
+          \`\`\`
+
+          Multi-arch: \`linux/amd64\`, \`linux/arm64\`.
+          Same image powers every Helm-deployed service (each container
+          overrides the entrypoint to pick one of gateway / meta / osd /
+          block-gateway / cli). See the \`all\` target in \`Dockerfile\`.
+
+          ### Binaries
+
+          Pre-built for:
+          \`x86_64-unknown-linux-gnu\`, \`aarch64-unknown-linux-gnu\`,
+          \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`,
+          \`x86_64-pc-windows-msvc\`.
+
+          Verify: \`shasum -a 256 -c SHA256SUMS.txt\`
+
+          ---
+          EOF
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          body_path: /tmp/header.md
+          append_body: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
