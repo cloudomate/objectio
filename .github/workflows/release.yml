@@ -153,11 +153,14 @@ jobs:
             features: ""
             ext: ""
             archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            features: ""
-            ext: ".exe"
-            archive: zip
+          # Windows is intentionally not in the matrix: the raw-disk
+          # I/O engine (crates/objectio-storage, used by osd / meta /
+          # block-gateway / aio) depends on unix-only APIs — ioctl
+          # BLKGETSIZE64, O_DIRECT, std::os::unix::fs::FileTypeExt.
+          # Windows support would be a real port, not a flag-gate, and
+          # no deployment story targets it. Revisit if a
+          # windows-capable subset (cli-only release?) becomes
+          # interesting.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
