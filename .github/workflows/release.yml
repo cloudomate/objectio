@@ -239,18 +239,28 @@ jobs:
           if-no-files-found: error
 
   # ------------------------------------------------------------
-  # 3. Build the universal multi-arch docker image
+  # 3a. Build the per-arch image on its native runner.
+  #     QEMU-emulated Rust compilation for arm64 on an amd64 runner
+  #     took 25+ min; native arm64 on ubuntu-24.04-arm drops it to
+  #     ~7 min, matching the amd64 build.
   # ------------------------------------------------------------
-  build-image:
-    name: Build and push universal image
+  build-image-arch:
+    name: Build ${{ matrix.arch }} image
     needs: prepare
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to GHCR
@@ -260,26 +270,74 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: all                   # the Dockerfile stage used by helm
-          platforms: linux/amd64,linux/arm64
+          target: all
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ needs.prepare.outputs.tag }}
-            ${{ env.IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Push by digest only — no tag here. The manifest job below
+          # stitches the per-arch digests into the version + latest tags.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
           provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ------------------------------------------------------------
+  # 3b. Stitch the two per-arch digests into a multi-arch manifest,
+  #     published as IMAGE:<tag> and IMAGE:latest.
+  # ------------------------------------------------------------
+  build-image-manifest:
+    name: Publish multi-arch manifest
+    needs: [prepare, build-image-arch]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: image-digest-*
+          merge-multiple: true
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          docker buildx imagetools create \
+            -t "${{ env.IMAGE }}:${TAG}" \
+            -t "${{ env.IMAGE }}:latest" \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+          docker buildx imagetools inspect "${{ env.IMAGE }}:${TAG}"
 
   # ------------------------------------------------------------
   # 4. Create the GitHub release
   # ------------------------------------------------------------
   release:
     name: Create GitHub release
-    needs: [prepare, build-binaries, build-image]
+    needs: [prepare, build-binaries, build-image-manifest]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
