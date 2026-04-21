@@ -109,9 +109,17 @@ jobs:
           git config user.name  "objectio-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
-          git commit -m "chore: release v${{ inputs.version }}"
+          # Tolerate the "version already matches" case — happens when we
+          # roll back a failed release and re-dispatch the same version.
+          # The tag still needs to go on the current HEAD; we just skip
+          # the empty bump commit.
+          if git diff --cached --quiet; then
+            echo "workspace version already at ${{ inputs.version }} — skipping bump commit"
+          else
+            git commit -m "chore: release v${{ inputs.version }}"
+            git push origin main
+          fi
           git tag -a "v${{ inputs.version }}" -m "v${{ inputs.version }}"
-          git push origin main
           git push origin "v${{ inputs.version }}"
           echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
 
