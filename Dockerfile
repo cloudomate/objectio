@@ -22,6 +22,28 @@
 ARG RUST_VERSION=1.93
 
 # =============================================================================
+# Stage 0: Console builder (React SPA → static /_console assets)
+# =============================================================================
+# Declared first because the Rust builder stage (and the final gateway / all
+# images) COPY --from this one; Docker requires the source stage to appear
+# earlier in the file.
+#
+# console/dist is .gitignored, so a fresh checkout (CI runner, `docker build`
+# on a clean clone) has nothing to COPY from the host — we build it here so
+# the image is self-contained. Local rebuilds still cache on the
+# package-lock.json layer.
+FROM node:22-bookworm-slim AS console-builder
+
+WORKDIR /build/console
+
+COPY console/package.json console/package-lock.json ./
+RUN npm ci --no-audit --no-fund --prefer-offline
+
+COPY console/ ./
+RUN npm run build
+# Output: /build/console/dist/
+
+# =============================================================================
 # Stage 1: Builder base with Rust and build dependencies
 # =============================================================================
 FROM rust:${RUST_VERSION}-bookworm AS builder-base
@@ -79,6 +101,12 @@ RUN cargo fetch
 # Stage 3: Build all binaries
 # =============================================================================
 FROM deps AS builder
+
+# objectio-aio embeds the console SPA at compile time via
+# `include_dir!("$CARGO_MANIFEST_DIR/../../console/dist")`, so the
+# built console must exist on disk before cargo runs. Pull it from the
+# console-builder stage.
+COPY --from=console-builder /build/console/dist /build/console/dist
 
 # Build arguments - TARGETARCH is provided by Docker buildx
 ARG TARGETARCH
@@ -160,9 +188,9 @@ LABEL org.opencontainers.image.architecture="${TARGETARCH}"
 
 COPY --from=builder /build/target/release/objectio-gateway /usr/local/bin/
 
-# Console web UI — the gateway serves it as a static SPA at /_console.
-# Must be pre-built (`cd console && npm run build`) before the docker build.
-COPY console/dist /usr/share/objectio/console
+# Console web UI — gateway serves it as a static SPA at /_console.
+# Built in the console-builder stage above, not from the host.
+COPY --from=console-builder /build/console/dist /usr/share/objectio/console
 
 USER objectio
 EXPOSE 9000
@@ -290,8 +318,8 @@ COPY --from=builder /build/target/release/objectio-cli /usr/local/bin/
 COPY --from=builder /build/target/release/objectio-install /usr/local/bin/
 COPY --from=builder /build/target/release/objectio-block-gateway /usr/local/bin/
 
-# Console web UI (pre-built)
-COPY console/dist /usr/share/objectio/console
+# Console web UI (built in the console-builder stage)
+COPY --from=console-builder /build/console/dist /usr/share/objectio/console
 
 USER objectio
 
