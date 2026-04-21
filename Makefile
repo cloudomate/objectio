@@ -4,15 +4,14 @@
 # Usage:
 #   make build          # Build all binaries locally
 #   make docker         # Build all Docker images
-#   make cluster-up     # Start local cluster
-#   make cluster-down   # Stop local cluster
+#   make kind-up        # Spin up a local kind cluster (the dev path)
+#   make kind-down      # Tear it down
 
 .PHONY: all build build-release test lint fmt clean \
         docker docker-gateway docker-meta docker-osd docker-cli docker-all \
         docker-multiarch docker-multiarch-gateway docker-multiarch-meta \
         docker-multiarch-osd docker-multiarch-cli docker-multiarch-all \
         buildx-setup \
-        cluster-up cluster-down cluster-logs \
         kind-up kind-down kind-load kind-logs kind-status \
         dev push push-multiarch help
 
@@ -182,49 +181,7 @@ docker-lint:
 	docker compose run --rm lint
 
 # =============================================================================
-# Local Cluster Management
-# =============================================================================
-
-## Start local cluster (3 meta + 6 OSD + 1 gateway)
-cluster-up: docker
-	docker compose -f deploy/local-cluster/docker-compose.yml up -d
-
-## Stop local cluster
-cluster-down:
-	docker compose -f deploy/local-cluster/docker-compose.yml down
-
-## Stop cluster and remove volumes
-cluster-clean:
-	docker compose -f deploy/local-cluster/docker-compose.yml down -v
-
-## View cluster logs
-cluster-logs:
-	docker compose -f deploy/local-cluster/docker-compose.yml logs -f
-
-## View gateway logs
-cluster-logs-gateway:
-	docker compose -f deploy/local-cluster/docker-compose.yml logs -f gateway
-
-## View meta logs
-cluster-logs-meta:
-	docker compose -f deploy/local-cluster/docker-compose.yml logs -f meta1 meta2 meta3
-
-## View OSD logs
-cluster-logs-osd:
-	docker compose -f deploy/local-cluster/docker-compose.yml logs -f osd1 osd2 osd3 osd4 osd5 osd6
-
-## Check cluster status
-cluster-status:
-	docker compose -f deploy/local-cluster/docker-compose.yml ps
-
-## Run CLI in cluster network
-cluster-cli:
-	docker compose -f deploy/local-cluster/docker-compose.yml run --rm \
-		-e OBJECTIO_META_ENDPOINTS=meta1:9100,meta2:9100,meta3:9100 \
-		objectio-cli $(ARGS)
-
-# =============================================================================
-# Kind (Kubernetes in Docker) Cluster
+# Kind (Kubernetes in Docker) Cluster — the supported local-dev path
 # =============================================================================
 
 ## Create Kind cluster and deploy full ObjectIO stack (S3 + Iceberg + Delta Sharing)
@@ -308,14 +265,7 @@ help:
 	@echo "    - linux/amd64: Uses ISA-L for ~3-5x faster erasure coding"
 	@echo "    - linux/arm64: Uses pure Rust SIMD (no ISA-L)"
 	@echo ""
-	@echo "Local Docker Compose Cluster:"
-	@echo "  cluster-up     Start local cluster"
-	@echo "  cluster-down   Stop local cluster"
-	@echo "  cluster-clean  Stop cluster and remove data"
-	@echo "  cluster-logs   View all logs"
-	@echo "  cluster-status Check cluster status"
-	@echo ""
-	@echo "Kind (Kubernetes) Cluster:"
+	@echo "Kind (Kubernetes) Cluster — the supported dev path:"
 	@echo "  kind-up        Create Kind cluster + deploy full stack"
 	@echo "  kind-up-registry  Deploy from GHCR images (no build)"
 	@echo "  kind-down      Delete Kind cluster"

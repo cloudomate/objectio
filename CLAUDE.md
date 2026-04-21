@@ -39,19 +39,19 @@ These use the `docker-compose.yml` in the repo root, building from the `builder-
 
 ## Deploy & Test
 
-### Local cluster
+### Local kind cluster (the supported dev path)
 
 ```bash
-make cluster-up       # Start 3 meta + 6 OSD + 1 gateway (4+2 EC)
-make cluster-down     # Stop cluster
-make cluster-clean    # Stop + wipe all data
-make cluster-logs     # Tail all logs
-make cluster-status   # Show running services
+make kind-up              # Create a kind cluster and deploy via the helm chart
+make kind-up-registry     # Same, but pull images from GHCR instead of local build
+make kind-load            # Rebuild images and reload them into the running cluster
+make kind-down            # Tear down the cluster
 ```
 
-Compose file: `deploy/local-cluster/docker-compose.yml`
+Setup script: `deploy/kind/setup.sh`. Values overlay:
+`deploy/kind/values.yaml`.
 
-Test with AWS CLI (gateway at `http://localhost:9000`):
+Test with AWS CLI after `make kind-up` (gateway exposed via NodePort):
 
 ```bash
 aws --endpoint-url http://localhost:9000 s3 mb s3://test-bucket
@@ -60,34 +60,34 @@ aws --endpoint-url http://localhost:9000 s3 cp s3://test-bucket/hello.txt -
 curl -r 0-3 http://localhost:9000/test-bucket/hello.txt   # Range request → 206
 ```
 
+For a laptop-scale single-process smoke test without K8s, the
+`objectio-aio` binary runs meta + OSD + gateway in one tokio
+runtime; see the top-level README quickstart.
+
 ### Docker image builds
 
-The multi-stage `Dockerfile` produces per-service images via `--target`:
+The multi-stage `Dockerfile` produces one universal image (target
+`all`) plus per-service targets if you need them directly:
 
 ```bash
-docker build --target gateway -t objectio-gateway .
+docker build --target all     -t objectio .           # universal image used by helm
+docker build --target gateway -t objectio-gateway .   # per-service images (rarely needed)
 docker build --target meta    -t objectio-meta .
 docker build --target osd     -t objectio-osd .
 docker build --target cli     -t objectio-cli .
-docker build --target all     -t objectio .       # all-in-one
 ```
+
+The release workflow (`.github/workflows/release.yml`) publishes the
+`all` target as a multi-arch `ghcr.io/cloudomate/objectio:<tag>` —
+same image helm consumes.
 
 ### Deploy directory layout
 
 ```
 deploy/
-  local-cluster/          # Local dev cluster (3 meta + 6 OSD + 1 gateway, 4+2 EC)
-    docker-compose.yml
-    docker-compose.monitoring.yml
-  prod/                   # Production template (raw block devices, 7 OSDs)
-    docker-compose.yml
-  monitoring/             # Monitoring stack (prometheus + grafana)
-    docker-compose.monitoring.yml
-    prometheus/
-    grafana/
-  single-node-7disk/      # Single-node 7-disk deployment (5+2 EC)
-    docker-compose.yml
-    config/
+  helm/objectio/          # Helm chart — production + kind deployment target
+  kind/                   # kind setup script + values overlay
+  monitoring/             # Prometheus + Grafana stack (docker-compose for now)
 ```
 
 ## Architecture

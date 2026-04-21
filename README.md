@@ -58,12 +58,15 @@ objectio-aio
 Banner prints the admin AK/SK and a ready-to-paste `aws ...` command.
 Console at `http://localhost:9000/_console/`.
 
-### Docker Compose (3 meta + 6 OSD + 1 gateway, 4+2 EC)
+### Kubernetes via kind (3 meta + 6 OSD + 1 gateway, 4+2 EC)
 
 ```sh
 git clone https://github.com/cloudomate/objectio
-cd objectio && make cluster-up
+cd objectio && make kind-up
 ```
+
+The same helm chart (`deploy/helm/objectio`) backs production —
+`kind-up` just points it at a local kind cluster.
 
 ### Using it
 
