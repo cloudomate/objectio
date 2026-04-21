@@ -56,7 +56,6 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/objectio
-  BINARIES: "objectio-aio objectio-gateway objectio-meta objectio-osd objectio-block-gateway objectio-cli objectio-install"
 
 jobs:
   # ------------------------------------------------------------
@@ -124,43 +123,44 @@ jobs:
           echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------
-  # 2. Build per-platform binaries from the tag
+  # 2. Build the objectio-aio binary per platform.
+  #
+  # Rationale: the release carries *only* objectio-aio as a download
+  # artifact. Every other binary (gateway, meta, osd, block-gateway,
+  # cli, install) ships inside the single container image produced
+  # below and consumed by helm — having a separate binary tarball
+  # for them adds churn without a deployment story.
+  #
+  # Artifact naming follows Docker platform conventions
+  # (linux-amd64, linux-arm64, darwin-arm64) rather than Rust
+  # target triples — the "unknown" vendor field in e.g.
+  # aarch64-unknown-linux-gnu is correct but confusing.
+  #
+  # Windows is not built: objectio-aio transitively depends on
+  # crates/objectio-storage (raw-disk I/O engine) which uses
+  # unix-only APIs — ioctl BLKGETSIZE64, O_DIRECT,
+  # std::os::unix::fs::FileTypeExt. A windows port would be real
+  # work, not a cfg-gate.
   # ------------------------------------------------------------
   build-binaries:
-    name: Build ${{ matrix.target }}
+    name: Build aio ${{ matrix.platform }}
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - platform: linux-amd64
+            target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             features: "isal"
-            ext: ""
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm   # GitHub-hosted arm64 runner
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
             features: ""
-            ext: ""
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-14            # Apple Silicon
+          - platform: darwin-arm64
+            target: aarch64-apple-darwin
+            os: macos-14
             features: ""
-            ext: ""
-            archive: tar.gz
-          # x86_64-apple-darwin (Intel Mac) is intentionally not in the
-          # matrix — Intel Mac runners are queue-bound on GitHub and
-          # nobody deploying ObjectIO is running on a 2020-era Intel
-          # Mac. If someone needs one, they can build from source.
-          #
-          # Windows is intentionally not in the matrix: the raw-disk
-          # I/O engine (crates/objectio-storage, used by osd / meta /
-          # block-gateway / aio) depends on unix-only APIs — ioctl
-          # BLKGETSIZE64, O_DIRECT, std::os::unix::fs::FileTypeExt.
-          # Windows support would be a real port, not a flag-gate, and
-          # no deployment story targets it. Revisit if a
-          # windows-capable subset (cli-only release?) becomes
-          # interesting.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -189,8 +189,8 @@ jobs:
           npm ci --no-audit --no-fund --prefer-offline
           npm run build
 
-      - name: Install ISA-L build deps (linux-x86_64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Install ISA-L build deps (linux-amd64 only)
+        if: matrix.platform == 'linux-amd64'
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm autoconf automake libtool libclang-dev
@@ -201,41 +201,31 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.target }}
+          key: release-aio-${{ matrix.target }}
 
-      - name: Cargo build
+      - name: Cargo build (aio only)
         shell: bash
         run: |
-          BINS=""
-          for b in ${BINARIES}; do BINS="${BINS} --bin ${b}"; done
           FEAT=""
           if [ -n "${{ matrix.features }}" ]; then FEAT="--features ${{ matrix.features }}"; fi
-          cargo build --release --target ${{ matrix.target }} ${BINS} ${FEAT}
+          cargo build --release --target ${{ matrix.target }} --bin objectio-aio $FEAT
 
-      - name: Package
+      - name: Rename + checksum
         shell: bash
         run: |
           VER="${{ inputs.version }}"
-          NAME="objectio-v${VER}-${{ matrix.target }}"
-          mkdir -p "dist/${NAME}"
-          for b in ${BINARIES}; do
-            cp "target/${{ matrix.target }}/release/${b}${{ matrix.ext }}" "dist/${NAME}/"
-          done
-          cp LICENSE NOTICE README.md "dist/${NAME}/"
-          cd dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a -tzip "${NAME}.zip" "${NAME}" >/dev/null
-          else
-            tar czf "${NAME}.tar.gz" "${NAME}"
-          fi
-          ls -lh
+          OUT="dist"
+          mkdir -p "$OUT"
+          NAME="objectio-aio-v${VER}-${{ matrix.platform }}"
+          cp "target/${{ matrix.target }}/release/objectio-aio" "$OUT/$NAME"
+          chmod +x "$OUT/$NAME"
+          (cd "$OUT" && shasum -a 256 "$NAME" > "$NAME.sha256")
+          ls -lh "$OUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
+          name: aio-${{ matrix.platform }}
+          path: dist/objectio-aio-*
           if-no-files-found: error
 
   # ------------------------------------------------------------
@@ -355,37 +345,59 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: binaries-*
+          pattern: aio-*
           merge-multiple: true
 
       - name: Generate SHA256SUMS.txt
         run: |
           cd dist
-          shasum -a 256 *.tar.gz *.zip 2>/dev/null | tee SHA256SUMS.txt
           ls -lh
+          # individual .sha256 files arrived with each platform upload;
+          # concat into one canonical manifest consumed with shasum -c.
+          cat *.sha256 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-      - name: Prepend image info to release notes
+      - name: Release body
         run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          IMG="${{ env.IMAGE }}:${TAG}"
           cat > /tmp/header.md <<EOF
-          ### Docker image
+          ### Container image
 
+          One multi-arch image carries every service (gateway / meta /
+          osd / block-gateway / cli) — the same image the helm chart
+          deploys. Each container overrides the entrypoint.
+
+          \`\`\`sh
+          docker pull ${IMG}
+          # also tagged: ${{ env.IMAGE }}:latest
           \`\`\`
-          docker pull ${{ env.IMAGE }}:${{ needs.prepare.outputs.tag }}
+
+          Platforms: \`linux/amd64\`, \`linux/arm64\`.
+
+          ### objectio-aio binary
+
+          \`objectio-aio\` is the single-binary monolith that runs
+          meta + OSD + gateway in one process — ideal for
+          laptops, quick tests, and appliance deployments. Pick
+          the right platform:
+
+          | Platform | Download |
+          |---|---|
+          | Linux x86_64 | \`objectio-aio-${TAG}-linux-amd64\` |
+          | Linux arm64  | \`objectio-aio-${TAG}-linux-arm64\`  |
+          | macOS Apple Silicon | \`objectio-aio-${TAG}-darwin-arm64\` |
+
+          \`\`\`sh
+          curl -LO https://github.com/${{ github.repository }}/releases/download/${TAG}/objectio-aio-${TAG}-linux-amd64
+          chmod +x objectio-aio-${TAG}-linux-amd64
+          ./objectio-aio-${TAG}-linux-amd64
           \`\`\`
-
-          Multi-arch: \`linux/amd64\`, \`linux/arm64\`.
-          Same image powers every Helm-deployed service (each container
-          overrides the entrypoint to pick one of gateway / meta / osd /
-          block-gateway / cli). See the \`all\` target in \`Dockerfile\`.
-
-          ### Binaries
-
-          Pre-built for:
-          \`x86_64-unknown-linux-gnu\`, \`aarch64-unknown-linux-gnu\`,
-          \`x86_64-apple-darwin\`, \`aarch64-apple-darwin\`,
-          \`x86_64-pc-windows-msvc\`.
 
           Verify: \`shasum -a 256 -c SHA256SUMS.txt\`
+
+          For production, use the container image with the helm chart.
+          The aio binary is for quick-start / dev / appliance use only.
 
           ---
           EOF
@@ -400,7 +412,6 @@ jobs:
           body_path: /tmp/header.md
           append_body: true
           files: |
-            dist/*.tar.gz
-            dist/*.zip
+            dist/objectio-aio-*
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
