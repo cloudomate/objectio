@@ -44,29 +44,61 @@ service. No JVM, no Go runtime, no external kv store.
 
 ## Quickstart
 
-### One-binary monolith (fastest)
+### Quick deploy — the `objectio-aio` single binary
+
+The fastest way to get a working ObjectIO cluster is the all-in-one
+binary: meta + OSD + gateway running in one process, console embedded,
+SSE master key auto-persisted, admin AK/SK printed on first start.
+Ideal for laptops, demos, smoke tests, and appliance deployments.
+
+**Linux / macOS (auto-detects platform):**
 
 ```sh
-# macOS (arm64) — download the v0.1.0 release binary
+VERSION=v0.1.0
+OS=$(uname | tr '[:upper:]' '[:lower:]' | sed 's/darwin/darwin/;s/linux/linux/')
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')
 curl -L -o objectio-aio \
-  https://github.com/cloudomate/objectio/releases/download/v0.1.0/objectio-aio-v0.1.0-darwin-arm64
-chmod +x objectio-aio && sudo mv objectio-aio /usr/local/bin/
-
+  "https://github.com/cloudomate/objectio/releases/download/${VERSION}/objectio-aio-${VERSION}-${OS}-${ARCH}"
+chmod +x objectio-aio
+sudo mv objectio-aio /usr/local/bin/
 objectio-aio
 ```
 
-Banner prints the admin AK/SK and a ready-to-paste `aws ...` command.
-Console at `http://localhost:9000/_console/`.
+Pre-built binaries ship for: `linux-amd64`, `linux-arm64`, `darwin-arm64`.
 
-### Kubernetes via kind (3 meta + 6 OSD + 1 gateway, 4+2 EC)
+The banner prints:
+
+```
+━━━ ObjectIO ready ━━━
+  S3 / Iceberg / Delta Sharing : http://localhost:9000
+  Console                       : http://localhost:9000/_console/
+  Admin access key              : AKIA...
+  Admin secret key              : ...
+  AWS_ACCESS_KEY_ID=AKIA... AWS_SECRET_ACCESS_KEY=... \
+    aws --endpoint-url http://localhost:9000 s3 mb s3://test
+```
+
+Add `--data ~/objectio-data` to persist state across restarts
+(otherwise a tempdir is used and wiped on exit). `Ctrl-C` exits
+cleanly.
+
+### Production — helm chart on Kubernetes
+
+```sh
+helm install objectio oci://ghcr.io/cloudomate/objectio --version 0.1.0 \
+  -f your-values.yaml
+```
+
+Or for a local-dev cluster that exercises the same chart against kind:
 
 ```sh
 git clone https://github.com/cloudomate/objectio
 cd objectio && make kind-up
 ```
 
-The same helm chart (`deploy/helm/objectio`) backs production —
-`kind-up` just points it at a local kind cluster.
+Both paths pull the universal image `ghcr.io/cloudomate/objectio:<tag>`
+— one multi-arch image that every service container overrides the
+entrypoint on (gateway / meta / osd / block-gateway / cli).
 
 ### Using it
 
