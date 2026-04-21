@@ -81,10 +81,7 @@ deploy/
     docker-compose.monitoring.yml
   prod/                   # Production template (raw block devices, 7 OSDs)
     docker-compose.yml
-  datacore/               # Datacore-specific deployment (3+2 EC, 5 OSDs)
-    docker-compose.yml
-    config/
-  monitoring/             # Datacore monitoring stack
+  monitoring/             # Monitoring stack (prometheus + grafana)
     docker-compose.monitoring.yml
     prometheus/
     grafana/
