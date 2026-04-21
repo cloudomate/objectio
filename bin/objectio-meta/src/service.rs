@@ -3573,7 +3573,43 @@ impl MetadataService for MetaService {
             let license = self.license.read().clone();
             if license.max_nodes != 0 || license.max_raw_capacity_bytes != 0 {
                 let snapshot = self.osd_nodes.read();
-                let current_nodes = snapshot.len() as u64;
+
+                // `max_nodes` counts unique *hosts*, not OSDs. One
+                // machine with 12 disks is one host (Free tier allows
+                // it). An OSD that never declared `failure_domain.host`
+                // counts as its own distinct host so several of them
+                // don't collapse into the empty-string bucket.
+                let host_key_of = |n: &objectio_meta_store::types::OsdNode| -> String {
+                    let host = n
+                        .topology
+                        .as_ref()
+                        .map(|(_, _, _, _, h)| h.clone())
+                        .unwrap_or_default();
+                    if host.is_empty() {
+                        format!("__no_host__:{}", hex::encode(n.node_id))
+                    } else {
+                        host
+                    }
+                };
+                let mut hosts: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for n in snapshot.iter() {
+                    hosts.insert(host_key_of(n));
+                }
+                let current_hosts = hosts.len() as u64;
+                let new_host_raw = req
+                    .failure_domain
+                    .as_ref()
+                    .map(|fd| fd.host.clone())
+                    .unwrap_or_default();
+                let new_host_key = if new_host_raw.is_empty() {
+                    format!("__no_host__:{}", hex::encode(node_id))
+                } else {
+                    new_host_raw.clone()
+                };
+                let adds_host = !hosts.contains(&new_host_key);
+                let projected_hosts = current_hosts + u64::from(adds_host);
+
                 let current_capacity: u64 = snapshot
                     .iter()
                     .flat_map(|n| n.disk_capacity_bytes.iter().copied())
@@ -3581,14 +3617,15 @@ impl MetadataService for MetaService {
                 let new_capacity: u64 = disk_capacity_bytes.iter().copied().sum();
                 drop(snapshot);
 
-                if license.max_nodes != 0 && current_nodes >= license.max_nodes {
+                if license.max_nodes != 0 && projected_hosts > license.max_nodes {
                     warn!(
-                        "register_osd refused: node cap {} reached (current={})",
-                        license.max_nodes, current_nodes
+                        "register_osd refused: host cap {} reached (current_hosts={}, would-be {})",
+                        license.max_nodes, current_hosts, projected_hosts
                     );
                     return Err(Status::resource_exhausted(format!(
-                        "license node cap reached: {} / {} OSDs already registered. Install a license with a higher max_nodes.",
-                        current_nodes, license.max_nodes
+                        "license host cap reached: registering this OSD would bring the cluster to {projected_hosts} host(s), cap is {}. \
+                         Current host count: {current_hosts}. Upgrade to a license with a higher max_nodes, or keep all OSDs on the same host (one machine = one host, any number of disks).",
+                        license.max_nodes
                     )));
                 }
                 if license.max_raw_capacity_bytes != 0

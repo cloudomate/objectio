@@ -628,8 +628,12 @@ pub async fn run(
         load_initial_license(args.license.as_deref(), meta_client.clone()).await;
     match license.tier {
         objectio_license::Tier::Enterprise => info!(
-            "License: Enterprise — licensee='{}' expires_at={}",
-            license.licensee, license.expires_at
+            "License: Enterprise — licensee='{}' expires_at={} max_nodes={}",
+            license.licensee, license.expires_at, license.max_nodes
+        ),
+        objectio_license::Tier::Free => info!(
+            "License: Free — licensee='{}' expires_at={} max_nodes={} (single-host)",
+            license.licensee, license.expires_at, license.max_nodes
         ),
         objectio_license::Tier::Community => {
             info!("License: Community — Enterprise features gated")

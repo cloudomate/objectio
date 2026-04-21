@@ -55,15 +55,15 @@ pub fn require_feature(state: &AppState, feature: Feature) -> Result<(), Respons
 /// Build the 403 body that all gates share. Machine-readable so CLI/console
 /// can render a consistent upsell.
 pub fn enterprise_required(feature: Feature) -> Response {
-    let tier = "enterprise";
     let body = serde_json::json!({
         "error": "EnterpriseLicenseRequired",
         "feature": feature.as_str(),
-        "tier_required": tier,
+        "tier_required": "free-or-enterprise",
         "message": format!(
-            "The '{}' feature requires an Enterprise license. \
-             Install a license via PUT /_admin/license, or set \
-             $OBJECTIO_LICENSE, then retry.",
+            "The '{}' feature requires a Free or Enterprise license. \
+             Get a Free license (single-host cap, no cost) or an \
+             Enterprise license (commercial, multi-host), then \
+             install via PUT /_admin/license or set $OBJECTIO_LICENSE.",
             feature.as_str()
         ),
     });

@@ -55,13 +55,27 @@ pub enum LicenseError {
     MissingPublicKey,
 }
 
-/// Enterprise tier. Community is the implicit default when no license is
-/// installed — it never appears in a license payload.
+/// Three-tier license model:
+///
+/// - **Community** — implicit default when no license file is installed.
+///   Apache-2.0 code; runs as-is; unlimited hosts/capacity. Enterprise
+///   features (Iceberg, Delta Sharing, multi-tenancy, OIDC, external
+///   KMS, LRC) return `403 EnterpriseLicenseRequired`.
+///
+/// - **Free** — signed license, no cost. All Enterprise features
+///   unlocked, but capped at `max_nodes = 1` (see note: "nodes" is
+///   enforced as unique *hosts*, not OSDs — a single machine with
+///   many disks counts as one). For evaluation, home labs, appliance
+///   deployments.
+///
+/// - **Enterprise** — signed license, commercial. All features, caps
+///   per contract (`max_nodes`, `max_raw_capacity_bytes`, `expires_at`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     #[default]
     Community,
+    Free,
     Enterprise,
 }
 
@@ -70,8 +84,16 @@ impl Tier {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Community => "community",
+            Self::Free => "free",
             Self::Enterprise => "enterprise",
         }
+    }
+
+    /// True iff the tier is eligible to unlock Enterprise features
+    /// (Free and Enterprise both do; Community does not).
+    #[must_use]
+    pub const fn unlocks_features(self) -> bool {
+        matches!(self, Self::Free | Self::Enterprise)
     }
 }
 
@@ -135,9 +157,19 @@ pub struct LicensePayload {
     pub expires_at: u64,
     #[serde(default)]
     pub features: Vec<String>,
-    /// Cap on the number of storage nodes (distinct OSD addresses) the
-    /// cluster may have. `0` means no cap. Enforced on the admin
-    /// `create_pool` path as a scale-up block.
+    /// Cap on the number of distinct **hosts** (physical/virtual machines)
+    /// the cluster may run OSDs on. `0` means no cap.
+    ///
+    /// One machine with many disks counts as one host — the Free tier
+    /// issues licenses with `max_nodes: 1` which permits a single machine
+    /// to run any number of OSDs (one per disk) but refuses a second
+    /// machine. Counted by unique `failure_domain.host` values at
+    /// `register_osd`; OSDs that never declared a host count as their
+    /// own distinct hosts so the empty-string bucket can't be abused.
+    ///
+    /// The field name stays `max_nodes` for signature back-compat —
+    /// existing licenses issued with `max_nodes: N` keep verifying,
+    /// their semantics just tighten from "N OSDs" to "N hosts".
     ///
     /// Skipped from serialization when `0` so older licenses (issued before
     /// this field existed) continue to verify: the canonical form they were
@@ -245,15 +277,22 @@ impl License {
         })
     }
 
-    /// True iff the license tier is Enterprise and the named feature is
-    /// listed (or no feature list is present — treat as "all features").
+    /// True iff the tier can unlock the named feature. Free and Enterprise
+    /// both qualify (Free is just a capped Enterprise). Community never
+    /// does.
+    ///
+    /// An empty `features` list on the payload means "all features" — so
+    /// both a stock Enterprise license and a stock Free license light up
+    /// every flag. Per-licensee carve-outs (restrict an Enterprise
+    /// license to, say, Iceberg only) work by populating `features`
+    /// explicitly.
     #[must_use]
     pub fn allows(&self, feature: Feature) -> bool {
-        if self.tier != Tier::Enterprise {
+        if !self.tier.unlocks_features() {
             return false;
         }
         if self.features.is_empty() {
-            return true; // blanket Enterprise → all features enabled
+            return true; // blanket tier → all features enabled
         }
         self.features.iter().any(|f| f == feature.as_str())
     }
@@ -261,6 +300,11 @@ impl License {
     #[must_use]
     pub const fn is_enterprise(&self) -> bool {
         matches!(self.tier, Tier::Enterprise)
+    }
+
+    #[must_use]
+    pub const fn is_free(&self) -> bool {
+        matches!(self.tier, Tier::Free)
     }
 }
 
