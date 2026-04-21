@@ -361,7 +361,7 @@ jobs:
           # values.yaml: pin every `tag: latest` (our services) to the
           # release tag — leave external images (prometheus v2.48.0,
           # grafana 10.2.2) untouched because their tags aren't 'latest'.
-          sed -i -E "s/^(\s*)tag: latest$/\1tag: v${VER}/g" "${CHART}/values.yaml"
+          sed -i -E "s/^([[:space:]]*)tag: latest\$/\1tag: v${VER}/g" "${CHART}/values.yaml"
           echo "---- Chart.yaml ----"
           cat "${CHART}/Chart.yaml"
           echo "---- values.yaml diff (our-image tags only) ----"
