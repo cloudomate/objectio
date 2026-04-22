@@ -152,11 +152,14 @@ jobs:
           - platform: linux-amd64
             target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-            features: "isal"
+            # isal = x86 erasure-coding acceleration; io-uring = the
+            # new async I/O backend (see storage-io-levels.md).
+            features: "isal,io-uring"
           - platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            features: ""
+            # io-uring is Linux-only; isal is x86-only.
+            features: "io-uring"
           - platform: darwin-arm64
             target: aarch64-apple-darwin
             os: macos-14
