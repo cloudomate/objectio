@@ -1,0 +1,29 @@
+[package]
+name = "objectio-io-bench"
+description = "Micro-bench comparing pread vs io_uring for ObjectIO's storage I/O paths"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "objectio-io-bench"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Both backends only need libc on Linux (O_DIRECT flag, sync()).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+# io_uring is Linux-only; gate the backend + dep on the target OS so the
+# crate still builds on macOS / Windows (where only the pread backend is
+# available).
+tokio-uring = "0.5"
+
+[features]
+default = []
