@@ -4491,7 +4491,9 @@ async fn grep_prefix_internal(
 
     // List keys up-front so we know the cap. Agents asking for a
     // scan over 10k keys should use pagination; v1 caps at
-    // `max_keys`.
+    // `max_keys`. Pagination: callers pass the previous response's
+    // `next_continuation_token` back in `caps.continuation_token` to
+    // resume where the last scan stopped.
     let mut meta_client = state.meta_client.clone();
     let list_resp = match meta_client
         .list_objects(objectio_proto::metadata::ListObjectsRequest {
@@ -4499,7 +4501,7 @@ async fn grep_prefix_internal(
             prefix: caps.prefix.clone(),
             delimiter: String::new(),
             start_after: String::new(),
-            continuation_token: String::new(),
+            continuation_token: caps.continuation_token.clone(),
             max_keys: caps.max_keys,
             include_versions: false,
         })
@@ -4521,11 +4523,27 @@ async fn grep_prefix_internal(
         .map(|e| (e.key, e.size))
         .collect();
 
+    // Capture the pagination cursor — emitted in the End frame so the
+    // client can continue on the next request.
+    let mut next_token: Option<String> = if list_resp.is_truncated
+        && !list_resp.next_continuation_token.is_empty()
+    {
+        Some(list_resp.next_continuation_token.clone())
+    } else {
+        None
+    };
+
     // Meta's OBJECT_LISTINGS table may be empty for pre-migration
     // objects. Fall back to the scatter-gather path (same as
     // list_objects handler) so freshly-uploaded aio-backed buckets
-    // work out of the box.
+    // work out of the box. scatter_gather returns its own
+    // is_truncated + next_continuation_token; carry those through.
     if keys.is_empty() {
+        let ct_opt = if caps.continuation_token.is_empty() {
+            None
+        } else {
+            Some(caps.continuation_token.as_str())
+        };
         if let Ok(list_result) = state
             .scatter_gather
             .list_objects(
@@ -4533,7 +4551,7 @@ async fn grep_prefix_internal(
                 &bucket,
                 &caps.prefix,
                 caps.max_keys,
-                None,
+                ct_opt,
             )
             .await
         {
@@ -4542,6 +4560,9 @@ async fn grep_prefix_internal(
                 .into_iter()
                 .map(|o| (o.key, o.size))
                 .collect();
+            if list_result.is_truncated {
+                next_token = list_result.next_continuation_token;
+            }
         }
     }
 
@@ -4668,6 +4689,7 @@ async fn grep_prefix_internal(
             truncated,
             start_time.elapsed().as_millis() as u64,
             objects_scanned,
+            next_token.clone(),
             &tx,
         )
         .await;

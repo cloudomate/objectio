@@ -91,6 +91,12 @@ pub struct PrefixGrepRequest {
     #[serde(default)]
     pub max_matches_per_object: u32,
 
+    /// Pagination cursor from a prior response's
+    /// `next_continuation_token`. Empty / absent = scan from the
+    /// first key under the prefix.
+    #[serde(default)]
+    pub continuation_token: String,
+
     #[serde(default)]
     pub literal: bool,
     #[serde(default)]
@@ -119,6 +125,7 @@ impl PrefixGrepRequest {
         };
         let caps = PrefixCaps {
             prefix: self.prefix.clone(),
+            continuation_token: self.continuation_token.clone(),
             max_keys: if self.max_keys == 0 { 100 } else { self.max_keys },
             max_matches_global: if self.max_matches == 0 {
                 1000
@@ -134,6 +141,7 @@ impl PrefixGrepRequest {
 #[derive(Debug, Clone)]
 pub struct PrefixCaps {
     pub prefix: String,
+    pub continuation_token: String,
     pub max_keys: u32,
     pub max_matches_global: u32,
 }
@@ -241,6 +249,13 @@ pub enum GrepEvent {
         /// Populated in prefix scans; omitted in single-object.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         objects_scanned: Option<u64>,
+        /// Pagination cursor for the next prefix-grep request. Populated
+        /// when meta reports `is_truncated` — i.e. more keys under this
+        /// prefix past the current page. Clients continue the scan by
+        /// passing this value back as `continuation_token` on the next
+        /// request. Empty / absent = no more pages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_continuation_token: Option<String>,
     },
     Error {
         message: String,
@@ -454,6 +469,7 @@ where
             truncated,
             elapsed_ms,
             objects_scanned: None,
+            next_continuation_token: None,
         };
         let _ = tx.send(Ok(frame(&end))).await;
     });
@@ -659,13 +675,15 @@ pub async fn emit_object_end(
     tx.send(Ok(frame(&ev))).await.map_err(|_| ())
 }
 
-/// Emit the final `End` frame for a prefix scan.
+/// Emit the final `End` frame for a prefix scan. Pass `None` for
+/// `next_continuation_token` when the scan consumed the last page.
 pub async fn emit_prefix_end(
     matches: u64,
     bytes_scanned: u64,
     truncated: bool,
     elapsed_ms: u64,
     objects_scanned: u64,
+    next_continuation_token: Option<String>,
     tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), ()> {
     let ev = GrepEvent::End {
@@ -674,6 +692,7 @@ pub async fn emit_prefix_end(
         truncated,
         elapsed_ms,
         objects_scanned: Some(objects_scanned),
+        next_continuation_token,
     };
     tx.send(Ok(frame(&ev))).await.map_err(|_| ())
 }
