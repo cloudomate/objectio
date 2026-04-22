@@ -5,6 +5,7 @@
 //! - Block read/write with checksums
 //! - Background scrubbing
 
+use crate::aligned_buf::AlignedBuf;
 use crate::io_backend::{IoBackend, best_available};
 use crate::layout::{BlockFooter, BlockHeader, DEFAULT_BLOCK_SIZE, SUPERBLOCK_SIZE, Superblock};
 use crate::raw_io::{AlignedBuffer, RawFile};
@@ -374,19 +375,21 @@ impl DiskManager {
 
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst);
 
-        // Build header+data+padding+footer into one owned Vec so
-        // ownership can transfer through the io_uring submission.
-        let mut buf = vec![0u8; block_size];
+        // Build header+data+padding+footer into an aligned owned buf
+        // so ownership can transfer through the io_uring submission
+        // and the buffer's address satisfies O_DIRECT alignment.
+        let mut buf = AlignedBuf::new(block_size);
+        let block_buf = buf.as_mut_slice();
         let header = BlockHeader::new(sequence, object_id, object_offset, data.len() as u32);
-        buf[..BlockHeader::SIZE].copy_from_slice(&header.to_bytes());
+        block_buf[..BlockHeader::SIZE].copy_from_slice(&header.to_bytes());
         let data_start = BlockHeader::SIZE;
         let data_end = data_start + data.len();
-        buf[data_start..data_end].copy_from_slice(data);
+        block_buf[data_start..data_end].copy_from_slice(data);
 
         let data_checksum = crc32c::crc32c(data);
         let footer = BlockFooter::new(data_checksum, sequence);
         let footer_start = block_size - BlockFooter::SIZE;
-        buf[footer_start..].copy_from_slice(&footer.to_bytes());
+        block_buf[footer_start..].copy_from_slice(&footer.to_bytes());
 
         // Transfer to disk via IoBackend — frees the reactor and,
         // when uring is compiled in, skips spawn_blocking entirely.
@@ -417,8 +420,9 @@ impl DiskManager {
             )
         };
 
-        let buf = vec![0u8; block_size];
-        let block_buf = self.disk_io.read_at_owned(buf, offset).await?;
+        let buf = AlignedBuf::new(block_size);
+        let block_buf_owned = self.disk_io.read_at_owned(buf, offset).await?;
+        let block_buf = block_buf_owned.as_slice();
 
         self.stats.reads.fetch_add(1, Ordering::Relaxed);
         self.stats

@@ -56,10 +56,11 @@ use async_trait::async_trait;
 
 use objectio_common::{Error, Result};
 
-/// Buffer type used across the trait. Owned so it can be threaded
-/// through io_uring submissions; for the pread path the caller gets
-/// it back via the return value of [`IoBackend::read_at_owned`].
-pub type OwnedBuf = Vec<u8>;
+/// Buffer type used across the trait. Always 4 KiB-aligned so that
+/// both O_DIRECT pread/pwrite and io_uring submissions are valid
+/// regardless of allocation size. See [`crate::aligned_buf`] for the
+/// implementation.
+pub type OwnedBuf = crate::aligned_buf::AlignedBuf;
 
 /// Describes which backend is actually running. Set at open time,
 /// useful for logging / metrics.
@@ -228,7 +229,7 @@ mod pread_backend {
             // spawn_blocking frees the reactor for the duration of the
             // syscall. Worth it on any block size — see the benchmark.
             let buf = tokio::task::spawn_blocking(move || {
-                file.read_exact_at(&mut buf, offset)
+                file.read_exact_at(buf.as_mut_slice(), offset)
                     .map_err(|e| Error::Storage(format!("read {path} @ {offset}: {e}")))
                     .map(|()| buf)
             })
@@ -247,7 +248,7 @@ mod pread_backend {
             let file = Arc::clone(&self.file);
             let path = self.path.clone();
             let buf = tokio::task::spawn_blocking(move || {
-                file.write_all_at(&buf, offset)
+                file.write_all_at(buf.as_slice(), offset)
                     .map_err(|e| Error::Storage(format!("write {path} @ {offset}: {e}")))
                     .map(|()| buf)
             })
@@ -315,14 +316,14 @@ mod uring_backend {
 
     enum Op {
         Read {
-            buf: Vec<u8>,
+            buf: OwnedBuf,
             offset: u64,
-            reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
+            reply: tokio::sync::oneshot::Sender<Result<OwnedBuf>>,
         },
         Write {
-            buf: Vec<u8>,
+            buf: OwnedBuf,
             offset: u64,
-            reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
+            reply: tokio::sync::oneshot::Sender<Result<OwnedBuf>>,
         },
         Sync {
             reply: tokio::sync::oneshot::Sender<Result<()>>,
@@ -539,9 +540,9 @@ mod tests {
         assert_eq!(backend.kind(), BackendKind::Pread);
         assert_eq!(backend.size(), 64 * 1024);
 
-        let buf = vec![0u8; 4096];
+        let buf = OwnedBuf::new(4096);
         let got = backend.read_at_owned(buf, 4096).await.unwrap();
-        for (i, b) in got.iter().enumerate() {
+        for (i, b) in got.as_slice().iter().enumerate() {
             assert_eq!(*b, ((4096 + i) & 0xff) as u8, "byte {i} mismatched");
         }
     }

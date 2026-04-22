@@ -7,6 +7,7 @@
 //! - Background repair and scrubbing
 //! - Metadata storage (WAL + B-tree + ARC cache)
 
+pub mod aligned_buf;
 pub mod block;
 pub mod disk;
 pub mod io_backend;
@@ -19,6 +20,7 @@ pub mod wal;
 
 // Re-exports
 pub use block::{Block, BlockAllocator, BlockBitmap, Extent};
+pub use aligned_buf::{AlignedBuf, DEFAULT_ALIGN};
 pub use disk::{DiskManager, DiskStats};
 pub use io_backend::{BackendKind, IoBackend, OwnedBuf, best_available, pread};
 pub use layout::{
