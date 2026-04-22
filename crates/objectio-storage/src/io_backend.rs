@@ -105,11 +105,23 @@ pub trait IoBackend: Send + Sync + std::fmt::Debug {
 ///
 /// Priority: `UringBackend` if compiled in AND we're on Linux AND
 /// `io_uring_setup` succeeds, otherwise `PreadBackend`.
+///
+/// `direct_io: true` (production default) asks the kernel to skip the
+/// page cache — O_DIRECT on Linux, F_NOCACHE on macOS. The caller
+/// becomes responsible for aligning both offsets and buffers to 4 KiB.
+/// Set `false` for small metadata-style files where the alignment
+/// overhead isn't worth it (and for tests).
 #[allow(clippy::missing_errors_doc)]
-pub fn best_available<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Arc<dyn IoBackend>> {
+pub fn best_available<P: AsRef<Path>>(
+    path: P,
+    read_only: bool,
+    direct_io: bool,
+) -> Result<Arc<dyn IoBackend>> {
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        if let Ok(backend) = uring_backend::UringBackend::open(path.as_ref(), read_only) {
+        if let Ok(backend) =
+            uring_backend::UringBackend::open(path.as_ref(), read_only, direct_io)
+        {
             return Ok(Arc::new(backend));
         }
         tracing::warn!(
@@ -119,14 +131,20 @@ pub fn best_available<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Arc<dy
     Ok(Arc::new(pread_backend::PreadBackend::open(
         path.as_ref(),
         read_only,
+        direct_io,
     )?))
 }
 
 /// Always-available pread / pwrite backend.
-pub fn pread<P: AsRef<Path>>(path: P, read_only: bool) -> Result<Arc<dyn IoBackend>> {
+pub fn pread<P: AsRef<Path>>(
+    path: P,
+    read_only: bool,
+    direct_io: bool,
+) -> Result<Arc<dyn IoBackend>> {
     Ok(Arc::new(pread_backend::PreadBackend::open(
         path.as_ref(),
         read_only,
+        direct_io,
     )?))
 }
 
@@ -149,25 +167,39 @@ mod pread_backend {
     }
 
     impl PreadBackend {
-        pub fn open(path: &Path, read_only: bool) -> Result<Self> {
+        pub fn open(path: &Path, read_only: bool, direct_io: bool) -> Result<Self> {
             let mut opts = OpenOptions::new();
             opts.read(true).write(!read_only);
             if !read_only {
                 opts.create(false);
             }
 
-            // O_DIRECT on Linux. macOS's F_NOCACHE is set via fcntl
-            // post-open; we skip that here to keep this module tight —
-            // the crate's RawFile already does it and our callers get
-            // the fd through the same path shortly. TODO: match parity.
             #[cfg(target_os = "linux")]
-            {
+            if direct_io {
                 opts.custom_flags(libc::O_DIRECT);
             }
 
             let file = opts
                 .open(path)
                 .map_err(|e| Error::Storage(format!("open {}: {e}", path.display())))?;
+
+            // macOS F_NOCACHE is set post-open via fcntl.
+            #[cfg(target_os = "macos")]
+            if direct_io {
+                use std::os::fd::AsRawFd;
+                unsafe {
+                    if libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) == -1 {
+                        tracing::warn!(
+                            "F_NOCACHE not accepted on {} — falling back to buffered",
+                            path.display()
+                        );
+                    }
+                }
+            }
+
+            // Suppress unused-variable warning on non-Linux/macOS.
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            let _ = direct_io;
             let size = file
                 .metadata()
                 .map_err(|e| Error::Storage(format!("stat {}: {e}", path.display())))?
@@ -302,11 +334,13 @@ mod uring_backend {
     }
 
     impl UringBackend {
-        pub fn open(path: &Path, read_only: bool) -> Result<Self> {
-            let std_file = OpenOptions::new()
-                .read(true)
-                .write(!read_only)
-                .custom_flags(libc::O_DIRECT)
+        pub fn open(path: &Path, read_only: bool, direct_io: bool) -> Result<Self> {
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(!read_only);
+            if direct_io {
+                opts.custom_flags(libc::O_DIRECT);
+            }
+            let std_file = opts
                 .open(path)
                 .map_err(|e| Error::Storage(format!("open {}: {e}", path.display())))?;
             let size = std_file
@@ -495,23 +529,68 @@ mod tests {
         path
     }
 
+    /// Returns a 4 KiB-aligned `Vec<u8>` of the given length.
+    /// O_DIRECT on Linux requires buffer *addresses* to be aligned —
+    /// `vec![0u8; N]` isn't. Over-allocate + drain-front so the Vec's
+    /// data pointer lands on the aligned boundary.
+    fn aligned_vec(size: usize) -> Vec<u8> {
+        const ALIGN: usize = 4096;
+        let mut raw = vec![0u8; size + ALIGN];
+        let addr = raw.as_ptr() as usize;
+        let off = (ALIGN - addr % ALIGN) % ALIGN;
+        raw.drain(..off);
+        raw.truncate(size);
+        debug_assert_eq!(raw.as_ptr() as usize % ALIGN, 0);
+        raw
+    }
+
     #[tokio::test]
     async fn pread_roundtrip() {
         let dir = tempdir().unwrap();
         // 64 KiB file — big enough to exercise O_DIRECT alignment but
-        // fast to build. Alignment: both offset and length must be
-        // multiples of 4096 on Linux O_DIRECT, and at least 512-byte
-        // on most other OSes.
+        // fast to build. Both offset and length must be multiples of
+        // 4096 on Linux O_DIRECT.
         let path = make_test_file(dir.path(), 64 * 1024);
-        let backend = pread(&path, true).unwrap();
+        // direct_io=false — test buffers aren't 4 KiB-aligned. Production
+        // callers pass true and align their buffers explicitly.
+        let backend = pread(&path, true, false).unwrap();
         assert_eq!(backend.kind(), BackendKind::Pread);
         assert_eq!(backend.size(), 64 * 1024);
 
         // Read the second 4 KiB page, verify it matches the pattern.
-        let buf = vec![0u8; 4096];
+        let buf = aligned_vec(4096);
         let got = backend.read_at_owned(buf, 4096).await.unwrap();
         for (i, b) in got.iter().enumerate() {
             assert_eq!(*b, ((4096 + i) & 0xff) as u8, "byte {i} mismatched");
         }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    #[test]
+    fn uring_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = make_test_file(dir.path(), 64 * 1024);
+
+        // UringBackend spawns its own reactor thread; this test runs
+        // synchronously and hops into uring via best_available().
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let backend = best_available(&path, true, false).unwrap();
+            // Kind depends on whether io_uring_setup succeeded — either
+            // is valid, but we prefer uring when built with the feature.
+            assert!(matches!(
+                backend.kind(),
+                BackendKind::Uring | BackendKind::Pread
+            ));
+
+            let buf = aligned_vec(4096);
+            let got = backend.read_at_owned(buf, 4096).await.unwrap();
+            for (i, b) in got.iter().enumerate() {
+                assert_eq!(*b, ((4096 + i) & 0xff) as u8, "byte {i} mismatched");
+            }
+        });
     }
 }
