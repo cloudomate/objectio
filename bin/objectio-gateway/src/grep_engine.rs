@@ -180,10 +180,12 @@ pub fn compile(req: &GrepRequest) -> Result<CompiledPattern, EngineError> {
         Engine::Hyperscan => {
             #[cfg(feature = "hyperscan")]
             {
-                use hyperscan::prelude::*;
-                // SOM_LEFTMOST is required for the `from` offset to
-                // be populated in the match callback — without it,
-                // Hyperscan only reports end-of-match.
+                // `Flags` is re-exported in the prelude as
+                // `CompileFlags`. SOM_LEFTMOST is required for the
+                // `from` offset to be populated in the match callback
+                // — without it, Hyperscan only reports end-of-match.
+                use hyperscan::compile::{Flags, Pattern};
+                use hyperscan::prelude::BlockDatabase;
                 let mut flags = Flags::SOM_LEFTMOST;
                 if req.case_insensitive {
                     flags |= Flags::CASELESS;
