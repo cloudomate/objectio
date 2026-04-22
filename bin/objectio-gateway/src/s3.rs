@@ -938,6 +938,11 @@ pub struct PostObjectParams {
     /// Upload ID for complete multipart upload
     #[serde(rename = "uploadId")]
     upload_id: Option<String>,
+    /// If present, treat the request as a gateway-side grep. Body is a
+    /// JSON [`grep::GrepRequest`]; response is NDJSON with one
+    /// [`grep::GrepEvent`] per line. The query-string value is ignored
+    /// — presence alone is the signal.
+    grep: Option<String>,
 }
 
 /// Query parameters for DELETE object operations (handles both delete and abort)
@@ -4353,10 +4358,12 @@ async fn delete_bucket_policy_internal(state: Arc<AppState>, bucket: String) -> 
 
 /// POST /{bucket}/{key}?uploads - Initiate multipart upload
 /// POST /{bucket}/{key}?uploadId=X - Complete multipart upload
+/// POST /{bucket}/{key}?grep - Gateway-side regex grep; streams NDJSON
 pub async fn post_object(
     State(state): State<Arc<AppState>>,
     Path((bucket, key)): Path<(String, String)>,
     Query(params): Query<PostObjectParams>,
+    auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -4366,13 +4373,92 @@ pub async fn post_object(
     } else if let Some(upload_id) = params.upload_id {
         // Complete multipart upload
         complete_multipart_upload_internal(state, bucket, key, upload_id, body).await
+    } else if params.grep.is_some() {
+        grep_object_internal(state, bucket, key, auth, headers, body).await
     } else {
         S3Error::xml_response(
             "InvalidRequest",
-            "POST request must include ?uploads or ?uploadId parameter",
+            "POST request must include ?uploads, ?uploadId, or ?grep parameter",
             StatusCode::BAD_REQUEST,
         )
     }
+}
+
+/// `POST /{bucket}/{key}?grep` — gateway-side regex/grep over the
+/// object's contents. Reuses the normal authenticated GetObject path
+/// to fetch the body, then streams match events (NDJSON) back with
+/// full byte-offset metadata for agent follow-up fetches. See
+/// `grep.rs` for the wire format.
+///
+/// v1 collects the object body into memory before scanning — fine for
+/// the .md / .txt / .jsonl agent use case up to a few GiB. Streaming
+/// directly off the EC read path is a follow-up.
+async fn grep_object_internal(
+    state: Arc<AppState>,
+    bucket: String,
+    key: String,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::grep;
+    // Parse the grep request body first — fast fail on bad JSON.
+    let req = match grep::parse_body(&headers, &body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // Re-use the existing get_object pipeline so we inherit SigV4
+    // policy, bucket policy, SSE-C decryption, versioning.
+    // No Range header — we need the full object for scanning.
+    let mut get_headers = HeaderMap::new();
+    for (k, v) in headers.iter() {
+        // Carry auth + SSE-C headers; strip Content-Type (not needed
+        // for GetObject).
+        if k == header::CONTENT_TYPE {
+            continue;
+        }
+        get_headers.insert(k, v.clone());
+    }
+    let resp = get_object(
+        State(state.clone()),
+        Path((bucket, key)),
+        auth,
+        get_headers,
+    )
+    .await;
+    if !resp.status().is_success() {
+        return resp; // NotFound, AccessDenied, etc. — pass through
+    }
+
+    let size: u64 = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let etag = resp
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // Pull the body into memory. Cap at 16 GiB so a pathological
+    // request can't OOM the gateway; real agent workloads are
+    // <100 MiB. Follow-up: stream off the EC read path.
+    let body_bytes = match axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            return S3Error::xml_response(
+                "InternalError",
+                &format!("failed to read object body: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+    let cursor = std::io::Cursor::new(body_bytes);
+    grep::respond(req, cursor, size, etag)
 }
 
 /// Initiate multipart upload - internal implementation

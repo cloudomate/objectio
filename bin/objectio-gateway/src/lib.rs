@@ -4,6 +4,7 @@
 //! Credentials are managed by the metadata service for persistence.
 
 pub mod admin;
+pub mod grep;
 pub mod auth_middleware;
 pub mod chunked_decode;
 pub mod console_auth;
