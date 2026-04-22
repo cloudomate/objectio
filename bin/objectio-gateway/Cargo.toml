@@ -59,6 +59,10 @@ sha2 = "0.10"
 regex = "1"
 urlencoding = "2"
 tokio-stream = "0.1"
+# `io` feature = StreamReader — turn an axum body stream back into
+# an AsyncRead so the grep scanner can walk large objects without
+# buffering the full body in memory.
+tokio-util = { version = "0.7", features = ["io"] }
 
 # Kubernetes client for the K8sHostProvider (Phase 2 host actions).
 # `rustls-tls` avoids linking OpenSSL — keeps the Alpine-ish runtime

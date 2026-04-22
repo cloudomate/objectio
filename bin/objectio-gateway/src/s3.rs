@@ -4451,21 +4451,17 @@ async fn grep_object_internal(
         .unwrap_or("")
         .to_string();
 
-    // Pull the body into memory. Cap at 16 GiB so a pathological
-    // request can't OOM the gateway; real agent workloads are
-    // <100 MiB. Follow-up: stream off the EC read path.
-    let body_bytes = match axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            return S3Error::xml_response(
-                "InternalError",
-                &format!("failed to read object body: {e}"),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            );
-        }
-    };
-    let cursor = std::io::Cursor::new(body_bytes);
-    grep::respond(req, cursor, size, etag)
+    // Wrap the GetObject body stream as an AsyncRead so the scanner
+    // walks line-by-line through a 64 KiB BufReader — memory bounded
+    // regardless of object size. No collect-to-bytes; no 16 GiB cap.
+    use futures::TryStreamExt;
+    use tokio_util::io::StreamReader;
+    let body_stream = resp
+        .into_body()
+        .into_data_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let reader = StreamReader::new(body_stream);
+    grep::respond(req, reader, size, etag)
 }
 
 /// `POST /{bucket}?grep` — prefix-scoped regex grep across many keys.
@@ -4625,25 +4621,15 @@ async fn grep_prefix_internal(
             )
             .await;
 
-            let body_bytes = match axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024 * 1024)
-                .await
-            {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = tx
-                        .send(Ok(Bytes::from(
-                            serde_json::json!({
-                                "type": "error",
-                                "message": format!("body read {}/{}: {e}", bucket_for_task, key),
-                            })
-                            .to_string()
-                                + "\n",
-                        )))
-                        .await;
-                    continue;
-                }
-            };
-            bytes_scanned += body_bytes.len() as u64;
+            // Stream the body directly into the scanner — no
+            // collect-to-bytes, no memory cap, per-line processing.
+            use futures::TryStreamExt;
+            use tokio_util::io::StreamReader;
+            let body_stream = resp
+                .into_body()
+                .into_data_stream()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            let reader = StreamReader::new(body_stream);
 
             let remaining = caps.max_matches_global as u64 - matches_global;
             let per_req = crate::grep::GrepRequest {
@@ -4654,15 +4640,16 @@ async fn grep_prefix_internal(
                 content_max_bytes: per_object_req_template.content_max_bytes,
                 invert: per_object_req_template.invert,
             };
-            let (matches_here, per_truncated) = crate::grep::scan_object_into_channel(
+            let (matches_here, per_truncated, obj_bytes) = crate::grep::scan_object_into_channel(
                 bucket_for_task.clone(),
                 key.clone(),
-                body_bytes.to_vec(),
+                reader,
                 per_req,
                 remaining,
                 tx.clone(),
             )
             .await;
+            bytes_scanned += obj_bytes;
             matches_global += matches_here;
             objects_scanned += 1;
             let _ = crate::grep::emit_object_end(

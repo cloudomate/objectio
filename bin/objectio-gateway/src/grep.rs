@@ -505,20 +505,26 @@ pub fn parse_prefix_body(
     })
 }
 
-/// Run a scan over a single in-memory object buffer, sending events
-/// into a caller-provided channel. Bucket/key are tagged onto every
-/// emitted `Match`. Returns `(matches_emitted, per_object_truncated)`.
+/// Run a scan over an object's streaming body, sending events into a
+/// caller-provided channel. Bucket/key are tagged onto every emitted
+/// `Match`. Returns `(matches_emitted, per_object_truncated,
+/// bytes_scanned)`.
 ///
-/// Caller handles object fetch, channel wiring, and driving the
-/// global `max_matches` cap.
-pub async fn scan_object_into_channel(
+/// The reader is consumed line-by-line through a 64 KiB BufReader —
+/// memory usage stays bounded regardless of object size. Caller
+/// handles object fetch + wrapping the body as AsyncRead, channel
+/// wiring, and the global `max_matches` cap.
+pub async fn scan_object_into_channel<R>(
     bucket: String,
     key: String,
-    body: Vec<u8>,
+    reader: R,
     req: GrepRequest,
     max_matches: u64,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
-) -> (u64, bool) {
+) -> (u64, bool, u64)
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
     let (regex, mut opts) = match req.validate() {
         Ok(v) => v,
         Err(e) => {
@@ -527,24 +533,23 @@ pub async fn scan_object_into_channel(
                     message: format!("{bucket}/{key}: {e:?}"),
                 })))
                 .await;
-            return (0, false);
+            return (0, false, 0);
         }
     };
     // Clamp per-object cap to the remaining global budget so we
     // never exceed the caller's global limit.
     opts.max_matches = opts.max_matches.min(max_matches);
     if opts.max_matches == 0 {
-        return (0, false);
+        return (0, false, 0);
     }
 
-    let reader = tokio::io::BufReader::new(std::io::Cursor::new(body));
+    let mut reader = tokio::io::BufReader::with_capacity(64 * 1024, reader);
     let mut buf = Vec::with_capacity(4096);
     let mut line_no: u64 = 0;
     let mut cursor: u64 = 0;
     let mut matches: u64 = 0;
     let mut truncated = false;
     use tokio::io::AsyncBufReadExt;
-    let mut reader = reader;
     loop {
         buf.clear();
         let n = match reader.read_until(b'\n', &mut buf).await {
@@ -595,7 +600,7 @@ pub async fn scan_object_into_channel(
             truncated: content_truncated,
         };
         if tx.send(Ok(frame(&ev))).await.is_err() {
-            return (matches, truncated);
+            return (matches, truncated, cursor);
         }
         matches += 1;
         if matches >= opts.max_matches {
@@ -603,7 +608,7 @@ pub async fn scan_object_into_channel(
             break;
         }
     }
-    (matches, truncated)
+    (matches, truncated, cursor)
 }
 
 /// Emit the Start frame for a prefix scan. file_size/etag zeroed —
