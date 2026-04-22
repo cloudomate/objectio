@@ -21,7 +21,24 @@ serde_json = { workspace = true }
 nix = { workspace = true }
 libc = { workspace = true }
 uuid = { workspace = true }
+async-trait = { workspace = true }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 rand = { workspace = true }
+
+[features]
+default = []
+# Compile the io_uring I/O backend in alongside the default pread one
+# (Linux only; the flag silently does nothing on macOS / Windows).
+# Opt-in because not every deployment target has a new-enough kernel
+# (io_uring needs Linux 5.6+; we run on 5.15+ in practice).
+#
+# See src/io_backend.rs and docs at
+# ../../../objectio-docs/architecture/design/storage-io-levels.md
+# for the measured trade-offs.
+io-uring = ["dep:tokio-uring"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { version = "0.5", optional = true }
