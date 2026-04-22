@@ -197,7 +197,8 @@ pub fn compile(req: &GrepRequest) -> Result<CompiledPattern, EngineError> {
                 // SOM_LEFTMOST is required for the `from` offset to
                 // be populated in the match callback — without it,
                 // Hyperscan only reports end-of-match.
-                use hyperscan::{BlockDatabase, Pattern, PatternFlags};
+                // `Builder` trait is what provides `.build()` on Pattern.
+                use hyperscan::{BlockDatabase, Builder, Pattern, PatternFlags};
                 let mut flags = PatternFlags::SOM_LEFTMOST;
                 if req.case_insensitive {
                     flags |= PatternFlags::CASELESS;
