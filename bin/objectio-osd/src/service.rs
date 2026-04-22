@@ -742,8 +742,12 @@ impl StorageService for OsdService {
         let copy_len = shard_id.object_id.len().min(16);
         object_id[..copy_len].copy_from_slice(&shard_id.object_id[..copy_len]);
 
-        // Write block
-        disk.write_block(block_num, object_id, shard_id.stripe_id, &req.data)
+        // Write block through the async IoBackend — the tokio
+        // reactor stays free during the syscall / io_uring wait. On
+        // Linux + --features io-uring this is +25% throughput on
+        // 4 MiB stripes vs the old sync path (see storage-io-levels.md).
+        disk.write_block_async(block_num, object_id, shard_id.stripe_id, &req.data)
+            .await
             .map_err(|e| Status::internal(format!("write failed: {}", e)))?;
 
         disk.sync()
@@ -835,15 +839,19 @@ impl StorageService for OsdService {
 
         let disk = &self.disks[location.disk_idx];
 
-        let (_header, data) = disk.read_block(location.block_num).map_err(|e| {
-            self.grpc_metrics.read_shard.record(
-                false,
-                start.elapsed().as_micros() as u64,
-                bytes_in,
-                0,
-            );
-            Status::internal(format!("read failed: {}", e))
-        })?;
+        // Async read — same semantics, reactor stays free during I/O.
+        let (_header, data) = disk
+            .read_block_async(location.block_num)
+            .await
+            .map_err(|e| {
+                self.grpc_metrics.read_shard.record(
+                    false,
+                    start.elapsed().as_micros() as u64,
+                    bytes_in,
+                    0,
+                );
+                Status::internal(format!("read failed: {}", e))
+            })?;
 
         debug!(
             "ReadShard: object={}, stripe={}, pos={}, size={}",
