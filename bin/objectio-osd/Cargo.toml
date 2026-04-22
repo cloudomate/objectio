@@ -37,3 +37,10 @@ futures = { workspace = true }
 toml = "0.8"
 gethostname = "0.5"
 sys-info = "0.9"
+
+[features]
+default = []
+# Opt-in: route shard I/O through io_uring instead of spawn_blocking
+# + pread. Linux 5.6+ only; no-op on macOS / Windows. Measured +25%
+# throughput on 4 MiB stripes (see objectio-docs storage-io-levels).
+io-uring = ["objectio-storage/io-uring"]

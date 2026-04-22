@@ -26,3 +26,10 @@ tracing-subscriber = { workspace = true }
 which = "6"
 tempfile = "3"
 include_dir = "0.7"
+
+[features]
+default = []
+# Propagates to objectio-osd → objectio-storage. Linux-only win; safe
+# no-op elsewhere. Enable on Linux release builds to get +25%
+# throughput + -43% p99.9 on 4 MiB object stripes.
+io-uring = ["objectio-osd/io-uring"]
