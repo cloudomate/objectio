@@ -181,13 +181,15 @@ pub fn compile(req: &GrepRequest) -> Result<CompiledPattern, EngineError> {
             #[cfg(feature = "hyperscan")]
             {
                 use hyperscan::prelude::*;
-                let mut builder = PatternBuilder::from(&pattern);
+                // SOM_LEFTMOST is required for the `from` offset to
+                // be populated in the match callback — without it,
+                // Hyperscan only reports end-of-match.
+                let mut flags = Flags::SOM_LEFTMOST;
                 if req.case_insensitive {
-                    builder.flags(Flags::CASELESS);
+                    flags |= Flags::CASELESS;
                 }
-                let pat = builder
-                    .build()
-                    .map_err(|e| EngineError::CompileFailed(format!("hyperscan: {e:?}")))?;
+                let pat = Pattern::with_flags(pattern, flags)
+                    .map_err(|e| EngineError::CompileFailed(format!("hyperscan pattern: {e:?}")))?;
                 let db: BlockDatabase = pat
                     .build()
                     .map_err(|e| EngineError::CompileFailed(format!("hyperscan compile: {e:?}")))?;
