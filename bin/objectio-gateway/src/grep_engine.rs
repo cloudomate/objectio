@@ -78,7 +78,9 @@ impl std::error::Error for EngineError {}
 
 /// The compiled pattern. One variant per backend. `match_line`
 /// returns either the first hit or `None`.
-#[derive(Debug)]
+///
+/// Debug is manual because `hyperscan::BlockDatabase` doesn't
+/// implement it; we fall back to the variant name for logs.
 pub enum CompiledPattern {
     Regex(regex::Regex),
 
@@ -87,6 +89,18 @@ pub enum CompiledPattern {
 
     #[cfg(feature = "hyperscan")]
     Hyperscan(hyperscan::BlockDatabase),
+}
+
+impl fmt::Debug for CompiledPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Regex(r) => f.debug_tuple("Regex").field(r).finish(),
+            #[cfg(feature = "pcre2")]
+            Self::Pcre2(_) => f.write_str("Pcre2(..)"),
+            #[cfg(feature = "hyperscan")]
+            Self::Hyperscan(_) => f.write_str("Hyperscan(..)"),
+        }
+    }
 }
 
 impl CompiledPattern {
@@ -180,15 +194,13 @@ pub fn compile(req: &GrepRequest) -> Result<CompiledPattern, EngineError> {
         Engine::Hyperscan => {
             #[cfg(feature = "hyperscan")]
             {
-                // `Flags` is re-exported in the prelude as
-                // `CompileFlags`. SOM_LEFTMOST is required for the
-                // `from` offset to be populated in the match callback
-                // — without it, Hyperscan only reports end-of-match.
-                use hyperscan::compile::{Flags, Pattern};
-                use hyperscan::prelude::BlockDatabase;
-                let mut flags = Flags::SOM_LEFTMOST;
+                // SOM_LEFTMOST is required for the `from` offset to
+                // be populated in the match callback — without it,
+                // Hyperscan only reports end-of-match.
+                use hyperscan::{BlockDatabase, Pattern, PatternFlags};
+                let mut flags = PatternFlags::SOM_LEFTMOST;
                 if req.case_insensitive {
-                    flags |= Flags::CASELESS;
+                    flags |= PatternFlags::CASELESS;
                 }
                 let pat = Pattern::with_flags(pattern, flags)
                     .map_err(|e| EngineError::CompileFailed(format!("hyperscan pattern: {e:?}")))?;
