@@ -33,3 +33,9 @@ default = []
 # no-op elsewhere. Enable on Linux release builds to get +25%
 # throughput + -43% p99.9 on 4 MiB object stripes.
 io-uring = ["objectio-osd/io-uring"]
+# Pluggable grep engines — propagate into the embedded gateway.
+# pcre2 needs libpcre2-dev at build time; hyperscan needs
+# libhyperscan-dev (Linux x86_64 primary). Off by default so
+# macOS / Windows builds stay pure-Rust.
+grep-pcre2 = ["objectio-gateway/pcre2"]
+grep-hyperscan = ["objectio-gateway/hyperscan"]

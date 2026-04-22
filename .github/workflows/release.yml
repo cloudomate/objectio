@@ -153,13 +153,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
             # isal = x86 erasure-coding acceleration; io-uring = the
-            # new async I/O backend (see storage-io-levels.md).
-            features: "isal,io-uring"
+            # new async I/O backend (see storage-io-levels.md);
+            # grep-pcre2 + grep-hyperscan = the optional pattern
+            # engines. Hyperscan is Intel-specific — skipped on arm64.
+            features: "isal,io-uring,grep-pcre2,grep-hyperscan"
           - platform: linux-arm64
             target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-            # io-uring is Linux-only; isal is x86-only.
-            features: "io-uring"
+            # io-uring is Linux-only; isal is x86-only; hyperscan
+            # needs Vectorscan on arm (follow-up — validate crate
+            # support first).
+            features: "io-uring,grep-pcre2"
           - platform: darwin-arm64
             target: aarch64-apple-darwin
             os: macos-14
@@ -192,11 +196,18 @@ jobs:
           npm ci --no-audit --no-fund --prefer-offline
           npm run build
 
-      - name: Install ISA-L build deps (linux-amd64 only)
-        if: matrix.platform == 'linux-amd64'
+      - name: Install Linux build deps
+        if: startsWith(matrix.platform, 'linux-')
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm autoconf automake libtool libclang-dev
+          # pcre2 + hyperscan system libraries for the grep engines.
+          # libhyperscan-dev is Intel-only on Debian arm64 the package
+          # might be absent — conditional install further down.
+          sudo apt-get install -y libpcre2-dev pkg-config
+          # ISA-L build deps on amd64 only (erasure-coding accel)
+          if [ "${{ matrix.platform }}" = "linux-amd64" ]; then
+            sudo apt-get install -y nasm autoconf automake libtool libclang-dev libhyperscan-dev
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
