@@ -61,7 +61,84 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::wrappers::ReceiverStream;
 
-/// Agent-side request body.
+/// Agent-side request body for prefix grep (multi-object scan).
+///
+/// Lets an agent ask "grep these lines across every key under this
+/// prefix" in one request. The server fans out key-by-key and
+/// streams `Object` / `Match` / `ObjectEnd` frames as each key
+/// completes. Global `max_matches` caps the overall match stream;
+/// `max_matches_per_object` protects against one noisy key eating
+/// the whole budget.
+#[derive(Debug, Deserialize)]
+pub struct PrefixGrepRequest {
+    /// Regex or literal pattern; same semantics as `GrepRequest::pattern`.
+    pub pattern: String,
+
+    /// Prefix that candidate keys must start with. Empty string →
+    /// entire bucket.
+    #[serde(default)]
+    pub prefix: String,
+
+    /// Cap on the number of keys scanned. `0` → 100.
+    #[serde(default)]
+    pub max_keys: u32,
+
+    /// Global cap on matches returned. `0` → 1000.
+    #[serde(default)]
+    pub max_matches: u32,
+
+    /// Per-object cap. `0` → 100.
+    #[serde(default)]
+    pub max_matches_per_object: u32,
+
+    #[serde(default)]
+    pub literal: bool,
+    #[serde(default)]
+    pub case_insensitive: bool,
+    #[serde(default)]
+    pub content_max_bytes: u32,
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl PrefixGrepRequest {
+    /// Turn the prefix request into a per-object `GrepRequest` plus
+    /// the three multi-object caps (global/per-object/max_keys).
+    pub fn to_per_object(&self) -> (GrepRequest, PrefixCaps) {
+        let per_object = GrepRequest {
+            pattern: self.pattern.clone(),
+            literal: self.literal,
+            case_insensitive: self.case_insensitive,
+            max_matches: if self.max_matches_per_object == 0 {
+                100
+            } else {
+                self.max_matches_per_object
+            },
+            content_max_bytes: self.content_max_bytes,
+            invert: self.invert,
+        };
+        let caps = PrefixCaps {
+            prefix: self.prefix.clone(),
+            max_keys: if self.max_keys == 0 { 100 } else { self.max_keys },
+            max_matches_global: if self.max_matches == 0 {
+                1000
+            } else {
+                self.max_matches
+            },
+        };
+        (per_object, caps)
+    }
+}
+
+/// Extracted caps to keep the driver from re-reading the request.
+#[derive(Debug, Clone)]
+pub struct PrefixCaps {
+    pub prefix: String,
+    pub max_keys: u32,
+    pub max_matches_global: u32,
+}
+
+/// Agent-side request body for single-object grep.
 #[derive(Debug, Deserialize)]
 pub struct GrepRequest {
     /// Pattern to search for. Regex by default; set `literal: true`
@@ -93,16 +170,40 @@ pub struct GrepRequest {
     pub invert: bool,
 }
 
-/// One frame emitted in the NDJSON response stream.
+/// One frame emitted in the NDJSON response stream. Events are a
+/// superset covering both single-object grep (`Start` / `Match` /
+/// `End`) and multi-object prefix grep (additional `Object` /
+/// `ObjectEnd` bracketing per key).
+///
+/// Backwards compatibility: existing single-object callers will only
+/// see `Start`, `Match`, `End`, `Error` — they can ignore the
+/// multi-object variants.
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GrepEvent {
+    /// Emitted once at the start of a single-object scan.
     Start {
         file_size: u64,
         etag: String,
         pattern: String,
     },
+    /// Emitted once per key in a prefix scan, before that key's
+    /// matches stream. Gives agents the size + etag up-front so
+    /// they can decide "this file is tiny, fetch the whole thing
+    /// and skip grep" without an extra HEAD.
+    Object {
+        bucket: String,
+        key: String,
+        file_size: u64,
+        etag: String,
+    },
     Match {
+        /// Bucket / key populated only in prefix-grep responses.
+        /// Single-object responses omit these fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bucket: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
         /// 1-indexed line number in the source file.
         line_number: u64,
         /// Byte offset of the start of the line in the source file.
@@ -122,11 +223,24 @@ pub enum GrepEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
     },
+    /// End of the current object's matches in a prefix scan. Omitted
+    /// in single-object mode.
+    ObjectEnd {
+        bucket: String,
+        key: String,
+        matches_in_object: u64,
+        /// True if this object's scan stopped at
+        /// `max_matches_per_object`.
+        per_object_truncated: bool,
+    },
     End {
         matches: u64,
         bytes_scanned: u64,
         truncated: bool,
         elapsed_ms: u64,
+        /// Populated in prefix scans; omitted in single-object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects_scanned: Option<u64>,
     },
     Error {
         message: String,
@@ -312,6 +426,8 @@ where
 
             let (content, content_truncated) = truncate_utf8(text, opts.content_max_bytes);
             let ev = GrepEvent::Match {
+                bucket: None,
+                key: None,
                 line_number: line_no,
                 offset: line_offset,
                 line_length,
@@ -337,6 +453,7 @@ where
             bytes_scanned: cursor,
             truncated,
             elapsed_ms,
+            objects_scanned: None,
         };
         let _ = tx.send(Ok(frame(&end))).await;
     });
@@ -363,6 +480,215 @@ pub fn respond(
         .header("X-Object-Size", file_size.to_string())
         // Tell clients this is a chunked, streaming response.
         .header(header::TRANSFER_ENCODING, "chunked")
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| Response::new(Body::from("internal error building response")))
+}
+
+/// Parse a prefix-grep body. Same JSON-only content-type contract as
+/// [`parse_body`]; returns either the request or a ready-to-send 400.
+pub fn parse_prefix_body(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<PrefixGrepRequest, Response> {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !ct.contains("application/json") {
+        return Err(GrepError::bad_request(
+            "Content-Type must be application/json",
+        )
+        .into_response());
+    }
+    serde_json::from_slice::<PrefixGrepRequest>(body).map_err(|e| {
+        GrepError::bad_request(format!("invalid request body: {e}")).into_response()
+    })
+}
+
+/// Run a scan over a single in-memory object buffer, sending events
+/// into a caller-provided channel. Bucket/key are tagged onto every
+/// emitted `Match`. Returns `(matches_emitted, per_object_truncated)`.
+///
+/// Caller handles object fetch, channel wiring, and driving the
+/// global `max_matches` cap.
+pub async fn scan_object_into_channel(
+    bucket: String,
+    key: String,
+    body: Vec<u8>,
+    req: GrepRequest,
+    max_matches: u64,
+    tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> (u64, bool) {
+    let (regex, mut opts) = match req.validate() {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tx
+                .send(Ok(frame(&GrepEvent::Error {
+                    message: format!("{bucket}/{key}: {e:?}"),
+                })))
+                .await;
+            return (0, false);
+        }
+    };
+    // Clamp per-object cap to the remaining global budget so we
+    // never exceed the caller's global limit.
+    opts.max_matches = opts.max_matches.min(max_matches);
+    if opts.max_matches == 0 {
+        return (0, false);
+    }
+
+    let reader = tokio::io::BufReader::new(std::io::Cursor::new(body));
+    let mut buf = Vec::with_capacity(4096);
+    let mut line_no: u64 = 0;
+    let mut cursor: u64 = 0;
+    let mut matches: u64 = 0;
+    let mut truncated = false;
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = reader;
+    loop {
+        buf.clear();
+        let n = match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                let _ = tx
+                    .send(Ok(frame(&GrepEvent::Error {
+                        message: format!("{bucket}/{key}: read at {cursor}: {e}"),
+                    })))
+                    .await;
+                break;
+            }
+        };
+        line_no += 1;
+        let line_offset = cursor;
+        let line_length = n as u64;
+        cursor += line_length;
+        let bytes = trim_trailing_newline(&buf);
+        let Some(text) = std::str::from_utf8(bytes).ok() else {
+            continue;
+        };
+        let hit = regex.find(text);
+        let should_emit = match (hit.is_some(), opts.invert) {
+            (true, false) | (false, true) => true,
+            _ => false,
+        };
+        if !should_emit {
+            continue;
+        }
+        let (match_offset, match_length) = match hit {
+            Some(m) => (
+                line_offset + m.start() as u64,
+                (m.end() - m.start()) as u64,
+            ),
+            None => (line_offset, 0),
+        };
+        let (content, content_truncated) = truncate_utf8(text, opts.content_max_bytes);
+        let ev = GrepEvent::Match {
+            bucket: Some(bucket.clone()),
+            key: Some(key.clone()),
+            line_number: line_no,
+            offset: line_offset,
+            line_length,
+            match_offset,
+            match_length,
+            content: content.to_string(),
+            truncated: content_truncated,
+        };
+        if tx.send(Ok(frame(&ev))).await.is_err() {
+            return (matches, truncated);
+        }
+        matches += 1;
+        if matches >= opts.max_matches {
+            truncated = true;
+            break;
+        }
+    }
+    (matches, truncated)
+}
+
+/// Emit the Start frame for a prefix scan. file_size/etag zeroed —
+/// they're per-object concepts.
+pub async fn emit_prefix_start(
+    pattern: &str,
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> Result<(), ()> {
+    let ev = GrepEvent::Start {
+        file_size: 0,
+        etag: String::new(),
+        pattern: pattern.to_string(),
+    };
+    tx.send(Ok(frame(&ev))).await.map_err(|_| ())
+}
+
+/// Emit an `Object` frame to the channel.
+pub async fn emit_object_start(
+    bucket: &str,
+    key: &str,
+    file_size: u64,
+    etag: &str,
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> Result<(), ()> {
+    let ev = GrepEvent::Object {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        file_size,
+        etag: etag.to_string(),
+    };
+    tx.send(Ok(frame(&ev))).await.map_err(|_| ())
+}
+
+/// Emit an `ObjectEnd` frame.
+pub async fn emit_object_end(
+    bucket: &str,
+    key: &str,
+    matches_in_object: u64,
+    per_object_truncated: bool,
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> Result<(), ()> {
+    let ev = GrepEvent::ObjectEnd {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        matches_in_object,
+        per_object_truncated,
+    };
+    tx.send(Ok(frame(&ev))).await.map_err(|_| ())
+}
+
+/// Emit the final `End` frame for a prefix scan.
+pub async fn emit_prefix_end(
+    matches: u64,
+    bytes_scanned: u64,
+    truncated: bool,
+    elapsed_ms: u64,
+    objects_scanned: u64,
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> Result<(), ()> {
+    let ev = GrepEvent::End {
+        matches,
+        bytes_scanned,
+        truncated,
+        elapsed_ms,
+        objects_scanned: Some(objects_scanned),
+    };
+    tx.send(Ok(frame(&ev))).await.map_err(|_| ())
+}
+
+/// Build a streaming NDJSON response from a caller-owned channel.
+/// The caller spawns a task that sends events (via the helper emit_*
+/// functions above); this wraps the receiver in an axum body.
+pub fn respond_from_channel(
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    object_size_hint: Option<u64>,
+) -> Response {
+    let stream = ReceiverStream::new(rx);
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, NDJSON)
+        .header(header::TRANSFER_ENCODING, "chunked");
+    if let Some(sz) = object_size_hint {
+        builder = builder.header("X-Object-Size", sz.to_string());
+    }
+    builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|_| Response::new(Body::from("internal error building response")))
 }

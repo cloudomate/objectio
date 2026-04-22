@@ -852,6 +852,9 @@ pub struct PostBucketParams {
     /// If present, this is a list multipart uploads request (also handled by GET)
     #[allow(dead_code)]
     uploads: Option<String>,
+    /// If present, this is a prefix-scoped grep across multiple keys.
+    /// The request body carries a [`grep::PrefixGrepRequest`].
+    grep: Option<String>,
 }
 
 impl PostBucketParams {
@@ -1450,11 +1453,15 @@ pub async fn post_bucket(
     Path(bucket): Path<String>,
     Query(params): Query<PostBucketParams>,
     auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // Check if this is a delete objects request
     if params.is_delete_request() {
         return delete_objects(State(state), Path(bucket), auth, body).await;
+    }
+    if params.grep.is_some() {
+        return grep_prefix_internal(state, bucket, auth, headers, body).await;
     }
 
     // Unknown POST operation on bucket
@@ -4459,6 +4466,227 @@ async fn grep_object_internal(
     };
     let cursor = std::io::Cursor::new(body_bytes);
     grep::respond(req, cursor, size, etag)
+}
+
+/// `POST /{bucket}?grep` — prefix-scoped regex grep across many keys.
+/// Lists keys under the requested prefix, runs the same scan as the
+/// single-object path on each, and streams match events tagged by
+/// `bucket` + `key`. Emits `Object` / `ObjectEnd` frames bracketing
+/// each key's matches so agents know when one file is done.
+///
+/// Global `max_matches` caps the total match stream; per-object cap
+/// protects against a single noisy file exhausting the budget.
+///
+/// Same memory caveat as single-object grep — each object is
+/// collected in full before scanning. Follow-up for streaming.
+async fn grep_prefix_internal(
+    state: Arc<AppState>,
+    bucket: String,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    use crate::grep;
+    let req = match grep::parse_prefix_body(&headers, &body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let (per_object_req_template, caps) = req.to_per_object();
+
+    // List keys up-front so we know the cap. Agents asking for a
+    // scan over 10k keys should use pagination; v1 caps at
+    // `max_keys`.
+    let mut meta_client = state.meta_client.clone();
+    let list_resp = match meta_client
+        .list_objects(objectio_proto::metadata::ListObjectsRequest {
+            bucket: bucket.clone(),
+            prefix: caps.prefix.clone(),
+            delimiter: String::new(),
+            start_after: String::new(),
+            continuation_token: String::new(),
+            max_keys: caps.max_keys,
+            include_versions: false,
+        })
+        .await
+    {
+        Ok(r) => r.into_inner(),
+        Err(e) => {
+            return S3Error::xml_response(
+                "InternalError",
+                &format!("list_objects failed: {e}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
+
+    let mut keys: Vec<(String, u64)> = list_resp
+        .entries
+        .into_iter()
+        .map(|e| (e.key, e.size))
+        .collect();
+
+    // Meta's OBJECT_LISTINGS table may be empty for pre-migration
+    // objects. Fall back to the scatter-gather path (same as
+    // list_objects handler) so freshly-uploaded aio-backed buckets
+    // work out of the box.
+    if keys.is_empty() {
+        if let Ok(list_result) = state
+            .scatter_gather
+            .list_objects(
+                &mut meta_client,
+                &bucket,
+                &caps.prefix,
+                caps.max_keys,
+                None,
+            )
+            .await
+        {
+            keys = list_result
+                .objects
+                .into_iter()
+                .map(|o| (o.key, o.size))
+                .collect();
+        }
+    }
+
+    tracing::info!(
+        "grep-prefix: bucket={} prefix={:?} listed {} keys",
+        bucket,
+        caps.prefix,
+        keys.len()
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(256);
+    let state = Arc::clone(&state);
+    let bucket_for_task = bucket.clone();
+    let pattern_echo = per_object_req_template.pattern.clone();
+
+    tokio::spawn(async move {
+        use std::time::Instant;
+        let start_time = Instant::now();
+        // Emit a Start frame up-front (reusing the single-object
+        // Start event shape) so clients see a pattern echo + per-scan
+        // correlation ID. file_size/etag are zeroed — multi-object
+        // scans have neither at this level.
+        let _ = crate::grep::emit_prefix_start(&pattern_echo, &tx).await;
+
+        let mut matches_global: u64 = 0;
+        let mut bytes_scanned: u64 = 0;
+        let mut objects_scanned: u64 = 0;
+        let mut truncated = false;
+
+        for (key, size_hint) in keys {
+            if matches_global >= caps.max_matches_global as u64 {
+                truncated = true;
+                break;
+            }
+            // Fetch the object by re-entering the authenticated GET
+            // path. Keeps SigV4 + bucket-policy + SSE-C consistent
+            // with single-object grep.
+            let get_headers = HeaderMap::new();
+            let resp = get_object(
+                State(Arc::clone(&state)),
+                Path((bucket_for_task.clone(), key.clone())),
+                auth.clone(),
+                get_headers,
+            )
+            .await;
+            if !resp.status().is_success() {
+                // Non-fatal: skip this key but note it.
+                let _ = tx
+                    .send(Ok(Bytes::from(
+                        serde_json::json!({
+                            "type": "error",
+                            "message": format!(
+                                "skip {}/{}: status {}", bucket_for_task, key, resp.status()
+                            ),
+                        })
+                        .to_string()
+                            + "\n",
+                    )))
+                    .await;
+                continue;
+            }
+            let file_size: u64 = resp
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(size_hint as u64);
+            let etag = resp
+                .headers()
+                .get(header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+
+            let _ = crate::grep::emit_object_start(
+                &bucket_for_task, &key, file_size, &etag, &tx,
+            )
+            .await;
+
+            let body_bytes = match axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024 * 1024)
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = tx
+                        .send(Ok(Bytes::from(
+                            serde_json::json!({
+                                "type": "error",
+                                "message": format!("body read {}/{}: {e}", bucket_for_task, key),
+                            })
+                            .to_string()
+                                + "\n",
+                        )))
+                        .await;
+                    continue;
+                }
+            };
+            bytes_scanned += body_bytes.len() as u64;
+
+            let remaining = caps.max_matches_global as u64 - matches_global;
+            let per_req = crate::grep::GrepRequest {
+                pattern: per_object_req_template.pattern.clone(),
+                literal: per_object_req_template.literal,
+                case_insensitive: per_object_req_template.case_insensitive,
+                max_matches: per_object_req_template.max_matches,
+                content_max_bytes: per_object_req_template.content_max_bytes,
+                invert: per_object_req_template.invert,
+            };
+            let (matches_here, per_truncated) = crate::grep::scan_object_into_channel(
+                bucket_for_task.clone(),
+                key.clone(),
+                body_bytes.to_vec(),
+                per_req,
+                remaining,
+                tx.clone(),
+            )
+            .await;
+            matches_global += matches_here;
+            objects_scanned += 1;
+            let _ = crate::grep::emit_object_end(
+                &bucket_for_task,
+                &key,
+                matches_here,
+                per_truncated,
+                &tx,
+            )
+            .await;
+        }
+
+        let _ = crate::grep::emit_prefix_end(
+            matches_global,
+            bytes_scanned,
+            truncated,
+            start_time.elapsed().as_millis() as u64,
+            objects_scanned,
+            &tx,
+        )
+        .await;
+    });
+
+    crate::grep::respond_from_channel(rx, None)
 }
 
 /// Initiate multipart upload - internal implementation
