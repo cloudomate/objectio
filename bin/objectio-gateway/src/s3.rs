@@ -4660,6 +4660,7 @@ async fn grep_prefix_internal(
                 max_matches: per_object_req_template.max_matches,
                 content_max_bytes: per_object_req_template.content_max_bytes,
                 invert: per_object_req_template.invert,
+                engine: per_object_req_template.engine.clone(),
             };
             let (matches_here, per_truncated, obj_bytes) = crate::grep::scan_object_into_channel(
                 bucket_for_task.clone(),

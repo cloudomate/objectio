@@ -56,7 +56,6 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use bytes::Bytes;
-use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::wrappers::ReceiverStream;
@@ -105,6 +104,10 @@ pub struct PrefixGrepRequest {
     pub content_max_bytes: u32,
     #[serde(default)]
     pub invert: bool,
+    /// Same semantics as `GrepRequest::engine`. Applied to every
+    /// per-object scan in this prefix.
+    #[serde(default)]
+    pub engine: String,
 }
 
 impl PrefixGrepRequest {
@@ -122,6 +125,7 @@ impl PrefixGrepRequest {
             },
             content_max_bytes: self.content_max_bytes,
             invert: self.invert,
+            engine: self.engine.clone(),
         };
         let caps = PrefixCaps {
             prefix: self.prefix.clone(),
@@ -176,6 +180,21 @@ pub struct GrepRequest {
     /// Return lines that do *not* match the pattern (grep -v).
     #[serde(default)]
     pub invert: bool,
+
+    /// Pattern-matching backend. Empty / missing → "regex" (pure
+    /// Rust, default). Alternatives are opt-in at build time:
+    ///
+    ///   "pcre2"     — PCRE2 JIT (feature `pcre2`); supports
+    ///                 backrefs / lookaround / atomic groups
+    ///   "hyperscan" — Intel Hyperscan / Vectorscan (feature
+    ///                 `hyperscan`); SIMD-accelerated, great for
+    ///                 high-throughput scanning
+    ///
+    /// Picking an engine that wasn't compiled in returns 400 with
+    /// a clear "rebuild with --features X" message. See
+    /// `crate::grep_engine`.
+    #[serde(default)]
+    pub engine: String,
 }
 
 /// One frame emitted in the NDJSON response stream. Events are a
@@ -276,28 +295,15 @@ const DEFAULT_CONTENT_MAX_BYTES: usize = 8192;
 const NDJSON: &str = "application/x-ndjson";
 
 impl GrepRequest {
-    fn validate(&self) -> Result<(regex::Regex, ScanOpts), GrepError> {
+    fn validate(&self) -> Result<(crate::grep_engine::CompiledPattern, ScanOpts), GrepError> {
         if self.pattern.is_empty() {
             return Err(GrepError::bad_request("pattern is required"));
         }
-        // Arbitrary soft cap — pathological patterns would be caught
-        // by the regex compiler anyway, but fail fast on obvious
-        // abuse.
         if self.pattern.len() > 64 * 1024 {
             return Err(GrepError::bad_request("pattern exceeds 64 KiB"));
         }
-        let pattern = if self.literal {
-            regex::escape(&self.pattern)
-        } else {
-            self.pattern.clone()
-        };
-        let re = RegexBuilder::new(&pattern)
-            .case_insensitive(self.case_insensitive)
-            // Cap to 10 MiB of regex bytecode — pathological regexes
-            // would otherwise DoS the gateway.
-            .size_limit(10 * 1024 * 1024)
-            .build()
-            .map_err(|e| GrepError::bad_request(format!("invalid regex: {e}")))?;
+        let compiled = crate::grep_engine::compile(self)
+            .map_err(|e| GrepError::bad_request(e.to_string()))?;
         let opts = ScanOpts {
             max_matches: if self.max_matches == 0 {
                 DEFAULT_MAX_MATCHES
@@ -311,7 +317,7 @@ impl GrepRequest {
             },
             invert: self.invert,
         };
-        Ok((re, opts))
+        Ok((compiled, opts))
     }
 }
 
@@ -359,7 +365,7 @@ impl GrepError {
 /// the full scan to finish.
 fn scan_stream<R>(
     reader: R,
-    regex: regex::Regex,
+    pattern: crate::grep_engine::CompiledPattern,
     opts: ScanOpts,
     file_size: u64,
     etag: String,
@@ -422,7 +428,7 @@ where
             // skip them. Agents targetting text files won't hit this;
             // binary would.
             let Some(text) = text else { continue };
-            let hit = regex.find(text);
+            let hit = pattern.match_line(text);
             let should_emit = match (hit.is_some(), opts.invert) {
                 (true, false) | (false, true) => true,
                 _ => false,
@@ -432,9 +438,9 @@ where
             }
 
             let (match_offset, match_length) = match hit {
-                Some(m) => (
-                    line_offset + m.start() as u64,
-                    (m.end() - m.start()) as u64,
+                Some(h) => (
+                    line_offset + h.start as u64,
+                    (h.end - h.start) as u64,
                 ),
                 None => (line_offset, 0), // invert case — no substring match
             };
@@ -485,11 +491,11 @@ pub fn respond(
     file_size: u64,
     etag: String,
 ) -> Response {
-    let (regex, opts) = match req.validate() {
+    let (pattern, opts) = match req.validate() {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
-    let stream = scan_stream(body, regex, opts, file_size, etag, req.pattern);
+    let stream = scan_stream(body, pattern, opts, file_size, etag, req.pattern);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, NDJSON)
@@ -541,7 +547,7 @@ pub async fn scan_object_into_channel<R>(
 where
     R: tokio::io::AsyncRead + Unpin + Send,
 {
-    let (regex, mut opts) = match req.validate() {
+    let (pattern, mut opts) = match req.validate() {
         Ok(v) => v,
         Err(e) => {
             let _ = tx
@@ -588,7 +594,7 @@ where
         let Some(text) = std::str::from_utf8(bytes).ok() else {
             continue;
         };
-        let hit = regex.find(text);
+        let hit = pattern.match_line(text);
         let should_emit = match (hit.is_some(), opts.invert) {
             (true, false) | (false, true) => true,
             _ => false,
@@ -597,9 +603,9 @@ where
             continue;
         }
         let (match_offset, match_length) = match hit {
-            Some(m) => (
-                line_offset + m.start() as u64,
-                (m.end() - m.start()) as u64,
+            Some(h) => (
+                line_offset + h.start as u64,
+                (h.end - h.start) as u64,
             ),
             None => (line_offset, 0),
         };
@@ -822,6 +828,7 @@ mod tests {
             max_matches: 0,
             content_max_bytes: 0,
             invert: false,
+            engine: "".into(),
         };
         let events = run(body, req);
         // start + 2 match + end
@@ -876,6 +883,7 @@ mod tests {
                 max_matches: 0,
                 content_max_bytes: 0,
                 invert: false,
+                engine: "".into(),
             },
         );
         // Only "a.b" matches under literal mode; "a+b" and "a/b" do not.
@@ -904,6 +912,7 @@ mod tests {
                 max_matches: 0,
                 content_max_bytes: 0,
                 invert: true,
+                engine: "".into(),
             },
         );
         let ms: Vec<_> = events
@@ -931,6 +940,7 @@ mod tests {
                 max_matches: 5,
                 content_max_bytes: 0,
                 invert: false,
+                engine: "".into(),
             },
         );
         let n = events
@@ -956,6 +966,7 @@ mod tests {
                 max_matches: 0,
                 content_max_bytes: 0,
                 invert: false,
+                engine: "".into(),
             },
         );
         let m = events
@@ -985,6 +996,7 @@ mod tests {
                 max_matches: 0,
                 content_max_bytes: 10, // odd number within multi-byte chars
                 invert: false,
+                engine: "".into(),
             },
         );
         for e in &events {

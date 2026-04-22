@@ -5,6 +5,7 @@
 
 pub mod admin;
 pub mod grep;
+pub mod grep_engine;
 pub mod auth_middleware;
 pub mod chunked_decode;
 pub mod console_auth;

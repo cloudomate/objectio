@@ -64,6 +64,18 @@ tokio-stream = "0.1"
 # buffering the full body in memory.
 tokio-util = { version = "0.7", features = ["io"] }
 
+# Optional grep regex engines — off by default (pure-Rust `regex`
+# remains the default engine). Opt-in at build time to unlock the
+# corresponding `engine: "pcre2"` / `engine: "hyperscan"` in the
+# grep JSON body.
+#
+# * `pcre2` — Perl-compatible regex (backrefs, lookaround). Pulls
+#   in a C library; needs `libpcre2-dev` installed when compiling.
+# * `hyperscan` — Intel Hyperscan SIMD matcher. Linux-primary;
+#   needs the Hyperscan / Vectorscan system library.
+pcre2 = { version = "0.2", optional = true }
+hyperscan = { version = "0.3", optional = true }
+
 # Kubernetes client for the K8sHostProvider (Phase 2 host actions).
 # `rustls-tls` avoids linking OpenSSL — keeps the Alpine-ish runtime
 # image small. `client` pulls in the minimal set we need (no CRDs,
@@ -72,3 +84,13 @@ tokio-util = { version = "0.7", features = ["io"] }
 # use yet.
 kube = { version = "0.97", default-features = false, features = ["client", "rustls-tls"] }
 k8s-openapi = { version = "0.23", default-features = false, features = ["v1_29"] }
+
+[features]
+default = []
+# Compile in the PCRE2 pattern backend so requests can select
+# `engine: "pcre2"`. Requires libpcre2-dev at build time.
+pcre2 = ["dep:pcre2"]
+# Compile in the Hyperscan / Vectorscan pattern backend for
+# `engine: "hyperscan"`. Requires the Hyperscan system library
+# (`libhs-dev` on Debian) at build time. Linux-primary.
+hyperscan = ["dep:hyperscan"]
