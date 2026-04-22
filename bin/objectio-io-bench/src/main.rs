@@ -342,23 +342,22 @@ fn run_uring(args: &Args) -> Result<RunStats> {
 
 #[cfg(target_os = "linux")]
 async fn run_uring_async(args: &Args) -> Result<RunStats> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::fs::OpenOptionsExt;
     use tokio_uring::fs::File;
 
-    // tokio-uring uses its own OpenOptions. O_DIRECT goes via custom_flags.
-    let file = if matches!(args.op, Op::SequentialWrite) {
-        tokio_uring::fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .custom_flags(o_direct_flag())
-            .open(&args.file)
-            .await?
-    } else {
-        tokio_uring::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(o_direct_flag())
-            .open(&args.file)
-            .await?
-    };
+    // tokio-uring 0.5's OpenOptions doesn't expose custom_flags, so
+    // open with std (which does) to get an fd backed by O_DIRECT, then
+    // hand the fd to tokio-uring. The resulting File submits all I/O
+    // through the io_uring ring — exactly what we're benching.
+    let std_file = OpenOptions::new()
+        .read(true)
+        .write(matches!(args.op, Op::SequentialWrite))
+        .custom_flags(o_direct_flag())
+        .open(&args.file)?;
+    // SAFETY: we own `std_file` and immediately hand off its fd to the
+    // tokio-uring File, which takes over lifecycle.
+    let file = unsafe { File::from_raw_fd(std_file.into_raw_fd()) };
 
     let file_len = args.size_mb * 1024 * 1024;
     let bs = args.block_size as u64;
