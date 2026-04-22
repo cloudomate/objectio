@@ -390,7 +390,9 @@ async fn run_uring_async(args: &Args) -> Result<RunStats> {
                 buf = returned;
             }
             Op::SequentialWrite => {
-                let (res, returned) = file.write_at(buf, offset).await;
+                // tokio-uring 0.5 changed write_at to return an
+                // UnsubmittedOneshot that needs .submit() before await.
+                let (res, returned) = file.write_at(buf, offset).submit().await;
                 res?;
                 buf = returned;
             }
