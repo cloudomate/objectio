@@ -2348,9 +2348,12 @@ dependencies = [
  "objectio-common",
  "objectio-proto",
  "prost",
+ "quick-xml",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "tonic",
  "tracing",
  "uuid",
@@ -2401,6 +2404,7 @@ dependencies = [
  "objectio-placement",
  "objectio-proto",
  "objectio-s3",
+ "objectio-unity-catalog",
  "parking_lot",
  "pcre2",
  "quick-xml",
@@ -2653,6 +2657,22 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "objectio-unity-catalog"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.8",
+ "objectio-auth",
+ "objectio-common",
+ "objectio-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

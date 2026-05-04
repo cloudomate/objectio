@@ -21,9 +21,9 @@ use objectio_proto::metadata::{
     CreatePoolRequest, CreateTenantRequest, DeleteConfigRequest, DeletePoolRequest,
     DeleteTenantRequest, GetConfigRequest, GetDrainStatusRequest, GetListingNodesRequest,
     GetPoolRequest, GetRebalanceStatusRequest, GetTenantRequest, ListConfigRequest,
-    ListPoolsRequest, ListTenantsRequest, OsdAdminState as ProtoOsdAdminState,
-    PoolConfig, SetConfigRequest, SetOsdAdminStateRequest, TenantConfig,
-    UpdatePoolRequest, UpdateTenantRequest,
+    ListPoolsRequest, ListTenantsRequest, OsdAdminState as ProtoOsdAdminState, PoolConfig,
+    SetConfigRequest, SetOsdAdminStateRequest, TenantConfig, UpdatePoolRequest,
+    UpdateTenantRequest,
 };
 use objectio_proto::storage::storage_service_client::StorageServiceClient;
 
@@ -254,10 +254,8 @@ pub async fn admin_set_config(
     // OIDC provider registration; gating here stops Community users from
     // wiring Keycloak/Entra as an identity source.
     if section.starts_with("identity/openid/")
-        && let Err(r) = crate::license_gate::require_feature(
-            &state,
-            objectio_license::Feature::Oidc,
-        )
+        && let Err(r) =
+            crate::license_gate::require_feature(&state, objectio_license::Feature::Oidc)
     {
         return r;
     }
@@ -566,10 +564,7 @@ pub async fn admin_create_pool(
     // LRC (ec_type = 1, ERASURE_LRC) is Enterprise-only. MDS and replication
     // stay available on Community.
     if pool.ec_type == objectio_proto::metadata::ErasureType::ErasureLrc as i32
-        && let Err(r) = crate::license_gate::require_feature(
-            &state,
-            objectio_license::Feature::Lrc,
-        )
+        && let Err(r) = crate::license_gate::require_feature(&state, objectio_license::Feature::Lrc)
     {
         return r;
     }
@@ -688,10 +683,7 @@ pub async fn admin_update_pool(
     }
     let mut pool = json_to_pool(&body);
     if pool.ec_type == objectio_proto::metadata::ErasureType::ErasureLrc as i32
-        && let Err(r) = crate::license_gate::require_feature(
-            &state,
-            objectio_license::Feature::Lrc,
-        )
+        && let Err(r) = crate::license_gate::require_feature(&state, objectio_license::Feature::Lrc)
     {
         return r;
     }
@@ -764,10 +756,9 @@ pub async fn admin_create_tenant(
     if let Some(deny) = require_system_admin(&auth, &headers) {
         return deny;
     }
-    if let Err(r) = crate::license_gate::require_feature(
-        &state,
-        objectio_license::Feature::MultiTenancy,
-    ) {
+    if let Err(r) =
+        crate::license_gate::require_feature(&state, objectio_license::Feature::MultiTenancy)
+    {
         return r;
     }
     let tenant = json_to_tenant(&body);
@@ -1094,9 +1085,7 @@ pub async fn admin_create_bucket(
         if let Some(deny) = require_system_admin(&auth, &headers) {
             return deny;
         }
-    } else if let Some(deny) =
-        require_tenant_admin_access(&state, &auth, &headers, &tenant).await
-    {
+    } else if let Some(deny) = require_tenant_admin_access(&state, &auth, &headers, &tenant).await {
         return deny;
     }
     let mut client = state.meta_client.clone();
@@ -1128,16 +1117,18 @@ pub async fn admin_delete_bucket(
         .get_bucket(objectio_proto::metadata::GetBucketRequest { name: name.clone() })
         .await
     {
-        Ok(resp) => resp.into_inner().bucket.map(|b| b.tenant).unwrap_or_default(),
+        Ok(resp) => resp
+            .into_inner()
+            .bucket
+            .map(|b| b.tenant)
+            .unwrap_or_default(),
         Err(_) => return (StatusCode::NOT_FOUND, "Bucket not found").into_response(),
     };
     if tenant.is_empty() {
         if let Some(deny) = require_system_admin(&auth, &headers) {
             return deny;
         }
-    } else if let Some(deny) =
-        require_tenant_admin_access(&state, &auth, &headers, &tenant).await
-    {
+    } else if let Some(deny) = require_tenant_admin_access(&state, &auth, &headers, &tenant).await {
         return deny;
     }
     match client
@@ -1384,9 +1375,7 @@ pub async fn admin_create_warehouse(
         if let Some(deny) = require_system_admin(&auth, &headers) {
             return deny;
         }
-    } else if let Some(deny) =
-        require_tenant_admin_access(&state, &auth, &headers, &tenant).await
-    {
+    } else if let Some(deny) = require_tenant_admin_access(&state, &auth, &headers, &tenant).await {
         return deny;
     }
     let properties: std::collections::HashMap<String, String> = body["properties"]
@@ -1450,9 +1439,7 @@ pub async fn admin_delete_warehouse(
         if let Some(deny) = require_system_admin(&auth, &headers) {
             return deny;
         }
-    } else if let Some(deny) =
-        require_tenant_admin_access(&state, &auth, &headers, &tenant).await
-    {
+    } else if let Some(deny) = require_tenant_admin_access(&state, &auth, &headers, &tenant).await {
         return deny;
     }
     match client
@@ -1699,9 +1686,7 @@ pub async fn admin_create_share_tenant(
         if let Some(deny) = require_system_admin(&auth, &headers) {
             return deny;
         }
-    } else if let Some(deny) =
-        require_tenant_admin_access(&state, &auth, &headers, &tenant).await
-    {
+    } else if let Some(deny) = require_tenant_admin_access(&state, &auth, &headers, &tenant).await {
         return deny;
     }
     let mut client = state.meta_client.clone();
@@ -1815,11 +1800,7 @@ pub async fn admin_list_nodes(
     let mut unique_addrs: Vec<(String, Vec<u8>, i32)> = Vec::new();
     for node in &nodes {
         if seen.insert(node.address.clone()) {
-            unique_addrs.push((
-                node.address.clone(),
-                node.node_id.clone(),
-                node.admin_state,
-            ));
+            unique_addrs.push((node.address.clone(), node.node_id.clone(), node.admin_state));
         }
     }
 
@@ -2093,8 +2074,7 @@ pub async fn admin_reboot_osd(
     let node_id_bytes = match hex::decode(&node_id_hex) {
         Ok(b) if b.len() == 16 => b,
         _ => {
-            return (StatusCode::BAD_REQUEST, "node_id must be 32 hex chars")
-                .into_response();
+            return (StatusCode::BAD_REQUEST, "node_id must be 32 hex chars").into_response();
         }
     };
 
@@ -2103,8 +2083,7 @@ pub async fn admin_reboot_osd(
     let addr = match nodes.iter().find(|n| n.node_id == node_id_bytes) {
         Some(n) => n.address.clone(),
         None => {
-            return (StatusCode::NOT_FOUND, format!("no OSD {node_id_hex}"))
-                .into_response();
+            return (StatusCode::NOT_FOUND, format!("no OSD {node_id_hex}")).into_response();
         }
     };
     let osd_addr = if addr.starts_with("http") {
@@ -2127,11 +2106,7 @@ pub async fn admin_reboot_osd(
             }
         },
         Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("osd connect failed: {e}"),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, format!("osd connect failed: {e}")).into_response();
         }
     };
     if pod_name.is_empty() {
@@ -2169,8 +2144,7 @@ pub async fn admin_drain_status(
     let resp = match meta.get_drain_status(GetDrainStatusRequest {}).await {
         Ok(r) => r.into_inner(),
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string())
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
         }
     };
 
@@ -2202,11 +2176,13 @@ pub async fn admin_rebalance_status(
         return deny;
     }
     let mut meta = state.meta_client.clone();
-    let r = match meta.get_rebalance_status(GetRebalanceStatusRequest {}).await {
+    let r = match meta
+        .get_rebalance_status(GetRebalanceStatusRequest {})
+        .await
+    {
         Ok(r) => r.into_inner(),
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string())
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
         }
     };
     Json(serde_json::json!({
@@ -2263,13 +2239,15 @@ async fn admin_rebalance_set_paused(
     let mut meta = state.meta_client.clone();
     let req = SetConfigRequest {
         key: "rebalance/paused".to_string(),
-        value: if paused { b"true".to_vec() } else { b"false".to_vec() },
+        value: if paused {
+            b"true".to_vec()
+        } else {
+            b"false".to_vec()
+        },
         updated_by: who,
     };
     match meta.set_config(req).await {
-        Ok(_) => {
-            Json(serde_json::json!({ "paused": paused })).into_response()
-        }
+        Ok(_) => Json(serde_json::json!({ "paused": paused })).into_response(),
         Err(e) => {
             let code = if e.code() == tonic::Code::FailedPrecondition {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -2348,7 +2326,8 @@ pub async fn compute_cluster_usage(state: &AppState) -> ClusterUsage {
                 .get_status(objectio_proto::storage::GetStatusRequest {})
                 .await
         {
-            raw_capacity_bytes = raw_capacity_bytes.saturating_add(status.into_inner().total_capacity);
+            raw_capacity_bytes =
+                raw_capacity_bytes.saturating_add(status.into_inner().total_capacity);
         }
     }
     ClusterUsage {
@@ -2356,7 +2335,6 @@ pub async fn compute_cluster_usage(state: &AppState) -> ClusterUsage {
         raw_capacity_bytes,
     }
 }
-
 
 /// GET /_admin/license — currently installed license summary.
 /// Always returns 200, even for Community tier, so the console can render
@@ -2441,11 +2419,7 @@ pub async fn admin_put_license(
         .await
     {
         warn!("failed to persist license to meta: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            e.message().to_string(),
-        )
-            .into_response();
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
     }
     state.set_license(Arc::new(license.clone()));
     info!(
@@ -2507,7 +2481,9 @@ pub async fn admin_cluster_info(
         .await
     {
         Ok(resp) => resp.into_inner().nodes,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
+        }
     };
 
     let me = &state.self_topology;
@@ -2516,7 +2492,11 @@ pub async fn admin_cluster_info(
         .map(|n| {
             let fd = n.failure_domain.clone().unwrap_or_default();
             let peer = objectio_placement::FailureDomainInfo::new_full(
-                &fd.region, &fd.zone, &fd.datacenter, &fd.rack, &fd.host,
+                &fd.region,
+                &fd.zone,
+                &fd.datacenter,
+                &fd.rack,
+                &fd.host,
             );
             let dist = objectio_placement::distance(me, &peer);
             serde_json::json!({
@@ -2574,22 +2554,47 @@ pub async fn admin_get_topology(
         .await
     {
         Ok(resp) => resp.into_inner().nodes,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
+        }
     };
 
     // Build a nested counts structure as JSON. Each level carries the
     // display name + how many distinct children it has + an array of
     // children. Small enough for every size of cluster we'll deploy.
     use std::collections::BTreeMap;
-    type Tree = BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<String>>>>>>;
+    type Tree = BTreeMap<
+        String,
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<String>>>>>,
+    >;
     let mut tree: Tree = BTreeMap::new();
     for n in &nodes {
         let fd = n.failure_domain.clone().unwrap_or_default();
-        let region = if fd.region.is_empty() { "(none)".into() } else { fd.region };
-        let zone = if fd.zone.is_empty() { "(none)".into() } else { fd.zone };
-        let dc = if fd.datacenter.is_empty() { "(none)".into() } else { fd.datacenter };
-        let rack = if fd.rack.is_empty() { "(none)".into() } else { fd.rack };
-        let host = if fd.host.is_empty() { "(none)".into() } else { fd.host };
+        let region = if fd.region.is_empty() {
+            "(none)".into()
+        } else {
+            fd.region
+        };
+        let zone = if fd.zone.is_empty() {
+            "(none)".into()
+        } else {
+            fd.zone
+        };
+        let dc = if fd.datacenter.is_empty() {
+            "(none)".into()
+        } else {
+            fd.datacenter
+        };
+        let rack = if fd.rack.is_empty() {
+            "(none)".into()
+        } else {
+            fd.rack
+        };
+        let host = if fd.host.is_empty() {
+            "(none)".into()
+        } else {
+            fd.host
+        };
         tree.entry(region)
             .or_default()
             .entry(zone)
@@ -2649,7 +2654,10 @@ pub async fn admin_get_topology(
         r_set.insert(fd.region.clone());
         z_set.insert(format!("{}:{}", fd.region, fd.zone));
         d_set.insert(format!("{}:{}:{}", fd.region, fd.zone, fd.datacenter));
-        rk_set.insert(format!("{}:{}:{}:{}", fd.region, fd.zone, fd.datacenter, fd.rack));
+        rk_set.insert(format!(
+            "{}:{}:{}:{}",
+            fd.region, fd.zone, fd.datacenter, fd.rack
+        ));
         h_set.insert(format!(
             "{}:{}:{}:{}:{}",
             fd.region, fd.zone, fd.datacenter, fd.rack, fd.host
@@ -2703,7 +2711,9 @@ pub async fn admin_validate_placement(
                 None => return (StatusCode::NOT_FOUND, "pool not found").into_response(),
             }
         }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
+        }
     };
 
     let shard_count = u64::from(pool.ec_k) + u64::from(pool.ec_m);
@@ -2718,7 +2728,9 @@ pub async fn admin_validate_placement(
         .await
     {
         Ok(resp) => resp.into_inner().nodes,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response();
+        }
     };
     let mut keys = std::collections::HashSet::new();
     for n in &nodes {
@@ -2773,4 +2785,190 @@ fn offline_node(node_id: &[u8], addr: &str) -> serde_json::Value {
         "disks": [],
         "online": false,
     })
+}
+
+// ============================================================================
+// IAM Groups
+// ============================================================================
+//
+// The meta service already has full group RPCs (CreateGroup, DeleteGroup,
+// ListGroups, AddUserToGroup, RemoveUserFromGroup); these handlers expose
+// them as REST endpoints under `/_admin/groups*` so the console + CLI can
+// drive them. Group ARNs participate in the same `PolicyEvaluator` as user
+// ARNs — attaching a policy to a group is identical to attaching it to a
+// user, just with `group_id` set instead of `user_id`.
+
+pub async fn admin_list_groups(
+    State(state): State<Arc<crate::AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut client = state.meta_client.clone();
+    match client
+        .list_groups(objectio_proto::metadata::ListGroupsRequest {
+            max_results: 1000,
+            marker: String::new(),
+        })
+        .await
+    {
+        Ok(r) => {
+            let resp = r.into_inner();
+            let groups: Vec<serde_json::Value> = resp
+                .groups
+                .into_iter()
+                .map(|g| {
+                    serde_json::json!({
+                        "group_id": g.group_id,
+                        "group_name": g.group_name,
+                        "arn": g.arn,
+                        "member_user_ids": g.member_user_ids,
+                        "created_at": g.created_at,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "groups": groups })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.message().to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminCreateGroupBody {
+    pub group_name: String,
+}
+
+pub async fn admin_create_group(
+    State(state): State<Arc<crate::AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    Json(body): Json<AdminCreateGroupBody>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    if body.group_name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "group_name is required").into_response();
+    }
+    let mut client = state.meta_client.clone();
+    match client
+        .create_group(objectio_proto::metadata::CreateGroupRequest {
+            group_name: body.group_name,
+        })
+        .await
+    {
+        Ok(r) => {
+            let g = r.into_inner().group.unwrap_or_default();
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "group_id": g.group_id,
+                    "group_name": g.group_name,
+                    "arn": g.arn,
+                    "member_user_ids": g.member_user_ids,
+                    "created_at": g.created_at,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::from_u16(grpc_to_http(e.code())).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            e.message().to_string(),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn admin_delete_group(
+    State(state): State<Arc<crate::AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut client = state.meta_client.clone();
+    match client
+        .delete_group(objectio_proto::metadata::DeleteGroupRequest { group_id })
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::from_u16(grpc_to_http(e.code())).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            e.message().to_string(),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminGroupMemberBody {
+    pub user_id: String,
+}
+
+pub async fn admin_add_group_member(
+    State(state): State<Arc<crate::AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    Path(group_id): Path<String>,
+    Json(body): Json<AdminGroupMemberBody>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut client = state.meta_client.clone();
+    match client
+        .add_user_to_group(objectio_proto::metadata::AddUserToGroupRequest {
+            group_id,
+            user_id: body.user_id,
+        })
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::from_u16(grpc_to_http(e.code())).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            e.message().to_string(),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn admin_remove_group_member(
+    State(state): State<Arc<crate::AppState>>,
+    auth: Option<Extension<AuthResult>>,
+    headers: HeaderMap,
+    Path((group_id, user_id)): Path<(String, String)>,
+) -> Response {
+    if let Some(deny) = require_system_admin(&auth, &headers) {
+        return deny;
+    }
+    let mut client = state.meta_client.clone();
+    match client
+        .remove_user_from_group(objectio_proto::metadata::RemoveUserFromGroupRequest {
+            group_id,
+            user_id,
+        })
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::from_u16(grpc_to_http(e.code())).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            e.message().to_string(),
+        )
+            .into_response(),
+    }
+}
+
+fn grpc_to_http(code: tonic::Code) -> u16 {
+    match code {
+        tonic::Code::Ok => 200,
+        tonic::Code::InvalidArgument => 400,
+        tonic::Code::NotFound => 404,
+        tonic::Code::AlreadyExists => 409,
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => 403,
+        _ => 500,
+    }
 }

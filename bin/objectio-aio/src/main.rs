@@ -83,6 +83,14 @@ struct Args {
     /// ephemeral port.
     #[arg(long)]
     strict_port: bool,
+
+    /// Enable SigV4 auth on the gateway. Default off — aio is a quick
+    /// laptop-scale dev binary and disabled auth keeps the curl-based
+    /// flow simple. Turn on when testing flows that depend on the auth
+    /// layer (vended STS scope enforcement, IAM policies, etc.); the
+    /// auto-created admin credentials are printed at startup.
+    #[arg(long)]
+    auth: bool,
 }
 
 /// Pick a free loopback port by binding to :0 and releasing.
@@ -411,7 +419,7 @@ async fn main() -> Result<()> {
         let port = osd_base + i as u16;
         let osd_dir = data_root.join(format!("osd-{i}"));
         std::fs::create_dir_all(osd_dir.join("disk0"))?;
-        std::fs::create_dir_all(&osd_dir.join("state"))?;
+        std::fs::create_dir_all(osd_dir.join("state"))?;
         let disk = osd_dir.join("disk0/disk.raw");
         let state = osd_dir.join("state");
 
@@ -450,18 +458,28 @@ async fn main() -> Result<()> {
     } else {
         args.listen_addr.clone()
     };
-    let gw_args = <objectio_gateway::Args as clap::Parser>::parse_from([
-        "objectio-gateway",
-        "--listen",
-        &format!("{}:{}", args.listen_addr, gateway_port),
-        "--meta-endpoint",
-        &format!("http://127.0.0.1:{meta_grpc}"),
-        "--external-endpoint",
-        &format!("http://{external_host}:{gateway_port}"),
-        "--no-auth",
-        "--log-level",
-        &args.log_level,
-    ]);
+    // aio is a single-process dev binary — every Enterprise feature should
+    // just work without obtaining a signed license. The gateway picks up
+    // this env var inside `load_initial_license` and runs as Developer.
+    if std::env::var_os("OBJECTIO_DEV_NO_LICENSE").is_none() {
+        // SAFETY: we set this before spawning any threads that read env vars.
+        unsafe { std::env::set_var("OBJECTIO_DEV_NO_LICENSE", "1") };
+    }
+    let mut gw_argv: Vec<String> = vec![
+        "objectio-gateway".into(),
+        "--listen".into(),
+        format!("{}:{}", args.listen_addr, gateway_port),
+        "--meta-endpoint".into(),
+        format!("http://127.0.0.1:{meta_grpc}"),
+        "--external-endpoint".into(),
+        format!("http://{external_host}:{gateway_port}"),
+        "--log-level".into(),
+        args.log_level.clone(),
+    ];
+    if !args.auth {
+        gw_argv.push("--no-auth".into());
+    }
+    let gw_args = <objectio_gateway::Args as clap::Parser>::parse_from(&gw_argv);
     let gw_handle: JoinHandle<Result<()>> = {
         let sd = sub_shutdown(&shutdown_tx);
         tokio::spawn(async move { objectio_gateway::run(gw_args, sd).await })
@@ -532,9 +550,12 @@ async fn main() -> Result<()> {
     let join_all = async {
         for (label, handle) in [("meta", meta_handle), ("gateway", gw_handle)]
             .into_iter()
-            .chain(osd_handles.into_iter().enumerate().map(|(i, h)| {
-                (Box::leak(format!("osd-{i}").into_boxed_str()) as &str, h)
-            }))
+            .chain(
+                osd_handles
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, h)| (Box::leak(format!("osd-{i}").into_boxed_str()) as &str, h)),
+            )
         {
             match handle.await {
                 Ok(Ok(())) => info!("{label} exited cleanly"),

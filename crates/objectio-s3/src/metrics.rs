@@ -67,6 +67,51 @@ impl IcebergOperation {
     }
 }
 
+/// Unity Catalog operation types — mirrors `IcebergOperation` for the
+/// Databricks-style REST surface (`/api/2.1/unity-catalog/*`). Reported
+/// under `objectio_unity_*` so dashboards can split Iceberg vs Unity
+/// traffic without label gymnastics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnityOperation {
+    ListCatalogs,
+    CreateCatalog,
+    GetCatalog,
+    UpdateCatalog,
+    DeleteCatalog,
+    ListSchemas,
+    CreateSchema,
+    GetSchema,
+    UpdateSchema,
+    DeleteSchema,
+    ListTables,
+    CreateTable,
+    GetTable,
+    DeleteTable,
+    TemporaryTableCredentials,
+}
+
+impl UnityOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UnityOperation::ListCatalogs => "ListCatalogs",
+            UnityOperation::CreateCatalog => "CreateCatalog",
+            UnityOperation::GetCatalog => "GetCatalog",
+            UnityOperation::UpdateCatalog => "UpdateCatalog",
+            UnityOperation::DeleteCatalog => "DeleteCatalog",
+            UnityOperation::ListSchemas => "ListSchemas",
+            UnityOperation::CreateSchema => "CreateSchema",
+            UnityOperation::GetSchema => "GetSchema",
+            UnityOperation::UpdateSchema => "UpdateSchema",
+            UnityOperation::DeleteSchema => "DeleteSchema",
+            UnityOperation::ListTables => "ListTables",
+            UnityOperation::CreateTable => "CreateTable",
+            UnityOperation::GetTable => "GetTable",
+            UnityOperation::DeleteTable => "DeleteTable",
+            UnityOperation::TemporaryTableCredentials => "TemporaryTableCredentials",
+        }
+    }
+}
+
 /// S3 operation types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum S3Operation {
@@ -198,6 +243,8 @@ pub struct S3Metrics {
     operations: RwLock<HashMap<S3Operation, OperationMetrics>>,
     /// Per-Iceberg-operation metrics
     iceberg_operations: RwLock<HashMap<IcebergOperation, OperationMetrics>>,
+    /// Per-Unity-Catalog-operation metrics
+    unity_operations: RwLock<HashMap<UnityOperation, OperationMetrics>>,
     /// Iceberg policy decision counters
     iceberg_policy_decisions: RwLock<HashMap<PolicyDecisionKey, AtomicU64>>,
     /// Bytes pulled during EC shard reads, partitioned by topological
@@ -221,6 +268,7 @@ impl S3Metrics {
         Self {
             operations: RwLock::new(HashMap::new()),
             iceberg_operations: RwLock::new(HashMap::new()),
+            unity_operations: RwLock::new(HashMap::new()),
             iceberg_policy_decisions: RwLock::new(HashMap::new()),
             locality_read_bytes: RwLock::new(HashMap::new()),
             gateway: GatewayMetrics::default(),
@@ -292,6 +340,13 @@ impl S3Metrics {
         latency_us: u64,
     ) {
         let mut ops = self.iceberg_operations.write().unwrap();
+        let metrics = ops.entry(op).or_default();
+        metrics.record(status_code, 0, 0, latency_us);
+    }
+
+    /// Record a Unity Catalog operation
+    pub fn record_unity_operation(&self, op: UnityOperation, status_code: u16, latency_us: u64) {
+        let mut ops = self.unity_operations.write().unwrap();
         let metrics = ops.entry(op).or_default();
         metrics.record(status_code, 0, 0, latency_us);
     }
@@ -437,8 +492,7 @@ impl S3Metrics {
                     "# HELP objectio_read_locality_bytes_total Bytes fetched from OSDs, by topology distance"
                 )
                 .unwrap();
-                writeln!(output, "# TYPE objectio_read_locality_bytes_total counter")
-                    .unwrap();
+                writeln!(output, "# TYPE objectio_read_locality_bytes_total counter").unwrap();
                 for (locality, counter) in map.iter() {
                     writeln!(
                         output,
@@ -752,6 +806,90 @@ impl S3Metrics {
                 writeln!(
                     output,
                     "objectio_iceberg_request_duration_seconds_count{{operation=\"{}\"}} {}",
+                    op_name, total
+                )
+                .unwrap();
+            }
+        }
+
+        // Unity Catalog operation metrics — same shape as Iceberg above,
+        // separate metric family so dashboards split by REST surface.
+        let unity_ops = self.unity_operations.read().unwrap();
+        if !unity_ops.is_empty() {
+            writeln!(
+                output,
+                "# HELP objectio_unity_requests_total Total Unity Catalog requests by operation and status"
+            )
+            .unwrap();
+            writeln!(output, "# TYPE objectio_unity_requests_total counter").unwrap();
+            for (op, metrics) in unity_ops.iter() {
+                let op_name = op.as_str();
+                let success = metrics.requests_success.load(Ordering::Relaxed);
+                let client_err = metrics.requests_client_error.load(Ordering::Relaxed);
+                let server_err = metrics.requests_server_error.load(Ordering::Relaxed);
+                writeln!(
+                    output,
+                    "objectio_unity_requests_total{{operation=\"{}\",status=\"success\"}} {}",
+                    op_name, success
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_unity_requests_total{{operation=\"{}\",status=\"client_error\"}} {}",
+                    op_name, client_err
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_unity_requests_total{{operation=\"{}\",status=\"server_error\"}} {}",
+                    op_name, server_err
+                )
+                .unwrap();
+            }
+
+            writeln!(
+                output,
+                "# HELP objectio_unity_request_duration_seconds Unity Catalog request duration histogram"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "# TYPE objectio_unity_request_duration_seconds histogram"
+            )
+            .unwrap();
+            for (op, metrics) in unity_ops.iter() {
+                let op_name = op.as_str();
+                let total = metrics.requests_total.load(Ordering::Relaxed);
+                let sum_us = metrics.latency_sum_us.load(Ordering::Relaxed);
+
+                let mut cumulative = 0u64;
+                for (i, &boundary_ms) in LATENCY_BUCKET_BOUNDARIES_MS.iter().enumerate() {
+                    cumulative += metrics.latency_buckets[i].load(Ordering::Relaxed);
+                    writeln!(
+                        output,
+                        "objectio_unity_request_duration_seconds_bucket{{operation=\"{}\",le=\"{}\"}} {}",
+                        op_name,
+                        boundary_ms as f64 / 1000.0,
+                        cumulative
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "objectio_unity_request_duration_seconds_bucket{{operation=\"{}\",le=\"+Inf\"}} {}",
+                    op_name, total
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_unity_request_duration_seconds_sum{{operation=\"{}\"}} {}",
+                    op_name,
+                    sum_us as f64 / 1_000_000.0
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "objectio_unity_request_duration_seconds_count{{operation=\"{}\"}} {}",
                     op_name, total
                 )
                 .unwrap();

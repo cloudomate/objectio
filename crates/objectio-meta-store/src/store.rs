@@ -45,6 +45,10 @@ impl From<redb::TransactionError> for MetaStoreError {
 
 pub type MetaStoreResult<T> = Result<T, MetaStoreError>;
 
+/// One page of `OBJECT_LISTINGS` results: `(entries, is_truncated, next_token)`.
+/// Each entry is `(composite_key, prost-encoded ObjectListingEntry bytes)`.
+pub type ObjectListingsPage = (Vec<(String, Vec<u8>)>, bool, String);
+
 /// Persistent metadata store backed by redb.
 ///
 /// Wraps an `Arc<Database>` so the same file can be shared with
@@ -140,14 +144,14 @@ impl MetaStore {
         Ok(result)
     }
 
-    // ---- Bucket Policies (string values) ----
+    // ---- Bucket Policies (UTF-8 JSON, stored as bytes) ----
 
     pub fn put_bucket_policy(&self, bucket: &str, policy_json: &str) {
         if let Err(e) = (|| -> MetaStoreResult<()> {
             let write_txn = self.db.begin_write()?;
             {
                 let mut table = write_txn.open_table(tables::BUCKET_POLICIES)?;
-                table.insert(bucket, policy_json)?;
+                table.insert(bucket, policy_json.as_bytes())?;
             }
             write_txn.commit()?;
             Ok(())
@@ -168,7 +172,13 @@ impl MetaStore {
         let mut result = Vec::new();
         for entry in table.iter()? {
             let entry = entry?;
-            result.push((entry.0.value().to_string(), entry.1.value().to_string()));
+            let key = entry.0.value().to_string();
+            // Best-effort UTF-8 decode — bucket policies are JSON we wrote;
+            // skip with a log line if anything ever wedged non-UTF8 in.
+            match std::str::from_utf8(entry.1.value()) {
+                Ok(s) => result.push((key, s.to_string())),
+                Err(e) => error!("bucket policy '{}' is not valid UTF-8: {}", key, e),
+            }
         }
         Ok(result)
     }
@@ -660,9 +670,9 @@ impl MetaStore {
         format!("{pool}\0{pg_id:010}")
     }
 
-    /// Range scan over OBJECT_LISTINGS for one bucket with an optional
+    /// Range scan over `OBJECT_LISTINGS` for one bucket with an optional
     /// prefix filter. Returns up to `max_keys` entries (bucket/key/ver
-    /// strings plus raw prost-encoded ObjectListingEntry bytes) in
+    /// strings plus raw prost-encoded `ObjectListingEntry` bytes) in
     /// key-sorted order, and a continuation token for the next page.
     /// Keys are stored as `{bucket}\0{key}\0{version_id}` so a range
     /// scan starting at `{bucket}\0{prefix}` stops cleanly when the
@@ -673,7 +683,7 @@ impl MetaStore {
         prefix: &str,
         start_after: &str,
         max_keys: usize,
-    ) -> MetaStoreResult<(Vec<(String, Vec<u8>)>, bool, String)> {
+    ) -> MetaStoreResult<ObjectListingsPage> {
         let read_txn = self.db.begin_read()?;
         let table = match read_txn.open_table(tables::OBJECT_LISTINGS) {
             Ok(t) => t,
@@ -1094,7 +1104,7 @@ impl MetaStore {
             let write_txn = self.db.begin_write()?;
             {
                 let mut table = write_txn.open_table(tables::POLICY_ATTACHMENTS)?;
-                table.insert(key, policies)?;
+                table.insert(key, policies.as_bytes())?;
             }
             write_txn.commit()?;
             Ok(())
@@ -1140,7 +1150,9 @@ impl MetaStore {
         let mut result = Vec::new();
         if let Ok(iter) = table.iter() {
             for entry in iter.flatten() {
-                result.push((entry.0.value().to_string(), entry.1.value().to_string()));
+                let key = entry.0.value().to_string();
+                let val = String::from_utf8_lossy(entry.1.value()).to_string();
+                result.push((key, val));
             }
         }
         result
@@ -1177,6 +1189,143 @@ impl MetaStore {
 
             Err(e) => {
                 error!("Failed to open warehouses table: {}", e);
+                return Vec::new();
+            }
+        };
+        let mut result = Vec::new();
+        if let Ok(iter) = table.iter() {
+            for entry in iter.flatten() {
+                result.push((entry.0.value().to_string(), entry.1.value().to_vec()));
+            }
+        }
+        result
+    }
+
+    // ---- Unity Catalog (prost-encoded) ----
+
+    pub fn put_unity_catalog(&self, name: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_CATALOGS, name, data) {
+            error!("Failed to persist unity catalog '{}': {}", name, e);
+        }
+    }
+
+    pub fn delete_unity_catalog(&self, name: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_CATALOGS, name) {
+            error!("Failed to delete unity catalog '{}': {}", name, e);
+        }
+    }
+
+    pub fn load_all_unity_catalogs(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_CATALOGS, "unity_catalogs")
+    }
+
+    pub fn put_unity_schema(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_SCHEMAS, key, data) {
+            error!("Failed to persist unity schema '{}': {}", key, e);
+        }
+    }
+
+    pub fn delete_unity_schema(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_SCHEMAS, key) {
+            error!("Failed to delete unity schema '{}': {}", key, e);
+        }
+    }
+
+    pub fn load_all_unity_schemas(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_SCHEMAS, "unity_schemas")
+    }
+
+    pub fn put_unity_table(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_TABLES, key, data) {
+            error!("Failed to persist unity table '{}': {}", key, e);
+        }
+    }
+
+    pub fn delete_unity_table(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_TABLES, key) {
+            error!("Failed to delete unity table '{}': {}", key, e);
+        }
+    }
+
+    pub fn load_all_unity_tables(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_TABLES, "unity_tables")
+    }
+
+    pub fn put_unity_function(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_FUNCTIONS, key, data) {
+            error!("Failed to persist unity function '{}': {}", key, e);
+        }
+    }
+    pub fn delete_unity_function(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_FUNCTIONS, key) {
+            error!("Failed to delete unity function '{}': {}", key, e);
+        }
+    }
+    pub fn load_all_unity_functions(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_FUNCTIONS, "unity_functions")
+    }
+
+    pub fn put_unity_volume(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_VOLUMES, key, data) {
+            error!("Failed to persist unity volume '{}': {}", key, e);
+        }
+    }
+    pub fn delete_unity_volume(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_VOLUMES, key) {
+            error!("Failed to delete unity volume '{}': {}", key, e);
+        }
+    }
+    pub fn load_all_unity_volumes(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_VOLUMES, "unity_volumes")
+    }
+
+    pub fn put_unity_model(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_MODELS, key, data) {
+            error!("Failed to persist unity model '{}': {}", key, e);
+        }
+    }
+    pub fn delete_unity_model(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_MODELS, key) {
+            error!("Failed to delete unity model '{}': {}", key, e);
+        }
+    }
+    pub fn load_all_unity_models(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_MODELS, "unity_models")
+    }
+
+    pub fn put_unity_model_version(&self, key: &str, data: &[u8]) {
+        if let Err(e) = self.put_bytes(tables::UNITY_MODEL_VERSIONS, key, data) {
+            error!("Failed to persist unity model version '{}': {}", key, e);
+        }
+    }
+    pub fn delete_unity_model_version(&self, key: &str) {
+        if let Err(e) = self.delete_key(tables::UNITY_MODEL_VERSIONS, key) {
+            error!("Failed to delete unity model version '{}': {}", key, e);
+        }
+    }
+    pub fn load_all_unity_model_versions(&self) -> Vec<(String, Vec<u8>)> {
+        self.load_all_bytes(tables::UNITY_MODEL_VERSIONS, "unity_model_versions")
+    }
+
+    /// Generic dump of every (key, value) pair in a `&str` -> `&[u8]` table.
+    /// Returns empty if the table doesn't exist yet (fresh DB) or open fails.
+    fn load_all_bytes(
+        &self,
+        table: redb::TableDefinition<'_, &str, &[u8]>,
+        label: &str,
+    ) -> Vec<(String, Vec<u8>)> {
+        let read_txn = match self.db.begin_read() {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Failed to begin read txn for {label}: {e}");
+                return Vec::new();
+            }
+        };
+        let table = match read_txn.open_table(table) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Vec::new(),
+            Err(e) => {
+                error!("Failed to open {label} table: {e}");
                 return Vec::new();
             }
         };

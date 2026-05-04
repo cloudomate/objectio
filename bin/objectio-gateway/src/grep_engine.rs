@@ -118,13 +118,10 @@ impl CompiledPattern {
                 // pcre2 returns an Option<Result<_>>. Both a miss and
                 // a runtime error collapse to "no match" — the
                 // scanner logs and moves on.
-                re.find(text.as_bytes())
-                    .ok()
-                    .flatten()
-                    .map(|m| Hit {
-                        start: m.start(),
-                        end: m.end(),
-                    })
+                re.find(text.as_bytes()).ok().flatten().map(|m| Hit {
+                    start: m.start(),
+                    end: m.end(),
+                })
             }
             #[cfg(feature = "hyperscan")]
             Self::Hyperscan(db) => hyperscan_first_match(db, text),

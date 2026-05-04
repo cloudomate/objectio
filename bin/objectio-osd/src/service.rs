@@ -3,6 +3,8 @@
 use futures::stream::Stream;
 use objectio_proto::metadata::ObjectMeta;
 use objectio_proto::storage::{
+    AffectedObject,
+    AffectedShardRef,
     BlockLocation,
     Checksum,
     CopyObjectMetaRequest,
@@ -12,6 +14,8 @@ use objectio_proto::storage::{
     DeleteShardRequest,
     DeleteShardResponse,
     DiskStatus,
+    FindObjectsReferencingNodeRequest,
+    FindObjectsReferencingNodeResponse,
     GetObjectMetaRequest,
     GetObjectMetaResponse,
     GetShardMetaRequest,
@@ -27,10 +31,6 @@ use objectio_proto::storage::{
     ListObjectsMetaResponse,
     ListShardsRequest,
     ListShardsResponse,
-    FindObjectsReferencingNodeRequest,
-    FindObjectsReferencingNodeResponse,
-    AffectedObject,
-    AffectedShardRef,
     // Object metadata RPCs
     PutObjectMetaRequest,
     PutObjectMetaResponse,
@@ -494,8 +494,7 @@ impl OsdService {
                 let cur = next_block[loc.disk_idx].load(std::sync::atomic::Ordering::Relaxed);
                 let want = loc.block_num + 1;
                 if want > cur {
-                    next_block[loc.disk_idx]
-                        .store(want, std::sync::atomic::Ordering::Relaxed);
+                    next_block[loc.disk_idx].store(want, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
@@ -539,9 +538,7 @@ impl OsdService {
             return Ok(());
         }
         for disk in &self.disks {
-            if disk.cluster_uuid() == cluster_uuid
-                && disk.osd_node_id() == self.node_id
-            {
+            if disk.cluster_uuid() == cluster_uuid && disk.osd_node_id() == self.node_id {
                 continue; // already stamped, nothing to do
             }
             disk.set_identity(cluster_uuid, self.node_id)
@@ -648,7 +645,10 @@ impl OsdService {
     ) -> std::result::Result<(), String> {
         let key = Self::shard_loc_meta_key(shard_key);
         let value = bincode::serialize(loc).map_err(|e| e.to_string())?;
-        meta_store.put(key, value).map(|_| ()).map_err(|e| e.to_string())
+        meta_store
+            .put(key, value)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// Remove a persisted ShardLocation (delete_shard path).
@@ -657,7 +657,10 @@ impl OsdService {
         shard_key: &str,
     ) -> std::result::Result<(), String> {
         let key = Self::shard_loc_meta_key(shard_key);
-        meta_store.delete(&key).map(|_| ()).map_err(|e| e.to_string())
+        meta_store
+            .delete(&key)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// Scan the MetadataStore for every persisted ShardLocation and
@@ -665,11 +668,8 @@ impl OsdService {
     /// before this, `shard_index` started empty after every restart
     /// and the OSD reported 0 shards to meta even when disk.raw was
     /// full of real data.
-    fn load_persisted_shard_index(
-        meta_store: &MetadataStore,
-    ) -> HashMap<String, ShardLocation> {
-        let prefix_key =
-            objectio_storage::MetadataKey::from_bytes(SHARD_LOC_PREFIX.to_vec());
+    fn load_persisted_shard_index(meta_store: &MetadataStore) -> HashMap<String, ShardLocation> {
+        let prefix_key = objectio_storage::MetadataKey::from_bytes(SHARD_LOC_PREFIX.to_vec());
         let mut out = HashMap::new();
         for (key, value) in meta_store.scan_prefix(&prefix_key) {
             let raw = key.as_bytes();
@@ -683,9 +683,7 @@ impl OsdService {
                 Ok(loc) => {
                     out.insert(shard_key.to_string(), loc);
                 }
-                Err(e) => warn!(
-                    "skipping corrupt ShardLocation entry {shard_key}: {e}"
-                ),
+                Err(e) => warn!("skipping corrupt ShardLocation entry {shard_key}: {e}"),
             }
         }
         out
@@ -897,9 +895,7 @@ impl StorageService for OsdService {
         let removed = self.shard_index.write().remove(&key).is_some();
         // Mirror the removal in the persistent index so a future
         // restart doesn't resurrect the deleted shard.
-        if removed
-            && let Err(e) = Self::forget_shard_location(&self.meta_store, &key)
-        {
+        if removed && let Err(e) = Self::forget_shard_location(&self.meta_store, &key) {
             warn!("Failed to persist shard delete for {key}: {e}");
         }
 
@@ -1266,9 +1262,7 @@ impl StorageService for OsdService {
                 }
 
                 // Skip if before continuation token
-                if !req.continuation_token.is_empty()
-                    && cursor <= req.continuation_token
-                {
+                if !req.continuation_token.is_empty() && cursor <= req.continuation_token {
                     continue;
                 }
 
@@ -1343,8 +1337,7 @@ impl StorageService for OsdService {
             let Some((bucket, key)) = meta_key.parse_object_meta() else {
                 continue;
             };
-            let Ok(object) = objectio_proto::metadata::ObjectMeta::decode(&value[..])
-            else {
+            let Ok(object) = objectio_proto::metadata::ObjectMeta::decode(&value[..]) else {
                 continue;
             };
 

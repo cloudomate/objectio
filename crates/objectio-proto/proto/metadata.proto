@@ -104,6 +104,49 @@ service MetadataService {
     rpc DeleteDataFilter(DeleteDataFilterRequest) returns (DeleteDataFilterResponse);
     rpc GetDataFiltersForPrincipal(GetDataFiltersForPrincipalRequest) returns (ListDataFiltersResponse);
 
+    // Unity Catalog REST API backing — three-level (catalog.schema.table) lakehouse catalog
+    rpc UnityCreateCatalog(UnityCreateCatalogRequest) returns (UnityCreateCatalogResponse);
+    rpc UnityListCatalogs(UnityListCatalogsRequest)   returns (UnityListCatalogsResponse);
+    rpc UnityGetCatalog(UnityGetCatalogRequest)       returns (UnityGetCatalogResponse);
+    rpc UnityUpdateCatalog(UnityUpdateCatalogRequest) returns (UnityUpdateCatalogResponse);
+    rpc UnityDeleteCatalog(UnityDeleteCatalogRequest) returns (UnityDeleteCatalogResponse);
+    rpc UnityCreateSchema(UnityCreateSchemaRequest)   returns (UnityCreateSchemaResponse);
+    rpc UnityListSchemas(UnityListSchemasRequest)     returns (UnityListSchemasResponse);
+    rpc UnityGetSchema(UnityGetSchemaRequest)         returns (UnityGetSchemaResponse);
+    rpc UnityUpdateSchema(UnityUpdateSchemaRequest)   returns (UnityUpdateSchemaResponse);
+    rpc UnityDeleteSchema(UnityDeleteSchemaRequest)   returns (UnityDeleteSchemaResponse);
+    rpc UnityCreateTable(UnityCreateTableRequest)     returns (UnityCreateTableResponse);
+    rpc UnityListTables(UnityListTablesRequest)       returns (UnityListTablesResponse);
+    rpc UnityGetTable(UnityGetTableRequest)           returns (UnityGetTableResponse);
+    rpc UnityDeleteTable(UnityDeleteTableRequest)     returns (UnityDeleteTableResponse);
+    rpc UnitySetTableSecurity(UnitySetTableSecurityRequest) returns (UnitySetTableSecurityResponse);
+    rpc UnitySetCatalogPolicy(UnitySetCatalogPolicyRequest) returns (UnitySetCatalogPolicyResponse);
+    rpc UnityGetCatalogPolicy(UnityGetCatalogPolicyRequest) returns (UnityGetCatalogPolicyResponse);
+    rpc UnitySetSchemaPolicy(UnitySetSchemaPolicyRequest)   returns (UnitySetSchemaPolicyResponse);
+    rpc UnityGetSchemaPolicy(UnityGetSchemaPolicyRequest)   returns (UnityGetSchemaPolicyResponse);
+    rpc UnitySetTablePolicy(UnitySetTablePolicyRequest)     returns (UnitySetTablePolicyResponse);
+    rpc UnityGetTablePolicy(UnityGetTablePolicyRequest)     returns (UnityGetTablePolicyResponse);
+    // Functions / Volumes / Models — same catalog→schema→entity layout
+    // as Tables. No nested policies (yet); the schema/catalog policy chain
+    // applies.
+    rpc UnityCreateFunction(UnityCreateFunctionRequest) returns (UnityCreateFunctionResponse);
+    rpc UnityListFunctions(UnityListFunctionsRequest)   returns (UnityListFunctionsResponse);
+    rpc UnityGetFunction(UnityGetFunctionRequest)       returns (UnityGetFunctionResponse);
+    rpc UnityDeleteFunction(UnityDeleteFunctionRequest) returns (UnityDeleteFunctionResponse);
+    rpc UnityCreateVolume(UnityCreateVolumeRequest) returns (UnityCreateVolumeResponse);
+    rpc UnityListVolumes(UnityListVolumesRequest)   returns (UnityListVolumesResponse);
+    rpc UnityGetVolume(UnityGetVolumeRequest)       returns (UnityGetVolumeResponse);
+    rpc UnityDeleteVolume(UnityDeleteVolumeRequest) returns (UnityDeleteVolumeResponse);
+    rpc UnityCreateModel(UnityCreateModelRequest) returns (UnityCreateModelResponse);
+    rpc UnityListModels(UnityListModelsRequest)   returns (UnityListModelsResponse);
+    rpc UnityGetModel(UnityGetModelRequest)       returns (UnityGetModelResponse);
+    rpc UnityDeleteModel(UnityDeleteModelRequest) returns (UnityDeleteModelResponse);
+    rpc UnityCreateModelVersion(UnityCreateModelVersionRequest) returns (UnityCreateModelVersionResponse);
+    rpc UnityListModelVersions(UnityListModelVersionsRequest)   returns (UnityListModelVersionsResponse);
+    rpc UnityGetModelVersion(UnityGetModelVersionRequest)       returns (UnityGetModelVersionResponse);
+    rpc UnityUpdateModelVersionStatus(UnityUpdateModelVersionStatusRequest) returns (UnityUpdateModelVersionStatusResponse);
+    rpc UnityDeleteModelVersion(UnityDeleteModelVersionRequest) returns (UnityDeleteModelVersionResponse);
+
     // Delta Sharing protocol — share, schema (namespace), table, and recipient management
     rpc DeltaCreateShare(DeltaCreateShareRequest)         returns (DeltaCreateShareResponse);
     rpc DeltaGetShare(DeltaGetShareRequest)               returns (DeltaGetShareResponse);
@@ -1367,6 +1410,558 @@ message DeltaDropRecipientRequest {
 message DeltaDropRecipientResponse {
     bool success = 1;
 }
+
+// ============================================================
+// Unity Catalog REST API Messages
+// ============================================================
+
+// Top-level Unity catalog. Auto-provisions a backing bucket "unity-{name}"
+// for MANAGED tables; EXTERNAL tables may live in any bucket.
+message UnityCatalog {
+    string name        = 1;          // Globally unique catalog name (first level of catalog.schema.table)
+    string comment     = 2;
+    string owner       = 3;          // Principal that owns the catalog
+    string bucket      = 4;          // Backing bucket for MANAGED tables (auto: "unity-{name}")
+    string location    = 5;          // s3://{bucket} root for managed storage
+    uint64 created_at  = 6;
+    uint64 updated_at  = 7;
+    map<string, string> properties = 8;
+    string tenant      = 9;          // Owning tenant (empty = system)
+    bytes  policy_json = 10;         // Catalog-level access policy (JSON-serialized BucketPolicy)
+}
+
+// Schema (second level). Belongs to exactly one catalog.
+message UnitySchema {
+    string catalog_name = 1;
+    string name         = 2;         // Schema name within the catalog
+    string comment      = 3;
+    string owner        = 4;
+    uint64 created_at   = 5;
+    uint64 updated_at   = 6;
+    map<string, string> properties = 7;
+    bytes  policy_json  = 8;         // Schema-level access policy
+}
+
+// Table (third level). MANAGED tables auto-derive storage_location under the
+// catalog's bucket; EXTERNAL tables accept a caller-supplied location.
+message UnityTable {
+    string catalog_name       = 1;
+    string schema_name        = 2;
+    string name               = 3;
+    string table_id           = 4;   // Stable UUID (server-assigned at create)
+    string table_type         = 5;   // "MANAGED" | "EXTERNAL" | "VIEW"
+    string data_source_format = 6;   // "DELTA" | "ICEBERG" | "PARQUET" | "CSV" | "JSON"
+    string storage_location   = 7;   // Full S3 URL (s3://bucket/key/)
+    string columns_json       = 8;   // JSON-serialized Vec<UnityColumn> (column metadata)
+    string owner              = 9;
+    uint64 created_at         = 10;
+    uint64 updated_at         = 11;
+    map<string, string> properties = 12;
+    bytes  policy_json        = 13;  // Table-level access policy
+    // Row filter binding — UDF (catalog.schema.function_name) returning
+    // BOOLEAN. Engine injects `WHERE function_name(input_columns)` into
+    // every read of this table. Empty = no row filter.
+    UnityRowFilter row_filter   = 14;
+    // Column masks — per-column UDF transformation. Engine wraps every
+    // read of `column_name` with `function_name(column_name, ...using_cols)`.
+    // Map key = column name. Empty = no masks.
+    map<string, UnityColumnMask> column_masks = 15;
+}
+
+message UnityRowFilter {
+    // Fully-qualified function name: "catalog.schema.function".
+    string function_full_name = 1;
+    // Column names from the bound table that are passed to the function as
+    // arguments. Order matches the function's parameter list.
+    repeated string input_column_names = 2;
+}
+
+message UnityColumnMask {
+    // Fully-qualified function name: "catalog.schema.function".
+    string function_full_name = 1;
+    // Optional extra columns the mask function reads (besides the masked
+    // column itself, which is always the first argument).
+    repeated string using_column_names = 2;
+}
+
+// ---- Catalog RPCs ----
+
+message UnityCreateCatalogRequest {
+    string name    = 1;
+    string comment = 2;
+    string owner   = 3;
+    string tenant  = 4;
+    map<string, string> properties = 5;
+}
+message UnityCreateCatalogResponse {
+    UnityCatalog catalog = 1;
+}
+
+message UnityListCatalogsRequest {
+    uint32 max_results = 1;
+    string page_token  = 2;
+    string tenant      = 3;          // Empty = list all
+}
+message UnityListCatalogsResponse {
+    repeated UnityCatalog catalogs = 1;
+    string next_page_token         = 2;
+}
+
+message UnityGetCatalogRequest {
+    string name = 1;
+}
+message UnityGetCatalogResponse {
+    UnityCatalog catalog = 1;
+}
+
+message UnityUpdateCatalogRequest {
+    string name        = 1;
+    string new_comment = 2;          // empty = leave unchanged
+    string new_owner   = 3;
+    map<string, string> properties = 4; // full replacement (Unity PATCH semantics)
+}
+message UnityUpdateCatalogResponse {
+    UnityCatalog catalog = 1;
+}
+
+message UnityDeleteCatalogRequest {
+    string name  = 1;
+    bool   force = 2;                // If true, drop even if schemas exist
+}
+message UnityDeleteCatalogResponse {
+    bool success = 1;
+}
+
+// ---- Schema RPCs ----
+
+message UnityCreateSchemaRequest {
+    string catalog_name = 1;
+    string name         = 2;
+    string comment      = 3;
+    string owner        = 4;
+    map<string, string> properties = 5;
+}
+message UnityCreateSchemaResponse {
+    UnitySchema schema = 1;
+}
+
+message UnityListSchemasRequest {
+    string catalog_name = 1;
+    uint32 max_results  = 2;
+    string page_token   = 3;
+}
+message UnityListSchemasResponse {
+    repeated UnitySchema schemas = 1;
+    string next_page_token       = 2;
+}
+
+message UnityGetSchemaRequest {
+    string catalog_name = 1;
+    string name         = 2;
+}
+message UnityGetSchemaResponse {
+    UnitySchema schema = 1;
+}
+
+message UnityUpdateSchemaRequest {
+    string catalog_name = 1;
+    string name         = 2;
+    string new_comment  = 3;
+    string new_owner    = 4;
+    map<string, string> properties = 5;
+}
+message UnityUpdateSchemaResponse {
+    UnitySchema schema = 1;
+}
+
+message UnityDeleteSchemaRequest {
+    string catalog_name = 1;
+    string name         = 2;
+    bool   force        = 3;         // If true, drop even if tables exist
+}
+message UnityDeleteSchemaResponse {
+    bool success = 1;
+}
+
+// ---- Table RPCs ----
+
+message UnityCreateTableRequest {
+    string catalog_name       = 1;
+    string schema_name        = 2;
+    string name               = 3;
+    string table_type         = 4;   // "MANAGED" | "EXTERNAL"
+    string data_source_format = 5;   // "DELTA" (default) | "ICEBERG" | ...
+    string storage_location   = 6;   // Required for EXTERNAL; ignored for MANAGED
+    string columns_json       = 7;
+    string owner              = 8;
+    map<string, string> properties = 9;
+}
+message UnityCreateTableResponse {
+    UnityTable table = 1;
+}
+
+message UnityListTablesRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message UnityListTablesResponse {
+    repeated UnityTable tables = 1;
+    string next_page_token     = 2;
+}
+
+message UnityGetTableRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityGetTableResponse {
+    UnityTable table = 1;
+}
+
+message UnityDeleteTableRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityDeleteTableResponse {
+    bool success = 1;
+}
+
+// ---- Table-security (row filter / column masks) bindings ----
+//
+// Set-and-replace semantics: every call replaces the table's bindings with
+// what's in the request. To clear, send a request with empty `row_filter`
+// and empty `column_masks`. Validated server-side (function must exist in
+// the catalog and return BOOLEAN for row filter, etc.).
+message UnitySetTableSecurityRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+    UnityRowFilter row_filter = 4;
+    map<string, UnityColumnMask> column_masks = 5;
+}
+
+message UnitySetTableSecurityResponse {
+    UnityTable table = 1;
+}
+
+// ---- Policy RPCs (mirroring IcebergSetTablePolicy / IcebergGetTablePolicy) ----
+
+message UnitySetCatalogPolicyRequest {
+    string catalog_name = 1;
+    bytes  policy_json  = 2;
+}
+message UnitySetCatalogPolicyResponse {
+    bool success = 1;
+}
+
+message UnityGetCatalogPolicyRequest {
+    string catalog_name = 1;
+}
+message UnityGetCatalogPolicyResponse {
+    bytes policy_json = 1;
+}
+
+message UnitySetSchemaPolicyRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    bytes  policy_json  = 3;
+}
+message UnitySetSchemaPolicyResponse {
+    bool success = 1;
+}
+
+message UnityGetSchemaPolicyRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+}
+message UnityGetSchemaPolicyResponse {
+    bytes policy_json = 1;
+}
+
+message UnitySetTablePolicyRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string table_name   = 3;
+    bytes  policy_json  = 4;
+}
+message UnitySetTablePolicyResponse {
+    bool success = 1;
+}
+
+message UnityGetTablePolicyRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string table_name   = 3;
+}
+message UnityGetTablePolicyResponse {
+    bytes policy_json = 1;
+}
+
+// ============================================================
+// Unity Catalog — Functions / Volumes / Models
+// ============================================================
+// These mirror the table layout (catalog → schema → entity) so handlers
+// reuse the existing catalog/schema lookups + policy chain. Each entity
+// is keyed by `{catalog}\x00{schema}\x00{name}` in its meta table.
+
+// ---- Functions (UDFs) ----
+// Pure metadata. No backing storage; the function source ships to the
+// query engine (Spark / Trino / Databricks SQL) which executes it.
+//
+// Field names track the Databricks Unity Catalog REST spec exactly so
+// the official Databricks SDK client works against this surface
+// unmodified:
+//   * `routine_definition` carries the source text (the SQL/code)
+//   * `routine_body` carries the dispatch flag: "SQL" | "EXTERNAL"
+//   * `external_language` carries the runtime language for EXTERNAL bodies
+//     (e.g. "PYTHON"); empty for SQL.
+message UnityFunction {
+    string catalog_name      = 1;
+    string schema_name       = 2;
+    string name              = 3;
+    string function_id       = 4;   // Server-assigned UUID
+    string routine_definition = 5;  // Source text — the SQL/code body
+    string routine_body      = 6;   // "SQL" | "EXTERNAL"
+    string external_language = 7;   // Runtime for EXTERNAL bodies, e.g. "PYTHON"
+    string data_type         = 8;   // Return type, e.g. "STRING" / "INT"
+    string full_data_type    = 9;   // Verbose form, e.g. "DECIMAL(10,2)"
+    string parameter_style   = 10;  // "S" (SQL standard) is the only common value
+    bool   is_deterministic  = 11;
+    string sql_data_access   = 12;  // "CONTAINS_SQL" | "READS_SQL_DATA" | "MODIFIES_SQL_DATA" | "NO_SQL"
+    bool   is_null_call      = 13;
+    string security_type     = 14;  // "DEFINER" | "INVOKER"
+    string specific_name     = 15;  // Used by Spark — usually equals `name`
+    string input_params_json = 16;  // JSON: {"parameters": [...]} per Databricks spec
+    string return_params_json = 17; // JSON: {"parameters": [...]} per Databricks spec
+    string comment           = 18;
+    string owner             = 19;
+    uint64 created_at        = 20;
+    uint64 updated_at        = 21;
+    map<string, string> properties = 22;
+}
+
+message UnityCreateFunctionRequest {
+    string catalog_name      = 1;
+    string schema_name       = 2;
+    string name              = 3;
+    string routine_definition = 4;
+    string routine_body      = 5;   // "SQL" | "EXTERNAL"
+    string external_language = 6;
+    string data_type         = 7;
+    string full_data_type    = 8;
+    string parameter_style   = 9;
+    bool   is_deterministic  = 10;
+    string sql_data_access   = 11;
+    bool   is_null_call      = 12;
+    string security_type     = 13;
+    string specific_name     = 14;
+    string input_params_json = 15;
+    string return_params_json = 16;
+    string comment           = 17;
+    string owner             = 18;
+    map<string, string> properties = 19;
+}
+message UnityCreateFunctionResponse { UnityFunction function = 1; }
+
+message UnityListFunctionsRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message UnityListFunctionsResponse {
+    repeated UnityFunction functions = 1;
+    string next_page_token            = 2;
+}
+
+message UnityGetFunctionRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityGetFunctionResponse { UnityFunction function = 1; }
+
+message UnityDeleteFunctionRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityDeleteFunctionResponse { bool success = 1; }
+
+// ---- Volumes ----
+// Governed S3 prefixes for non-tabular data (model artifacts, training
+// inputs, libraries). MANAGED → server-derived `unity-{catalog}/{schema}/__volumes/{name}/`;
+// EXTERNAL → caller-supplied location.
+message UnityVolume {
+    string catalog_name     = 1;
+    string schema_name      = 2;
+    string name             = 3;
+    string volume_id        = 4;     // Server-assigned UUID
+    string volume_type      = 5;     // "MANAGED" | "EXTERNAL"
+    string storage_location = 6;     // s3://bucket/prefix/
+    string comment          = 7;
+    string owner            = 8;
+    uint64 created_at       = 9;
+    uint64 updated_at       = 10;
+    map<string, string> properties = 11;
+}
+
+message UnityCreateVolumeRequest {
+    string catalog_name     = 1;
+    string schema_name      = 2;
+    string name             = 3;
+    string volume_type      = 4;
+    string storage_location = 5;     // Required for EXTERNAL; ignored for MANAGED.
+    string comment          = 6;
+    string owner            = 7;
+    map<string, string> properties = 8;
+}
+message UnityCreateVolumeResponse { UnityVolume volume = 1; }
+
+message UnityListVolumesRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message UnityListVolumesResponse {
+    repeated UnityVolume volumes = 1;
+    string next_page_token        = 2;
+}
+
+message UnityGetVolumeRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityGetVolumeResponse { UnityVolume volume = 1; }
+
+message UnityDeleteVolumeRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityDeleteVolumeResponse { bool success = 1; }
+
+// ---- Models (registered ML models) + Versions ----
+// MLflow-shaped two-level entity. The Model has metadata; each
+// ModelVersion points at a `source` URI containing the artifacts. We do
+// not host the artifacts — same pattern as Tables/Volumes, just
+// version-aware.
+message UnityModel {
+    string catalog_name     = 1;
+    string schema_name      = 2;
+    string name             = 3;
+    string model_id         = 4;     // Server-assigned UUID
+    string storage_location = 5;     // Default `s3://unity-{catalog}/{schema}/__models/{name}/` for MANAGED
+    string comment          = 6;
+    string owner            = 7;
+    uint64 created_at       = 8;
+    uint64 updated_at       = 9;
+    map<string, string> properties = 10;
+}
+
+message UnityModelVersion {
+    string catalog_name     = 1;
+    string schema_name      = 2;
+    string model_name       = 3;
+    uint32 version          = 4;     // 1-indexed, monotonic per model
+    string version_id       = 5;     // Server-assigned UUID
+    string source           = 6;     // s3://… URI of the artifact dir
+    string run_id           = 7;     // External tracking ID (MLflow run)
+    string status           = 8;     // "PENDING_REGISTRATION" | "READY" | "FAILED_REGISTRATION"
+    string description      = 9;
+    uint64 created_at       = 10;
+    uint64 updated_at       = 11;
+    map<string, string> properties = 12;
+}
+
+message UnityCreateModelRequest {
+    string catalog_name     = 1;
+    string schema_name      = 2;
+    string name             = 3;
+    string storage_location = 4;     // Empty → MANAGED, server-derived
+    string comment          = 5;
+    string owner            = 6;
+    map<string, string> properties = 7;
+}
+message UnityCreateModelResponse { UnityModel model = 1; }
+
+message UnityListModelsRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    uint32 max_results  = 3;
+    string page_token   = 4;
+}
+message UnityListModelsResponse {
+    repeated UnityModel models = 1;
+    string next_page_token      = 2;
+}
+
+message UnityGetModelRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityGetModelResponse { UnityModel model = 1; }
+
+message UnityDeleteModelRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string name         = 3;
+}
+message UnityDeleteModelResponse { bool success = 1; }
+
+message UnityCreateModelVersionRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string model_name   = 3;
+    string source       = 4;
+    string run_id       = 5;
+    string description  = 6;
+    map<string, string> properties = 7;
+}
+message UnityCreateModelVersionResponse { UnityModelVersion version = 1; }
+
+message UnityListModelVersionsRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string model_name   = 3;
+    uint32 max_results  = 4;
+    string page_token   = 5;
+}
+message UnityListModelVersionsResponse {
+    repeated UnityModelVersion versions = 1;
+    string next_page_token               = 2;
+}
+
+message UnityGetModelVersionRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string model_name   = 3;
+    uint32 version      = 4;
+}
+message UnityGetModelVersionResponse { UnityModelVersion version = 1; }
+
+message UnityUpdateModelVersionStatusRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string model_name   = 3;
+    uint32 version      = 4;
+    string new_status   = 5;
+}
+message UnityUpdateModelVersionStatusResponse { UnityModelVersion version = 1; }
+
+message UnityDeleteModelVersionRequest {
+    string catalog_name = 1;
+    string schema_name  = 2;
+    string model_name   = 3;
+    uint32 version      = 4;
+}
+message UnityDeleteModelVersionResponse { bool success = 1; }
 
 // ============ Cluster Configuration ============
 

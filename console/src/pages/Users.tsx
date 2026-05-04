@@ -1,6 +1,15 @@
 import React, { useEffect, useState } from "react";
-import { Users as UsersIcon, Plus, Trash2, Key, Copy, Check } from "lucide-react";
+import {
+  Users as UsersIcon,
+  Plus,
+  Trash2,
+  Key,
+  Copy,
+  Check,
+  UserCircle,
+} from "lucide-react";
 import PageHeader from "../components/PageHeader";
+import GroupsPanel from "../components/GroupsPanel";
 
 interface User {
   user_id: string;
@@ -20,7 +29,10 @@ interface Tenant {
   name: string;
 }
 
+type Tab = "users" | "groups";
+
 export default function UsersPage() {
+  const [tab, setTab] = useState<Tab>("users");
   const [userList, setUserList] = useState<User[]>([]);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [showCreate, setShowCreate] = useState(false);
@@ -126,18 +138,129 @@ export default function UsersPage() {
   return (
     <div className="p-6">
       <PageHeader
-        title="Users & Access Keys"
-        description="Manage S3 API users and their credentials"
+        title="Users & Groups"
+        description="IAM users, access keys, and groups. Policies attach to either."
         action={
-          <button
-            onClick={() => { setShowCreate(true); setCredentials(null); }}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white rounded-lg text-[12px] font-medium hover:bg-gray-800"
-          >
-            <Plus size={14} /> Create User
-          </button>
+          tab === "users" ? (
+            <button
+              onClick={() => {
+                setShowCreate(true);
+                setCredentials(null);
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white rounded-lg text-[12px] font-medium hover:bg-gray-800"
+            >
+              <Plus size={14} /> Create User
+            </button>
+          ) : null
         }
       />
 
+      {/* Tab bar */}
+      <div className="flex border-b border-gray-200 mb-4">
+        {(
+          [
+            { key: "users", label: "Users", icon: UserCircle },
+            { key: "groups", label: "Groups", icon: UsersIcon },
+          ] as const
+        ).map((t) => {
+          const Icon = t.icon;
+          const active = tab === t.key;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex items-center gap-1.5 px-3 py-2 text-[12px] font-medium border-b-2 -mb-px transition-colors ${
+                active
+                  ? "border-gray-900 text-gray-900"
+                  : "border-transparent text-gray-500 hover:text-gray-800"
+              }`}
+            >
+              <Icon size={13} /> {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {tab === "groups" && <GroupsPanel />}
+      {tab !== "users" && null}
+      {tab !== "users" ? null : (
+        <UsersTabContent
+          credentials={credentials}
+          setCredentials={setCredentials}
+          copied={copied}
+          copyText={copyText}
+          showCreate={showCreate}
+          setShowCreate={setShowCreate}
+          newUsername={newUsername}
+          setNewUsername={setNewUsername}
+          newTenant={newTenant}
+          setNewTenant={setNewTenant}
+          tenants={tenants}
+          createUser={createUser}
+          loading={loading}
+          userList={userList}
+          loadKeys={loadKeys}
+          deleteUser={deleteUser}
+          expandedUser={expandedUser}
+          keys={keys}
+          createKey={createKey}
+          deleteKey={deleteKey}
+        />
+      )}
+    </div>
+  );
+}
+
+interface UsersTabProps {
+  credentials: { access_key_id: string; secret_access_key: string } | null;
+  setCredentials: (
+    v: { access_key_id: string; secret_access_key: string } | null,
+  ) => void;
+  copied: string;
+  copyText: (text: string, id: string) => void;
+  showCreate: boolean;
+  setShowCreate: (v: boolean) => void;
+  newUsername: string;
+  setNewUsername: (v: string) => void;
+  newTenant: string;
+  setNewTenant: (v: string) => void;
+  tenants: Tenant[];
+  createUser: () => void;
+  loading: boolean;
+  userList: User[];
+  loadKeys: (userId: string) => void;
+  deleteUser: (userId: string) => void;
+  expandedUser: string | null;
+  keys: AccessKey[];
+  createKey: (userId: string) => void;
+  deleteKey: (keyId: string, userId: string) => void;
+}
+
+function UsersTabContent(p: UsersTabProps) {
+  const {
+    credentials,
+    setCredentials,
+    copied,
+    copyText,
+    showCreate,
+    setShowCreate,
+    newUsername,
+    setNewUsername,
+    newTenant,
+    setNewTenant,
+    tenants,
+    createUser,
+    loading,
+    userList,
+    loadKeys,
+    deleteUser,
+    expandedUser,
+    keys,
+    createKey,
+    deleteKey,
+  } = p;
+  return (
+    <>
       {/* Credentials banner */}
       {credentials && (
         <div className="mb-4 bg-yellow-50 border border-yellow-200 rounded-xl p-4">
@@ -283,6 +406,6 @@ export default function UsersPage() {
           </tbody>
         </table>
       </div>
-    </div>
+    </>
   );
 }

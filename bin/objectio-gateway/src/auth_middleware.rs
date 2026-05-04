@@ -15,7 +15,8 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use hmac::{Hmac, Mac};
 use objectio_auth::AuthResult;
 use objectio_proto::metadata::{
-    GetAccessKeyForAuthRequest, metadata_service_client::MetadataServiceClient,
+    GetAccessKeyForAuthRequest, GetUserGroupsRequest,
+    metadata_service_client::MetadataServiceClient,
 };
 use parking_lot::RwLock;
 use regex::Regex;
@@ -70,6 +71,36 @@ impl AuthState {
     pub fn with_sts(mut self, sts: objectio_auth::sts::StsProvider) -> Self {
         self.sts_provider = Some(sts);
         self
+    }
+
+    /// Look up the IAM groups a user belongs to. Returns parallel
+    /// (group_arns, group_ids) vectors. Called by every auth path so
+    /// policies attached to a group cascade to its members regardless
+    /// of how the user authenticated (SigV4, OIDC, or session cookie).
+    /// Failures are logged and swallowed — group memberships are an
+    /// optimization, not a hard requirement.
+    pub async fn lookup_user_groups(&self, user_id: &str) -> (Vec<String>, Vec<String>) {
+        if user_id.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let mut client = self.meta_client.clone();
+        match client
+            .get_user_groups(GetUserGroupsRequest {
+                user_id: user_id.to_string(),
+            })
+            .await
+        {
+            Ok(r) => {
+                let groups = r.into_inner().groups;
+                let arns = groups.iter().map(|g| g.arn.clone()).collect();
+                let ids = groups.iter().map(|g| g.group_id.clone()).collect();
+                (arns, ids)
+            }
+            Err(e) => {
+                debug!("get_user_groups for {user_id} failed: {e}");
+                (Vec::new(), Vec::new())
+            }
+        }
     }
 
     /// Look up credentials from cache or metadata service
@@ -177,41 +208,101 @@ pub async fn auth_layer(
         .map(String::from);
 
     if access_key_id.starts_with("ASIA") {
-        if let (Some(token), Some(sts)) = (&session_token, &auth_state.sts_provider) {
-            // Validate the STS session token
-            match sts.validate(token) {
-                Some(session_info) => {
-                    debug!(
-                        "STS auth: user_arn={}, scope={}",
-                        session_info.user_arn, session_info.scope
-                    );
-                    let auth_result = AuthResult {
-                        user_id: session_info.user_arn.clone(),
-                        user_arn: session_info.user_arn,
-                        access_key_id: access_key_id.to_string(),
-                        group_arns: Vec::new(),
-                        tenant: String::new(),
-                    };
-                    request.extensions_mut().insert(auth_result);
-                    return Ok(next.run(request).await);
-                }
-                None => {
-                    return Err(AuthError::AccessDenied(
-                        "invalid or expired session token".to_string(),
-                    ));
-                }
+        let Some(token) = &session_token else {
+            return Err(AuthError::AccessDenied(
+                "temporary credentials require X-Amz-Security-Token".to_string(),
+            ));
+        };
+        let Some(sts) = &auth_state.sts_provider else {
+            return Err(AuthError::AccessDenied(
+                "STS credential vending is not configured on this gateway".to_string(),
+            ));
+        };
+        let session_info = sts.validate(token).ok_or_else(|| {
+            AuthError::AccessDenied("invalid or expired session token".to_string())
+        })?;
+
+        // Recover the derived secret and run the SAME SigV4 verify path as
+        // permanent keys — without this the session token is the only
+        // proof, which is replayable.
+        let derived_secret = sts.derive_secret(access_key_id);
+        let cred = CachedCredential {
+            access_key_id: access_key_id.to_string(),
+            secret_access_key: derived_secret,
+            user_id: session_info.user_arn.clone(),
+            user_arn: session_info.user_arn.clone(),
+            tenant: String::new(),
+            cached_at: std::time::Instant::now(),
+        };
+        match &parsed {
+            ParsedAuth::V4 {
+                signed_headers,
+                signature,
+                ..
+            } => {
+                verify_request_v4(
+                    &request,
+                    signed_headers,
+                    signature,
+                    &cred,
+                    &auth_state.region,
+                )?;
+            }
+            ParsedAuth::V2 { signature, .. } => {
+                verify_request_v2(&request, signature, &cred)?;
             }
         }
-        return Err(AuthError::AccessDenied(
-            "temporary credentials require X-Amz-Security-Token".to_string(),
-        ));
+
+        // Enforce scope + operation. The path is `/<bucket>/<key…>` (path
+        // style) — virtual-hosted-style is rewritten earlier in the chain.
+        // Bucket-level LIST has an empty path key but carries the requested
+        // prefix in the `prefix=` query param; use that as the effective key
+        // so a narrower-or-equal LIST is permitted but a broader LIST is
+        // rejected.
+        let uri = request.uri().clone();
+        let path = uri.path().trim_start_matches('/');
+        let (req_bucket, path_key) = path.split_once('/').map_or((path, ""), |(b, k)| (b, k));
+        let effective_key: String = if path_key.is_empty() {
+            extract_query_param(uri.query().unwrap_or(""), "prefix").unwrap_or_default()
+        } else {
+            path_key.to_string()
+        };
+        if !objectio_auth::sts::scope_allows(&session_info.scope, req_bucket, &effective_key) {
+            return Err(AuthError::AccessDenied(format!(
+                "vended credentials are scoped to {}, not s3://{}/{}",
+                session_info.scope, req_bucket, effective_key
+            )));
+        }
+        if session_info.operation == objectio_auth::sts::Operation::Read
+            && objectio_auth::sts::is_mutating_method(request.method().as_str())
+        {
+            return Err(AuthError::AccessDenied(
+                "vended credentials are READ-only; this method requires READ_WRITE".to_string(),
+            ));
+        }
+
+        debug!(
+            "STS auth ok: user_arn={} scope={} op={:?}",
+            session_info.user_arn, session_info.scope, session_info.operation
+        );
+        let auth_result = AuthResult {
+            user_id: session_info.user_arn.clone(),
+            user_arn: session_info.user_arn,
+            access_key_id: access_key_id.to_string(),
+            group_arns: Vec::new(),
+            group_ids: Vec::new(),
+            tenant: String::new(),
+            auth_mode: objectio_auth::AuthMode::Sts,
+        };
+        request.extensions_mut().insert(auth_result);
+        return Ok(next.run(request).await);
     }
 
     // Fetch credentials from metadata service (permanent keys)
     let cred = auth_state.lookup_credential(access_key_id).await?;
 
     // Verify the signature based on auth version
-    let auth_result = match &parsed {
+    let mut auth_result = match &parsed {
         ParsedAuth::V4 {
             signed_headers,
             signature,
@@ -226,9 +317,18 @@ pub async fn auth_layer(
         ParsedAuth::V2 { signature, .. } => verify_request_v2(&request, signature, &cred)?,
     };
 
+    // Stitch IAM group memberships onto the AuthResult so policies attached
+    // to a group cascade to its members. Mirrors the OIDC bridge — same
+    // semantics, different identity source.
+    let (g_arns, g_ids) = auth_state.lookup_user_groups(&auth_result.user_id).await;
+    auth_result.group_arns = g_arns;
+    auth_result.group_ids = g_ids;
+
     debug!(
-        "Authenticated user: {} (key: {})",
-        auth_result.user_id, auth_result.access_key_id
+        "Authenticated user: {} (key: {}, groups={})",
+        auth_result.user_id,
+        auth_result.access_key_id,
+        auth_result.group_ids.len()
     );
 
     // Store auth result in request extensions for handlers to access
@@ -364,7 +464,9 @@ pub fn verify_request_v4<B>(
         user_arn: cred.user_arn.clone(),
         access_key_id: cred.access_key_id.clone(),
         group_arns: Vec::new(),
+        group_ids: Vec::new(),
         tenant: cred.tenant.clone(),
+        auth_mode: objectio_auth::AuthMode::Permanent,
     })
 }
 
@@ -435,7 +537,9 @@ pub fn verify_request_v2<B>(
         user_arn: cred.user_arn.clone(),
         access_key_id: cred.access_key_id.clone(),
         group_arns: Vec::new(),
+        group_ids: Vec::new(),
         tenant: cred.tenant.clone(),
+        auth_mode: objectio_auth::AuthMode::Permanent,
     })
 }
 
@@ -617,9 +721,9 @@ fn build_canonical_request<B>(
     let mut headers_map: BTreeMap<String, String> = BTreeMap::new();
     for header_name in signed_headers {
         let value = match request.headers().get(header_name.as_str()) {
-            Some(v) => v.to_str().map_err(|_| {
-                AuthError::AccessDenied("invalid header value".to_string())
-            })?,
+            Some(v) => v
+                .to_str()
+                .map_err(|_| AuthError::AccessDenied("invalid header value".to_string()))?,
             None => {
                 // Diagnostic dump: when a signed header is missing, log the
                 // full SignedHeaders list and every header actually on the
@@ -628,9 +732,7 @@ fn build_canonical_request<B>(
                 let incoming: Vec<String> = request
                     .headers()
                     .iter()
-                    .map(|(k, v)| {
-                        format!("{}={}", k.as_str(), v.to_str().unwrap_or("<non-utf8>"))
-                    })
+                    .map(|(k, v)| format!("{}={}", k.as_str(), v.to_str().unwrap_or("<non-utf8>")))
                     .collect();
                 warn!(
                     method = %method,
@@ -731,6 +833,20 @@ fn hex_sha256(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
+}
+
+/// Pull a single query parameter out of a raw query string. Used by the STS
+/// scope check to read `?prefix=` from bucket-level LIST requests. Returns
+/// the URL-decoded value or `None` when the key isn't present.
+fn extract_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=')
+            && k == key
+        {
+            return Some(url_decode(v));
+        }
+    }
+    None
 }
 
 /// URL encode a string (AWS style)

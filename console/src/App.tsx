@@ -10,6 +10,7 @@ import UsersPage from "./pages/Users";
 import Identity from "./pages/Identity";
 import Tenants from "./pages/Tenants";
 import IcebergCatalog from "./pages/IcebergCatalog";
+import UnityCatalog from "./pages/UnityCatalog";
 import DeltaSharing from "./pages/DeltaSharing";
 import Monitoring from "./pages/Monitoring";
 import Policies from "./pages/Policies";
@@ -80,6 +81,7 @@ export default function App() {
         <Route path="identity" element={<Identity />} />
         {isSystemAdmin && <Route path="tenants" element={<Tenants />} />}
         <Route path="iceberg" element={<IcebergCatalog />} />
+        <Route path="unity" element={<UnityCatalog />} />
         <Route path="sharing" element={<DeltaSharing />} />
         {isSystemAdmin && <Route path="monitoring" element={<Monitoring />} />}
         {isSystemAdmin && <Route path="encryption" element={<Encryption />} />}

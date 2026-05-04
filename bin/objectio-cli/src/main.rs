@@ -544,7 +544,10 @@ async fn main() -> Result<()> {
                     let users: Vec<_> = if tenant.is_empty() {
                         resp.users
                     } else {
-                        resp.users.into_iter().filter(|u| u.tenant == tenant).collect()
+                        resp.users
+                            .into_iter()
+                            .filter(|u| u.tenant == tenant)
+                            .collect()
                     };
                     println!("Users");
                     println!("=====");
@@ -1036,7 +1039,10 @@ async fn main() -> Result<()> {
 
             match action {
                 TenantCommands::List => {
-                    let resp = client.list_tenants(ListTenantsRequest {}).await?.into_inner();
+                    let resp = client
+                        .list_tenants(ListTenantsRequest {})
+                        .await?
+                        .into_inner();
                     println!("Tenants");
                     println!("=======");
                     if resp.tenants.is_empty() {
@@ -1290,7 +1296,10 @@ async fn main() -> Result<()> {
                             updated_by: "objectio-cli".to_string(),
                         })
                         .await?;
-                    println!("License installed for '{}' (tier: {})", license.licensee, license.tier);
+                    println!(
+                        "License installed for '{}' (tier: {})",
+                        license.licensee, license.tier
+                    );
                     println!(
                         "Restart the gateway or PUT /_admin/license via console to activate \
                          without waiting for restart."
@@ -1340,12 +1349,10 @@ async fn main() -> Result<()> {
             match action {
                 TopologyCommands::Show => {
                     let resp = client
-                        .get_listing_nodes(
-                            objectio_proto::metadata::GetListingNodesRequest {
-                                bucket: String::new(),
-                                include_all_states: false,
-                            },
-                        )
+                        .get_listing_nodes(objectio_proto::metadata::GetListingNodesRequest {
+                            bucket: String::new(),
+                            include_all_states: false,
+                        })
                         .await?
                         .into_inner();
                     println!("Cluster topology — {} OSDs", resp.nodes.len());
@@ -1359,11 +1366,36 @@ async fn main() -> Result<()> {
                     let mut tree: RegionMap = BTreeMap::new();
                     for n in &resp.nodes {
                         let fd = n.failure_domain.clone().unwrap_or_default();
-                        let r = if fd.region.is_empty() { "(none)" } else { &fd.region }.to_string();
-                        let z = if fd.zone.is_empty() { "(none)" } else { &fd.zone }.to_string();
-                        let d = if fd.datacenter.is_empty() { "(none)" } else { &fd.datacenter }.to_string();
-                        let rk = if fd.rack.is_empty() { "(none)" } else { &fd.rack }.to_string();
-                        let h = if fd.host.is_empty() { "(none)" } else { &fd.host }.to_string();
+                        let r = if fd.region.is_empty() {
+                            "(none)"
+                        } else {
+                            &fd.region
+                        }
+                        .to_string();
+                        let z = if fd.zone.is_empty() {
+                            "(none)"
+                        } else {
+                            &fd.zone
+                        }
+                        .to_string();
+                        let d = if fd.datacenter.is_empty() {
+                            "(none)"
+                        } else {
+                            &fd.datacenter
+                        }
+                        .to_string();
+                        let rk = if fd.rack.is_empty() {
+                            "(none)"
+                        } else {
+                            &fd.rack
+                        }
+                        .to_string();
+                        let h = if fd.host.is_empty() {
+                            "(none)"
+                        } else {
+                            &fd.host
+                        }
+                        .to_string();
                         tree.entry(r)
                             .or_default()
                             .entry(z)
@@ -1423,9 +1455,7 @@ async fn main() -> Result<()> {
                 TopologyCommands::Validate { pool } => {
                     // Fetch pool
                     let presp = client
-                        .get_pool(objectio_proto::metadata::GetPoolRequest {
-                            name: pool.clone(),
-                        })
+                        .get_pool(objectio_proto::metadata::GetPoolRequest { name: pool.clone() })
                         .await?
                         .into_inner();
                     if !presp.found {
@@ -1436,12 +1466,10 @@ async fn main() -> Result<()> {
                     let level = p.failure_domain.clone();
                     // Fetch topology
                     let resp = client
-                        .get_listing_nodes(
-                            objectio_proto::metadata::GetListingNodesRequest {
-                                bucket: String::new(),
-                                include_all_states: false,
-                            },
-                        )
+                        .get_listing_nodes(objectio_proto::metadata::GetListingNodesRequest {
+                            bucket: String::new(),
+                            include_all_states: false,
+                        })
                         .await?
                         .into_inner();
                     use std::collections::HashSet;
@@ -1451,16 +1479,15 @@ async fn main() -> Result<()> {
                         let k = match level.as_str() {
                             "region" => fd.region,
                             "zone" => format!("{}:{}", fd.region, fd.zone),
-                            "datacenter" | "dc" => format!("{}:{}:{}", fd.region, fd.zone, fd.datacenter),
+                            "datacenter" | "dc" => {
+                                format!("{}:{}:{}", fd.region, fd.zone, fd.datacenter)
+                            }
                             "host" => format!(
                                 "{}:{}:{}:{}:{}",
                                 fd.region, fd.zone, fd.datacenter, fd.rack, fd.host
                             ),
                             "osd" | "node" | "disk" => hex::encode(&n.node_id),
-                            _ => format!(
-                                "{}:{}:{}:{}",
-                                fd.region, fd.zone, fd.datacenter, fd.rack
-                            ),
+                            _ => format!("{}:{}:{}:{}", fd.region, fd.zone, fd.datacenter, fd.rack),
                         };
                         keys.insert(k);
                     }

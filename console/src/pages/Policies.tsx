@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { Shield, Plus, Trash2, Link2 } from "lucide-react";
 import PageHeader from "../components/PageHeader";
+import {
+  users as usersApi,
+  groups as groupsApi,
+  type User,
+  type Group,
+} from "../api/client";
 
 interface Policy {
   name: string;
@@ -11,6 +17,8 @@ interface Policy {
 export default function Policies() {
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [loading, setLoading] = useState(true);
+  const [users, setUsers] = useState<User[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
 
   // Create
   const [showCreate, setShowCreate] = useState(false);
@@ -22,6 +30,8 @@ export default function Policies() {
   const [attachPolicy, setAttachPolicy] = useState("");
   const [attachUserId, setAttachUserId] = useState("");
   const [attachGroupId, setAttachGroupId] = useState("");
+  const [attachMsg, setAttachMsg] = useState<string | null>(null);
+  const [attachErr, setAttachErr] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -33,6 +43,10 @@ export default function Policies() {
   };
 
   useEffect(load, []);
+  useEffect(() => {
+    usersApi.list().then((r) => setUsers(r.users || [])).catch(() => setUsers([]));
+    groupsApi.list().then((r) => setGroups(r.groups || [])).catch(() => setGroups([]));
+  }, []);
 
   const createPolicy = async () => {
     if (!newName.trim() || !newPolicyJson.trim()) return;
@@ -63,8 +77,17 @@ export default function Policies() {
   };
 
   const doAttach = async () => {
-    if (!attachPolicy) return;
-    await fetch("/_admin/policies/attach", {
+    setAttachErr(null);
+    setAttachMsg(null);
+    if (!attachPolicy) {
+      setAttachErr("Pick a policy");
+      return;
+    }
+    if (!attachUserId && !attachGroupId) {
+      setAttachErr("Pick a user or enter a group");
+      return;
+    }
+    const r = await fetch("/_admin/policies/attach", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -73,48 +96,225 @@ export default function Policies() {
         group_id: attachGroupId,
       }),
     });
-    setShowAttach(false);
+    if (!r.ok) {
+      setAttachErr(`${r.status}: ${await r.text()}`);
+      return;
+    }
+    const target = attachUserId
+      ? users.find((u) => u.user_id === attachUserId)?.display_name ||
+        attachUserId
+      : `group ${
+          groups.find((g) => g.group_id === attachGroupId)?.group_name ||
+          attachGroupId
+        }`;
+    setAttachMsg(`Attached "${attachPolicy}" to ${target}`);
     setAttachPolicy("");
     setAttachUserId("");
     setAttachGroupId("");
   };
 
   const applyTemplate = (name: string) => {
-    const templates: Record<string, object> = {
-      readonly: {
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Action: ["s3:GetObject", "s3:GetBucketLocation"],
-            Resource: ["arn:obio:s3:::*/*"],
-          },
-        ],
+    const templates: Record<string, { suggested: string; doc: object }> = {
+      // ---- S3 ----
+      "s3-readonly": {
+        suggested: "s3-readonly",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["s3:GetObject", "s3:GetBucketLocation", "s3:ListBucket"],
+              Resource: ["arn:obio:s3:::*", "arn:obio:s3:::*/*"],
+            },
+          ],
+        },
       },
-      readwrite: {
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Action: ["s3:*"],
-            Resource: ["arn:obio:s3:::*", "arn:obio:s3:::*/*"],
-          },
-        ],
+      "s3-readwrite": {
+        suggested: "s3-readwrite",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["s3:*"],
+              Resource: ["arn:obio:s3:::*", "arn:obio:s3:::*/*"],
+            },
+          ],
+        },
       },
-      writeonly: {
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Effect: "Allow",
-            Action: ["s3:PutObject"],
-            Resource: ["arn:obio:s3:::*/*"],
-          },
-        ],
+      "s3-writeonly": {
+        suggested: "s3-writeonly",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["s3:PutObject"],
+              Resource: ["arn:obio:s3:::*/*"],
+            },
+          ],
+        },
+      },
+      // Bucket-policy guardrail: deny anything that didn't arrive via an
+      // STS-vended session. Auto-attached on Unity catalog backing
+      // buckets at create time; useful as a manual attach on any bucket
+      // that should only be reachable through Unity / Iceberg / Delta
+      // Sharing presigned URLs.
+      "s3-deny-non-sts": {
+        suggested: "s3-deny-non-sts",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Sid: "DenyNonStsDirectAccess",
+              Effect: "Deny",
+              Principal: "*",
+              Action: ["s3:*"],
+              Resource: ["arn:obio:s3:::*", "arn:obio:s3:::*/*"],
+              Condition: {
+                StringNotEquals: { "obio:CredentialType": "STS" },
+              },
+            },
+          ],
+        },
+      },
+      // ---- Unity Catalog ----
+      // Single Unity plane covers data + ML registry + governed volumes.
+      // Resources use the `arn:obio:unity:::<catalog>[/<schema>[/<table>]]`
+      // shape; `*` matches everything below the level you scope to.
+      "unity-readonly": {
+        suggested: "unity-readonly",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: [
+                "unity:GetCatalog",
+                "unity:GetSchema",
+                "unity:GetTable",
+                "unity:GetVolume",
+                "unity:GetModel",
+                "unity:GetModelVersion",
+                "unity:GetFunction",
+                "unity:ListSchemas",
+                "unity:ListTables",
+                "unity:ListVolumes",
+                "unity:ListModels",
+                "unity:ListModelVersions",
+                "unity:ListFunctions",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
+      },
+      "unity-data-engineer": {
+        suggested: "unity-data-engineer",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: [
+                "unity:GetCatalog",
+                "unity:GetSchema",
+                "unity:GetTable",
+                "unity:CreateTable",
+                "unity:DeleteTable",
+                "unity:GetVolume",
+                "unity:CreateVolume",
+                "unity:GetFunction",
+                "unity:CreateFunction",
+                "unity:DeleteFunction",
+                "unity:GenerateTemporaryCredentials",
+                "unity:ListSchemas",
+                "unity:ListTables",
+                "unity:ListVolumes",
+                "unity:ListFunctions",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
+      },
+      // Security officer — can author row filter / column mask UDFs
+      // and bind them on tables, but cannot read or modify data.
+      "unity-security-officer": {
+        suggested: "unity-security-officer",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: [
+                "unity:GetCatalog",
+                "unity:GetSchema",
+                "unity:GetTable",
+                "unity:GetFunction",
+                "unity:CreateFunction",
+                "unity:DeleteFunction",
+                "unity:SetTableSecurity",
+                "unity:ListSchemas",
+                "unity:ListTables",
+                "unity:ListFunctions",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
+      },
+      "unity-ml-engineer": {
+        suggested: "unity-ml-engineer",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: [
+                "unity:GetCatalog",
+                "unity:GetSchema",
+                "unity:GetModel",
+                "unity:CreateModel",
+                "unity:GetModelVersion",
+                "unity:CreateModelVersion",
+                "unity:UpdateModelVersion",
+                "unity:ListModels",
+                "unity:ListModelVersions",
+                "unity:GenerateTemporaryCredentials",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
+      },
+      "unity-deny-delete": {
+        suggested: "unity-deny-delete",
+        doc: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              // Companion guardrail to attach alongside a broader Allow —
+              // protects against accidental DROP TABLE / DELETE CATALOG.
+              Effect: "Deny",
+              Action: [
+                "unity:DeleteCatalog",
+                "unity:DeleteSchema",
+                "unity:DeleteTable",
+                "unity:DeleteVolume",
+                "unity:DeleteModel",
+                "unity:DeleteModelVersion",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
       },
     };
-    if (templates[name]) {
-      setNewName(name);
-      setNewPolicyJson(JSON.stringify(templates[name], null, 2));
+    const t = templates[name];
+    if (t) {
+      setNewName(t.suggested);
+      setNewPolicyJson(JSON.stringify(t.doc, null, 2));
     }
   };
 
@@ -167,27 +367,54 @@ export default function Policies() {
             </div>
             <div>
               <label className="block text-[11px] text-gray-500 mb-1">
-                User ID (optional)
+                User
               </label>
-              <input
+              <select
                 value={attachUserId}
-                onChange={(e) => setAttachUserId(e.target.value)}
-                placeholder="User UUID"
+                onChange={(e) => {
+                  setAttachUserId(e.target.value);
+                  if (e.target.value) setAttachGroupId("");
+                }}
                 className="w-full px-2 py-1.5 border border-gray-300 rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
+              >
+                <option value="">— pick user —</option>
+                {users.map((u) => (
+                  <option key={u.user_id} value={u.user_id}>
+                    {u.display_name}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="block text-[11px] text-gray-500 mb-1">
-                Group ID (optional)
+                Group
               </label>
-              <input
+              <select
                 value={attachGroupId}
-                onChange={(e) => setAttachGroupId(e.target.value)}
-                placeholder="Group name"
-                className="w-full px-2 py-1.5 border border-gray-300 rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-blue-500"
-              />
+                onChange={(e) => {
+                  setAttachGroupId(e.target.value);
+                  if (e.target.value) setAttachUserId("");
+                }}
+                disabled={!!attachUserId}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+              >
+                <option value="">— pick group —</option>
+                {groups.map((g) => (
+                  <option key={g.group_id} value={g.group_id}>
+                    {g.group_name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
+          {attachErr && (
+            <div className="mb-2 text-[11px] text-red-600 font-mono break-all">
+              {attachErr}
+            </div>
+          )}
+          {attachMsg && (
+            <div className="mb-2 text-[11px] text-green-700">{attachMsg}</div>
+          )}
           <div className="flex gap-1.5">
             <button
               onClick={doAttach}
@@ -196,10 +423,14 @@ export default function Policies() {
               Attach
             </button>
             <button
-              onClick={() => setShowAttach(false)}
+              onClick={() => {
+                setShowAttach(false);
+                setAttachErr(null);
+                setAttachMsg(null);
+              }}
               className="px-3 py-1.5 text-gray-500 text-[11px]"
             >
-              Cancel
+              Close
             </button>
           </div>
         </div>
@@ -216,19 +447,41 @@ export default function Policies() {
               placeholder="Policy name"
               className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-1 focus:ring-blue-500 mb-2"
             />
-            <div className="flex gap-1.5 mb-2">
-              <span className="text-[11px] text-gray-500 py-0.5">
-                Templates:
-              </span>
-              {["readonly", "readwrite", "writeonly"].map((t) => (
-                <button
-                  key={t}
-                  onClick={() => applyTemplate(t)}
-                  className="px-2 py-0.5 rounded border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
-                >
-                  {t}
-                </button>
-              ))}
+            <div className="space-y-1.5 mb-2">
+              <div className="flex gap-1.5 items-center flex-wrap">
+                <span className="text-[11px] text-gray-500 py-0.5 w-12">
+                  S3:
+                </span>
+                {["s3-readonly", "s3-readwrite", "s3-writeonly", "s3-deny-non-sts"].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => applyTemplate(t)}
+                    className="px-2 py-0.5 rounded border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
+                  >
+                    {t.replace("s3-", "")}
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-1.5 items-center flex-wrap">
+                <span className="text-[11px] text-gray-500 py-0.5 w-12">
+                  Unity:
+                </span>
+                {[
+                  "unity-readonly",
+                  "unity-data-engineer",
+                  "unity-ml-engineer",
+                  "unity-security-officer",
+                  "unity-deny-delete",
+                ].map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => applyTemplate(t)}
+                    className="px-2 py-0.5 rounded border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
+                  >
+                    {t.replace("unity-", "")}
+                  </button>
+                ))}
+              </div>
             </div>
             <textarea
               value={newPolicyJson}

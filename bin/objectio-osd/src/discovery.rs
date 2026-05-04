@@ -99,9 +99,7 @@ pub fn discover(
 
         // Skip currently-mounted partitions. Wouldn't be safe to open
         // them O_DIRECT underneath a running filesystem anyway.
-        if !explicit.iter().any(|p| p == &disp)
-            && mounted.iter().any(|m| matches_mount(&disp, m))
-        {
+        if !explicit.iter().any(|p| p == &disp) && mounted.iter().any(|m| matches_mount(&disp, m)) {
             warn!("discovery: skipping {disp} — currently mounted");
             continue;
         }
@@ -133,9 +131,7 @@ pub fn discover(
             }
         };
         if size < min_size && !is_explicit {
-            debug!(
-                "discovery: skipping {disp} — size {size} below min {min_size}"
-            );
+            debug!("discovery: skipping {disp} — size {size} below min {min_size}");
             continue;
         }
 
@@ -198,7 +194,8 @@ fn matches_root_device(candidate: &str, root_dev: &str) -> bool {
     if candidate == base {
         return true;
     }
-    candidate.starts_with(&format!("{base}p")) || candidate.starts_with(&format!("{base}-part"))
+    candidate.starts_with(&format!("{base}p"))
+        || candidate.starts_with(&format!("{base}-part"))
         || candidate
             .strip_prefix(base)
             .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()))

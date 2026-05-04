@@ -154,8 +154,36 @@ fn generate_secret_key() -> String {
         .collect()
 }
 
+/// How the caller authenticated. Surfaced into policy evaluation as
+/// the `obio:CredentialType` condition variable so bucket and Unity
+/// policies can deny direct (permanent-key) access while still allowing
+/// STS-vended sessions through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthMode {
+    /// Permanent IAM access key (`AKIA…`).
+    #[default]
+    Permanent,
+    /// STS-vended temporary session (`ASIA…` + X-Amz-Security-Token).
+    Sts,
+    /// `--no-auth` mode or pre-auth public route.
+    Anonymous,
+}
+
+impl AuthMode {
+    /// Wire/policy-condition representation. Matches the value engines
+    /// see in the `obio:CredentialType` policy variable.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Permanent => "Permanent",
+            Self::Sts => "STS",
+            Self::Anonymous => "Anonymous",
+        }
+    }
+}
+
 /// Authentication result after successful verification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AuthResult {
     /// Authenticated user ID
     pub user_id: String,
@@ -163,10 +191,21 @@ pub struct AuthResult {
     pub user_arn: String,
     /// Access key ID used
     pub access_key_id: String,
-    /// Group ARNs the user belongs to (populated by gateway)
+    /// Group ARNs the user belongs to (populated by gateway). Includes both
+    /// IAM groups (`arn:obio:iam::objectio:group/<name>`) and any
+    /// federation-derived groups (e.g. OIDC: `arn:obio:iam::oidc:group/<g>`).
     pub group_arns: Vec<String>,
+    /// Resolved IAM group_ids the user belongs to. Populated when the auth
+    /// layer can map federation group names back to local IAM groups (e.g.
+    /// the OIDC bridge looks up IAM groups by name and stitches their IDs
+    /// here). Policy evaluators iterate this list to apply group-attached
+    /// IAM policies. Empty = no IAM-group resolution.
+    pub group_ids: Vec<String>,
     /// Tenant the user belongs to (empty = system admin)
     pub tenant: String,
+    /// How the caller authenticated. Drives `obio:CredentialType` in
+    /// policy evaluation.
+    pub auth_mode: AuthMode,
 }
 
 impl AuthResult {

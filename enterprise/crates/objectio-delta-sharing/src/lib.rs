@@ -8,8 +8,10 @@
 
 pub mod access;
 pub mod catalog;
+pub mod delta_log;
 pub mod error;
 pub mod handlers;
+pub mod presigned_reader;
 pub mod types;
 
 use axum::Router;
@@ -18,7 +20,14 @@ use catalog::DeltaCatalog;
 use handlers::DeltaState;
 use objectio_proto::metadata::metadata_service_client::MetadataServiceClient;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Channel;
+
+/// Default lifetime of presigned data-file URLs returned to recipients.
+/// One hour matches the prior Iceberg manifest path; tune via
+/// `DeltaSharingConfig::default_url_ttl_seconds` if Spark/Databricks queries
+/// need longer windows.
+const DEFAULT_URL_TTL_SECS: u64 = 3600;
 
 /// Configuration for the Delta Sharing router.
 pub struct DeltaSharingConfig {
@@ -32,6 +41,11 @@ pub struct DeltaSharingConfig {
     pub access_key_id: String,
     /// Admin secret access key for presigning.
     pub secret_access_key: String,
+    /// Lifetime (seconds) of presigned data-file URLs returned in /query
+    /// responses. `None` falls back to the 3600s default. Long-running Spark
+    /// jobs against million-file Delta tables will hit 403s past this window
+    /// unless they refresh by re-calling /query — set higher if needed.
+    pub default_url_ttl_seconds: Option<u64>,
 }
 
 /// Build the Delta Sharing REST API router.
@@ -44,6 +58,12 @@ pub struct DeltaSharingConfig {
 /// main gateway router (not this router).
 pub fn router(meta_client: MetadataServiceClient<Channel>, config: DeltaSharingConfig) -> Router {
     let catalog = DeltaCatalog::new(meta_client.clone());
+    let http = reqwest::Client::new();
+    let default_url_ttl = Duration::from_secs(
+        config
+            .default_url_ttl_seconds
+            .unwrap_or(DEFAULT_URL_TTL_SECS),
+    );
     let state = Arc::new(DeltaState {
         catalog,
         meta_client,
@@ -51,6 +71,8 @@ pub fn router(meta_client: MetadataServiceClient<Channel>, config: DeltaSharingC
         region: config.region,
         access_key_id: config.access_key_id,
         secret_access_key: config.secret_access_key,
+        http,
+        default_url_ttl,
     });
 
     Router::new()
@@ -94,6 +116,12 @@ pub fn admin_router(
     config: DeltaSharingConfig,
 ) -> Router {
     let catalog = DeltaCatalog::new(meta_client.clone());
+    let http = reqwest::Client::new();
+    let default_url_ttl = Duration::from_secs(
+        config
+            .default_url_ttl_seconds
+            .unwrap_or(DEFAULT_URL_TTL_SECS),
+    );
     let state = Arc::new(DeltaState {
         catalog,
         meta_client,
@@ -101,6 +129,8 @@ pub fn admin_router(
         region: config.region,
         access_key_id: config.access_key_id,
         secret_access_key: config.secret_access_key,
+        http,
+        default_url_ttl,
     });
 
     Router::new()

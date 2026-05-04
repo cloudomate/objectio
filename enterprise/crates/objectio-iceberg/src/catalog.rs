@@ -295,19 +295,18 @@ impl IcebergCatalog {
     /// Atomically commit metadata updates to multiple tables in a single
     /// Raft log entry. Either every change lands or none do — on any
     /// conflict the whole transaction aborts. Each input tuple mirrors
-    /// the per-table shape of `commit_table`: (namespace_levels,
-    /// table_name, current_location, new_location, new_metadata_json).
+    /// the per-table shape of `commit_table`: (`namespace_levels`,
+    /// `table_name`, `current_location`, `new_location`, `new_metadata_json`).
     ///
     /// # Errors
     /// Returns `IcebergError` on `failed_precondition` if any change's
-    /// current_location is stale; callers retry after refreshing.
+    /// `current_location` is stale; callers retry after refreshing.
+    #[allow(clippy::type_complexity)] // five-tuple input mirrors the per-table commit shape
     pub async fn commit_transaction(
         &self,
         changes: Vec<(Vec<String>, String, String, String, Vec<u8>)>,
     ) -> Result<Vec<(String, Vec<u8>)>> {
-        use objectio_proto::metadata::{
-            IcebergCommitTableChange, IcebergCommitTransactionRequest,
-        };
+        use objectio_proto::metadata::{IcebergCommitTableChange, IcebergCommitTransactionRequest};
         let table_changes = changes
             .into_iter()
             .map(

@@ -8,7 +8,7 @@
 //!
 //! ## Wire
 //!
-//! ```
+//! ```text
 //! POST /{bucket}/{key}?grep
 //! Content-Type: application/json
 //!
@@ -130,7 +130,11 @@ impl PrefixGrepRequest {
         let caps = PrefixCaps {
             prefix: self.prefix.clone(),
             continuation_token: self.continuation_token.clone(),
-            max_keys: if self.max_keys == 0 { 100 } else { self.max_keys },
+            max_keys: if self.max_keys == 0 {
+                100
+            } else {
+                self.max_keys
+            },
             max_matches_global: if self.max_matches == 0 {
                 1000
             } else {
@@ -302,8 +306,8 @@ impl GrepRequest {
         if self.pattern.len() > 64 * 1024 {
             return Err(GrepError::bad_request("pattern exceeds 64 KiB"));
         }
-        let compiled = crate::grep_engine::compile(self)
-            .map_err(|e| GrepError::bad_request(e.to_string()))?;
+        let compiled =
+            crate::grep_engine::compile(self).map_err(|e| GrepError::bad_request(e.to_string()))?;
         let opts = ScanOpts {
             max_matches: if self.max_matches == 0 {
                 DEFAULT_MAX_MATCHES
@@ -385,11 +389,7 @@ where
             etag,
             pattern: pattern_echo,
         };
-        if tx
-            .send(Ok(frame(&start)))
-            .await
-            .is_err()
-        {
+        if tx.send(Ok(frame(&start))).await.is_err() {
             return; // client hung up before we started
         }
 
@@ -429,19 +429,13 @@ where
             // binary would.
             let Some(text) = text else { continue };
             let hit = pattern.match_line(text);
-            let should_emit = match (hit.is_some(), opts.invert) {
-                (true, false) | (false, true) => true,
-                _ => false,
-            };
+            let should_emit = matches!((hit.is_some(), opts.invert), (true, false) | (false, true));
             if !should_emit {
                 continue;
             }
 
             let (match_offset, match_length) = match hit {
-                Some(h) => (
-                    line_offset + h.start as u64,
-                    (h.end - h.start) as u64,
-                ),
+                Some(h) => (line_offset + h.start as u64, (h.end - h.start) as u64),
                 None => (line_offset, 0), // invert case — no substring match
             };
 
@@ -508,23 +502,19 @@ pub fn respond(
 
 /// Parse a prefix-grep body. Same JSON-only content-type contract as
 /// [`parse_body`]; returns either the request or a ready-to-send 400.
-pub fn parse_prefix_body(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<PrefixGrepRequest, Response> {
+#[allow(clippy::result_large_err)] // Err is a fully-formed Response built once per request.
+pub fn parse_prefix_body(headers: &HeaderMap, body: &[u8]) -> Result<PrefixGrepRequest, Response> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !ct.contains("application/json") {
-        return Err(GrepError::bad_request(
-            "Content-Type must be application/json",
-        )
-        .into_response());
+        return Err(
+            GrepError::bad_request("Content-Type must be application/json").into_response(),
+        );
     }
-    serde_json::from_slice::<PrefixGrepRequest>(body).map_err(|e| {
-        GrepError::bad_request(format!("invalid request body: {e}")).into_response()
-    })
+    serde_json::from_slice::<PrefixGrepRequest>(body)
+        .map_err(|e| GrepError::bad_request(format!("invalid request body: {e}")).into_response())
 }
 
 /// Run a scan over an object's streaming body, sending events into a
@@ -595,18 +585,12 @@ where
             continue;
         };
         let hit = pattern.match_line(text);
-        let should_emit = match (hit.is_some(), opts.invert) {
-            (true, false) | (false, true) => true,
-            _ => false,
-        };
+        let should_emit = matches!((hit.is_some(), opts.invert), (true, false) | (false, true));
         if !should_emit {
             continue;
         }
         let (match_offset, match_length) = match hit {
-            Some(h) => (
-                line_offset + h.start as u64,
-                (h.end - h.start) as u64,
-            ),
+            Some(h) => (line_offset + h.start as u64, (h.end - h.start) as u64),
             None => (line_offset, 0),
         };
         let (content, content_truncated) = truncate_utf8(text, opts.content_max_bytes);
@@ -725,20 +709,19 @@ pub fn respond_from_channel(
 
 /// Parse the request body once, returning the validated request or a
 /// 400 response ready to send.
+#[allow(clippy::result_large_err)] // Err is a fully-formed Response built once per request.
 pub fn parse_body(headers: &HeaderMap, body: &[u8]) -> Result<GrepRequest, Response> {
     let ct = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !ct.contains("application/json") {
-        return Err(GrepError::bad_request(
-            "Content-Type must be application/json",
-        )
-        .into_response());
+        return Err(
+            GrepError::bad_request("Content-Type must be application/json").into_response(),
+        );
     }
-    serde_json::from_slice::<GrepRequest>(body).map_err(|e| {
-        GrepError::bad_request(format!("invalid request body: {e}")).into_response()
-    })
+    serde_json::from_slice::<GrepRequest>(body)
+        .map_err(|e| GrepError::bad_request(format!("invalid request body: {e}")).into_response())
 }
 
 // ------- helpers -------
@@ -971,16 +954,32 @@ mod tests {
         );
         let m = events
             .iter()
-            .find_map(|e| if let GrepEvent::Match { offset, match_offset, content, .. } = e {
-                Some((*offset, *match_offset, content.clone()))
-            } else { None })
+            .find_map(|e| {
+                if let GrepEvent::Match {
+                    offset,
+                    match_offset,
+                    content,
+                    ..
+                } = e
+                {
+                    Some((*offset, *match_offset, content.clone()))
+                } else {
+                    None
+                }
+            })
             .unwrap();
         let (line_offset, match_offset, content) = m;
         // Line "match_here: boom" starts at byte offset 2+12+4 = 18
-        assert_eq!(&body[line_offset as usize..line_offset as usize + content.len()], content);
+        assert_eq!(
+            &body[line_offset as usize..line_offset as usize + content.len()],
+            content
+        );
         // Match is inside that line at column 12.
         assert_eq!(match_offset, line_offset + 12);
-        assert_eq!(&body[match_offset as usize..match_offset as usize + 4], "boom");
+        assert_eq!(
+            &body[match_offset as usize..match_offset as usize + 4],
+            "boom"
+        );
     }
 
     #[test]
@@ -1000,7 +999,10 @@ mod tests {
             },
         );
         for e in &events {
-            if let GrepEvent::Match { content, truncated, .. } = e {
+            if let GrepEvent::Match {
+                content, truncated, ..
+            } = e
+            {
                 assert!(*truncated);
                 // Must be valid UTF-8 (no splits).
                 let _ = std::str::from_utf8(content.as_bytes()).unwrap();

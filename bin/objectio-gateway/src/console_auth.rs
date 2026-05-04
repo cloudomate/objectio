@@ -180,10 +180,7 @@ pub async fn console_login(
 }
 
 /// GET /_console/api/session
-pub async fn console_session(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn console_session(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let Some(mut info) = validate_session_from_headers(&headers) else {
         return (StatusCode::UNAUTHORIZED, "No valid session").into_response();
     };
@@ -701,8 +698,7 @@ pub async fn oidc_callback(
     // the provider's `system_admin` flag — when true, a user
     // authenticated through this provider lands on the system-admin
     // console even if no tenant maps to the provider.
-    let (oidc, provider_is_system_admin) = if !provider_name.is_empty()
-        && provider_name != "system"
+    let (oidc, provider_is_system_admin) = if !provider_name.is_empty() && provider_name != "system"
     {
         let mut client = state.meta_client.clone();
         let config_key = format!("identity/openid/{provider_name}");

@@ -4,7 +4,12 @@ use redb::TableDefinition;
 
 // S3 metadata
 pub const BUCKETS: TableDefinition<&str, &[u8]> = TableDefinition::new("buckets");
-pub const BUCKET_POLICIES: TableDefinition<&str, &str> = TableDefinition::new("bucket_policies");
+// Stored as bytes (UTF-8 JSON) — must match the redb table type the
+// Raft CAS apply path opens. raft_storage::apply_multi_cas opens every
+// CAS table as `Table<&str, &[u8]>`; defining it as `<&str, &str>` here
+// would surface as a runtime type-mismatch on any transactional write.
+pub const BUCKET_POLICIES: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("bucket_policies");
 pub const MULTIPART_UPLOADS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("multipart_uploads");
 
@@ -66,14 +71,41 @@ pub const TENANTS: TableDefinition<&str, &[u8]> = TableDefinition::new("tenants"
 // Named IAM policies
 // Key: policy name, Value: prost-encoded PolicyObject
 pub const IAM_POLICIES: TableDefinition<&str, &[u8]> = TableDefinition::new("iam_policies");
-// Key: "user:{user_id}" or "group:{group_id}", Value: comma-separated policy names
-pub const POLICY_ATTACHMENTS: TableDefinition<&str, &str> =
+// Key: "user:{user_id}" or "group:{group_id}", Value: bytes of comma-separated
+// policy-name string. Stored as `&[u8]` so the Raft CAS apply path
+// (raft_storage.rs) — which opens every CAS table as `Table<&str, &[u8]>` —
+// can write to it without a redb table-type mismatch.
+pub const POLICY_ATTACHMENTS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("policy_attachments");
 
 // Iceberg warehouses
 // Key: warehouse name, Value: prost-encoded IcebergWarehouse
 pub const ICEBERG_WAREHOUSES: TableDefinition<&str, &[u8]> =
     TableDefinition::new("iceberg_warehouses");
+
+// Unity Catalog
+// Three-level namespacing (catalog.schema.table); each level gets its own
+// table, keyed with `\x00` separators. Values are prost-encoded UnityCatalog
+// / UnitySchema / UnityTable. Identical pattern to ICEBERG_NAMESPACES /
+// ICEBERG_TABLES so range scans work the same way.
+// Key: catalog name. Value: prost-encoded UnityCatalog.
+pub const UNITY_CATALOGS: TableDefinition<&str, &[u8]> = TableDefinition::new("unity_catalogs");
+// Key: "{catalog}\x00{schema}". Value: prost-encoded UnitySchema.
+pub const UNITY_SCHEMAS: TableDefinition<&str, &[u8]> = TableDefinition::new("unity_schemas");
+// Key: "{catalog}\x00{schema}\x00{table}". Value: prost-encoded UnityTable.
+pub const UNITY_TABLES: TableDefinition<&str, &[u8]> = TableDefinition::new("unity_tables");
+// Key: "{catalog}\x00{schema}\x00{function}". Value: prost-encoded UnityFunction.
+pub const UNITY_FUNCTIONS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("unity_functions");
+// Key: "{catalog}\x00{schema}\x00{volume}". Value: prost-encoded UnityVolume.
+pub const UNITY_VOLUMES: TableDefinition<&str, &[u8]> = TableDefinition::new("unity_volumes");
+// Key: "{catalog}\x00{schema}\x00{model}". Value: prost-encoded UnityModel.
+pub const UNITY_MODELS: TableDefinition<&str, &[u8]> = TableDefinition::new("unity_models");
+// Key: "{catalog}\x00{schema}\x00{model}\x00{version}". Version is a
+// zero-padded `u32` (so range scans land in numeric order). Value:
+// prost-encoded UnityModelVersion.
+pub const UNITY_MODEL_VERSIONS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("unity_model_versions");
 
 // Object lock configurations
 // Key: bucket name, Value: prost-encoded ObjectLockConfiguration

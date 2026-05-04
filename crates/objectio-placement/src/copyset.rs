@@ -158,15 +158,13 @@ impl CopysetPool {
         let attempt_budget = target_pool_size.saturating_mul(10).max(256);
         let mut attempts = 0usize;
         while attempts < attempt_budget
-            && (sets.len() < target_pool_size
-                || coverage.values().any(|&c| c < scatter_width))
+            && (sets.len() < target_pool_size || coverage.values().any(|&c| c < scatter_width))
         {
             attempts += 1;
             if let Some(cs) = sample_copyset(&groups, copy_count, &coverage, &mut rng) {
                 // Canonicalise for dedup: sort ids (by raw bytes — NodeId
                 // doesn't impl Ord) so (A,B,C) = (C,A,B).
-                let mut canon: Vec<[u8; 16]> =
-                    cs.osds.iter().map(|id| *id.as_bytes()).collect();
+                let mut canon: Vec<[u8; 16]> = cs.osds.iter().map(|id| *id.as_bytes()).collect();
                 canon.sort();
                 if seen.insert(canon) {
                     for n in &cs.osds {
@@ -292,9 +290,7 @@ mod tests {
             id: NodeId::from_bytes([id_seed; 16]),
             name: format!("osd-{id_seed}"),
             address: "127.0.0.1:9200".parse().unwrap(),
-            failure_domain: FailureDomainInfo::new_full(
-                "local", "zone-a", "dc1", rack, host,
-            ),
+            failure_domain: FailureDomainInfo::new_full("local", "zone-a", "dc1", rack, host),
             status: NodeStatus::Active,
             disks: Vec::new(),
             weight: 1.0,
@@ -394,9 +390,12 @@ mod tests {
         let target = pool.sets[0].clone();
         let mut rng = StdRng::seed_from_u64(1);
         let got = pool
-            .pick_min_cost(&mut rng, |cs| {
-                if cs.osds == target.osds { 0.0 } else { 10.0 }
-            })
+            .pick_min_cost(
+                &mut rng,
+                |cs| {
+                    if cs.osds == target.osds { 0.0 } else { 10.0 }
+                },
+            )
             .unwrap();
         assert_eq!(got.osds, target.osds);
     }

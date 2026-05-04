@@ -3,7 +3,7 @@
 //! Intercepts all requests and records metrics based on HTTP method and path patterns.
 
 use axum::{body::Body, extract::Request, http::Method, middleware::Next, response::Response};
-use objectio_s3::{IcebergOperation, S3Operation, s3_metrics};
+use objectio_s3::{IcebergOperation, S3Operation, UnityOperation, s3_metrics};
 use std::time::Instant;
 
 /// Extract S3 operation type from HTTP method and path
@@ -126,6 +126,44 @@ fn extract_iceberg_operation(method: &Method, path: &str) -> Option<IcebergOpera
     }
 }
 
+/// Extract Unity Catalog operation type from HTTP method and path
+/// (full path including the `/api/2.1/unity-catalog` prefix). The
+/// router uses absolute paths under that prefix, so we match against
+/// segments after the prefix.
+fn extract_unity_operation(method: &Method, path: &str) -> Option<UnityOperation> {
+    let path = path.split('?').next().unwrap_or(path);
+    let rest = path.strip_prefix("/api/2.1/unity-catalog")?;
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+
+    match (method, segments.as_slice()) {
+        // Catalogs
+        (m, ["catalogs"]) if m == Method::GET => Some(UnityOperation::ListCatalogs),
+        (m, ["catalogs"]) if m == Method::POST => Some(UnityOperation::CreateCatalog),
+        (m, ["catalogs", _name]) if m == Method::GET => Some(UnityOperation::GetCatalog),
+        (m, ["catalogs", _name]) if m == Method::PATCH => Some(UnityOperation::UpdateCatalog),
+        (m, ["catalogs", _name]) if m == Method::DELETE => Some(UnityOperation::DeleteCatalog),
+        // Schemas
+        (m, ["schemas"]) if m == Method::GET => Some(UnityOperation::ListSchemas),
+        (m, ["schemas"]) if m == Method::POST => Some(UnityOperation::CreateSchema),
+        (m, ["schemas", _full]) if m == Method::GET => Some(UnityOperation::GetSchema),
+        (m, ["schemas", _full]) if m == Method::PATCH => Some(UnityOperation::UpdateSchema),
+        (m, ["schemas", _full]) if m == Method::DELETE => Some(UnityOperation::DeleteSchema),
+        // Tables
+        (m, ["tables"]) if m == Method::GET => Some(UnityOperation::ListTables),
+        (m, ["tables"]) if m == Method::POST => Some(UnityOperation::CreateTable),
+        (m, ["tables", _full]) if m == Method::GET => Some(UnityOperation::GetTable),
+        (m, ["tables", _full]) if m == Method::DELETE => Some(UnityOperation::DeleteTable),
+        // Vended credentials
+        (m, ["temporary-table-credentials"]) if m == Method::POST => {
+            Some(UnityOperation::TemporaryTableCredentials)
+        }
+        // Policy management endpoints share the catalog/schema/table
+        // counter — they're rare admin actions, not worth a separate
+        // operation label.
+        _ => None,
+    }
+}
+
 /// Metrics middleware that records S3 operation metrics
 pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
     let start = Instant::now();
@@ -141,15 +179,31 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
         return next.run(request).await;
     }
 
-    // Determine S3 operation type
-    let s3_operation = extract_operation(&method, path).map(|op| refine_operation(op, query));
-
-    // Try Iceberg operation if not an S3 operation
-    let iceberg_operation = if s3_operation.is_none() {
-        path.strip_prefix("/iceberg")
-            .and_then(|iceberg_path| extract_iceberg_operation(&method, iceberg_path))
+    // Catalog and console paths look like S3 buckets to the segment matcher
+    // (e.g. `/iceberg/v1/...` parses as bucket=`iceberg`). Dispatch them
+    // first so they're recorded under the right metric family instead of
+    // bleeding into S3 GetObject/PutObject counters.
+    let iceberg_operation = path
+        .strip_prefix("/iceberg")
+        .and_then(|iceberg_path| extract_iceberg_operation(&method, iceberg_path));
+    let unity_operation = if iceberg_operation.is_none() {
+        extract_unity_operation(&method, path)
     } else {
         None
+    };
+    let is_catalog = iceberg_operation.is_some()
+        || unity_operation.is_some()
+        || path.starts_with("/iceberg")
+        || path.starts_with("/api/2.1/unity-catalog")
+        || path.starts_with("/delta-sharing")
+        || path.starts_with("/_console");
+
+    // Determine S3 operation type — only if the path isn't claimed by a
+    // non-S3 surface above.
+    let s3_operation = if is_catalog {
+        None
+    } else {
+        extract_operation(&method, path).map(|op| refine_operation(op, query))
     };
 
     // Get request body size from Content-Length header
@@ -178,6 +232,8 @@ pub async fn metrics_layer(request: Request<Body>, next: Next) -> Response {
         s3_metrics().record_operation(op, status_code, request_bytes, response_bytes, latency_us);
     } else if let Some(op) = iceberg_operation {
         s3_metrics().record_iceberg_operation(op, status_code, latency_us);
+    } else if let Some(op) = unity_operation {
+        s3_metrics().record_unity_operation(op, status_code, latency_us);
     }
 
     response

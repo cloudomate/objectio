@@ -250,9 +250,7 @@ pub trait KmsProvider: Send + Sync {
 /// produce identical AAD regardless of `HashMap` iteration order.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
-pub fn canonical_context_aad(
-    context: &std::collections::HashMap<String, String>,
-) -> Vec<u8> {
+pub fn canonical_context_aad(context: &std::collections::HashMap<String, String>) -> Vec<u8> {
     let mut pairs: Vec<(&String, &String)> = context.iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     let mut out = Vec::new();
@@ -323,13 +321,7 @@ pub fn unwrap_dek_with_context(
     let nonce = Nonce::from_slice(nonce_bytes);
     let aad = canonical_context_aad(context);
     let pt = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: ct,
-                aad: &aad,
-            },
-        )
+        .decrypt(nonce, Payload { msg: ct, aad: &aad })
         .map_err(|e| KmsError::InvalidWrap(e.to_string()))?;
     if pt.len() != DEK_LEN {
         return Err(KmsError::InvalidWrap(format!(

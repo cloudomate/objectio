@@ -630,7 +630,10 @@ mod tests {
         let topology = create_test_topology();
         let crush = Crush2::new(topology, 64);
         let ok = crush.validate_placement_feasibility(FailureDomain::Node, 6);
-        assert!(ok.is_ok(), "6 nodes across 3 racks should satisfy node spread");
+        assert!(
+            ok.is_ok(),
+            "6 nodes across 3 racks should satisfy node spread"
+        );
         let ok_ranks = crush
             .validate_placement_feasibility(FailureDomain::Rack, 3)
             .expect("3 racks exist");

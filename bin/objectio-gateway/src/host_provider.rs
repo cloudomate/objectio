@@ -145,10 +145,7 @@ impl K8sHostProvider {
     /// running with a mounted ServiceAccount or the K8s API is
     /// unreachable — both of which would surface on startup, not on
     /// first admin call.
-    pub async fn try_new(
-        namespace: String,
-        sts_name: String,
-    ) -> Result<Self, HostProviderError> {
+    pub async fn try_new(namespace: String, sts_name: String) -> Result<Self, HostProviderError> {
         let client = kube::Client::try_default()
             .await
             .map_err(|e| HostProviderError::Unavailable(format!("kube client: {e}")))?;
@@ -181,18 +178,13 @@ impl HostProvider for K8sHostProvider {
         // Read current replicas. If the sts doesn't exist, the operator
         // has misnamed the release — return 400 rather than silently
         // creating one.
-        let current = sts_api
-            .get(&self.sts_name)
-            .await
-            .map_err(|e| HostProviderError::InvalidRequest(format!(
+        let current = sts_api.get(&self.sts_name).await.map_err(|e| {
+            HostProviderError::InvalidRequest(format!(
                 "StatefulSet {}/{} not found: {e}",
                 self.namespace, self.sts_name
-            )))?;
-        let previous_replicas = current
-            .spec
-            .as_ref()
-            .and_then(|s| s.replicas)
-            .unwrap_or(0);
+            ))
+        })?;
+        let previous_replicas = current.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
         let new_replicas = previous_replicas.saturating_add(count);
 
         // scale subresource via merge patch is the canonical way to

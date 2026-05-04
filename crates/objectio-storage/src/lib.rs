@@ -19,8 +19,8 @@ pub mod smart;
 pub mod wal;
 
 // Re-exports
-pub use block::{Block, BlockAllocator, BlockBitmap, Extent};
 pub use aligned_buf::{AlignedBuf, DEFAULT_ALIGN};
+pub use block::{Block, BlockAllocator, BlockBitmap, Extent};
 pub use disk::{DiskManager, DiskStats};
 pub use io_backend::{BackendKind, IoBackend, OwnedBuf, best_available, pread};
 pub use layout::{

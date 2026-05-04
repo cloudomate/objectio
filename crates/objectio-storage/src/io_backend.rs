@@ -120,8 +120,7 @@ pub fn best_available<P: AsRef<Path>>(
 ) -> Result<Arc<dyn IoBackend>> {
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        if let Ok(backend) =
-            uring_backend::UringBackend::open(path.as_ref(), read_only, direct_io)
+        if let Ok(backend) = uring_backend::UringBackend::open(path.as_ref(), read_only, direct_io)
         {
             return Ok(Arc::new(backend));
         }
@@ -289,7 +288,7 @@ mod pread_backend {
 mod uring_backend {
     use super::*;
     use std::fs::OpenOptions;
-    use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd, AsRawFd};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::Mutex;
 

@@ -119,6 +119,13 @@ pub enum CasTable {
     MultipartUploads,
     ObjectListings,
     PlacementGroups,
+    UnityCatalogs,
+    UnitySchemas,
+    UnityTables,
+    UnityFunctions,
+    UnityVolumes,
+    UnityModels,
+    UnityModelVersions,
     /// Additive escape hatch for new tables introduced after this enum
     /// was frozen. Callers pass the redb table name directly; the state
     /// machine rejects unknown names rather than silently dropping the

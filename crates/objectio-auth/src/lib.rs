@@ -56,7 +56,7 @@ pub use policy::{
 pub use sigv2::SigV2Verifier;
 pub use sigv4::SigV4Verifier;
 pub use store::UserStore;
-pub use user::{AccessKey, AuthResult, KeyStatus, User, UserStatus};
+pub use user::{AccessKey, AuthMode, AuthResult, KeyStatus, User, UserStatus};
 
 // Re-export pluggable auth types
 pub use chain::{AllowAllEvaluator, DenyAllEvaluator, IdentityProviderChain, PolicyEvaluatorChain};

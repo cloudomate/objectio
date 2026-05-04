@@ -17,9 +17,7 @@ use objectio_kms::{
     DEK_LEN, GeneratedDataKey, KmsError, KmsProvider, MASTER_KEY_LEN, MasterKey,
     unwrap_dek_with_context, wrap_dek_with_context,
 };
-use objectio_proto::metadata::{
-    GetKmsKeyRequest, metadata_service_client::MetadataServiceClient,
-};
+use objectio_proto::metadata::{GetKmsKeyRequest, metadata_service_client::MetadataServiceClient};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,9 +46,7 @@ impl LocalKmsProvider {
     /// Strip the ARN prefix so we look up by the short key id meta stores.
     /// Accepts both `arn:obio:kms:::{id}` and `{id}` forms.
     fn normalize_key_id(key_id: &str) -> &str {
-        key_id
-            .strip_prefix("arn:obio:kms:::")
-            .unwrap_or(key_id)
+        key_id.strip_prefix("arn:obio:kms:::").unwrap_or(key_id)
     }
 
     /// Fetch and unwrap a KEK from meta. Caches the plaintext KEK so
@@ -149,7 +145,6 @@ impl KmsProvider for LocalKmsProvider {
     }
 }
 
-
 // ============================================================================
 // Vault KMS provider
 // ============================================================================
@@ -231,7 +226,8 @@ impl objectio_kms::KmsProvider for VaultKmsProvider {
             .await
             .map_err(|e| objectio_kms::KmsError::ProviderError(format!("vault body: {e}")))?;
         if !status.is_success() {
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::BAD_REQUEST
+            if status == reqwest::StatusCode::NOT_FOUND
+                || status == reqwest::StatusCode::BAD_REQUEST
             {
                 return Err(objectio_kms::KmsError::KeyNotFound(key_id.to_string()));
             }
@@ -442,9 +438,7 @@ pub async fn load_backend_config_from_meta(
     match serde_json::from_slice::<KmsBackendConfig>(&entry.value) {
         Ok(c) => Some(c),
         Err(e) => {
-            tracing::warn!(
-                "kms/config in meta is not valid JSON ({e}); falling back to CLI/env"
-            );
+            tracing::warn!("kms/config in meta is not valid JSON ({e}); falling back to CLI/env");
             None
         }
     }
@@ -478,7 +472,10 @@ pub fn build_kms_provider(
                 return (None, None);
             };
             let local = Arc::new(LocalKmsProvider::new(meta_client, mk.clone()));
-            (Some(Arc::clone(&local)), Some(local as Arc<dyn objectio_kms::KmsProvider>))
+            (
+                Some(Arc::clone(&local)),
+                Some(local as Arc<dyn objectio_kms::KmsProvider>),
+            )
         }
         KmsBackendConfig::Vault {
             addr,
@@ -505,7 +502,10 @@ pub fn build_kms_provider(
                 token.clone(),
                 transit_path.clone(),
             );
-            (None, Some(Arc::new(provider) as Arc<dyn objectio_kms::KmsProvider>))
+            (
+                None,
+                Some(Arc::new(provider) as Arc<dyn objectio_kms::KmsProvider>),
+            )
         }
     }
 }
@@ -569,9 +569,7 @@ async fn check_kms_policy(
                 }
                 return Some((StatusCode::FORBIDDEN, "Not authorized").into_response());
             }
-            return Some(
-                (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
-            );
+            return Some((StatusCode::UNAUTHORIZED, "Authentication required").into_response());
         }
     };
 
@@ -671,7 +669,9 @@ pub async fn admin_kms_status(
     auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:Status", "arn:obio:kms:::").await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:Status", "arn:obio:kms:::").await
+    {
         return deny;
     }
     let enabled = state.kms().is_some();
@@ -700,7 +700,9 @@ pub async fn admin_kms_version(
     auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:Version", "arn:obio:kms:::").await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:Version", "arn:obio:kms:::").await
+    {
         return deny;
     }
     let body = json!({
@@ -720,7 +722,9 @@ pub async fn admin_kms_api(
     auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:API", "arn:obio:kms:::").await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:API", "arn:obio:kms:::").await
+    {
         return deny;
     }
     let body = json!({
@@ -796,7 +800,9 @@ pub async fn admin_create_kms_key(
     } else {
         format!("arn:obio:kms:::{}", body.key_id.trim())
     };
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:CreateKey", &create_resource).await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:CreateKey", &create_resource).await
+    {
         return deny;
     }
     if let Some(r) = kms_available(&state) {
@@ -804,9 +810,7 @@ pub async fn admin_create_kms_key(
     }
     // Generate 32 random bytes for the KEK and wrap it with the gateway's
     // service master key before persisting — meta never sees plaintext material.
-    let local = state
-        .kms_local()
-        .expect("checked by kms_available");
+    let local = state.kms_local().expect("checked by kms_available");
 
     let mut raw = [0u8; MASTER_KEY_LEN];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
@@ -842,11 +846,9 @@ pub async fn admin_create_kms_key(
                 .body(axum::body::Body::from(serde_json::to_string(&v).unwrap()))
                 .unwrap()
         }
-        Err(e) if e.code() == tonic::Code::AlreadyExists => S3Error::xml_response(
-            "KmsKeyAlreadyExists",
-            e.message(),
-            StatusCode::CONFLICT,
-        ),
+        Err(e) if e.code() == tonic::Code::AlreadyExists => {
+            S3Error::xml_response("KmsKeyAlreadyExists", e.message(), StatusCode::CONFLICT)
+        }
         Err(e) => {
             tracing::error!("create_kms_key failed: {e}");
             S3Error::xml_response(
@@ -873,7 +875,9 @@ pub async fn admin_list_kms_keys(
     headers: HeaderMap,
     Query(params): Query<ListKmsKeysParams>,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:ListKeys", "arn:obio:kms:::*").await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:ListKeys", "arn:obio:kms:::*").await
+    {
         return deny;
     }
     if let Some(r) = kms_available(&state) {
@@ -916,7 +920,8 @@ pub async fn admin_get_kms_key(
     Path(key_id): Path<String>,
 ) -> Response {
     let resource = format!("arn:obio:kms:::{key_id}");
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:KeyStatus", &resource).await {
+    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:KeyStatus", &resource).await
+    {
         return deny;
     }
     if let Some(r) = kms_available(&state) {
@@ -963,7 +968,8 @@ pub async fn admin_delete_kms_key(
     Path(key_id): Path<String>,
 ) -> Response {
     let resource = format!("arn:obio:kms:::{key_id}");
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:DeleteKey", &resource).await {
+    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:DeleteKey", &resource).await
+    {
         return deny;
     }
     if let Some(r) = kms_available(&state) {
@@ -974,7 +980,12 @@ pub async fn admin_delete_kms_key(
         local.invalidate(&key_id);
     }
     let mut client = state.meta_client.clone();
-    match client.delete_kms_key(DeleteKmsKeyRequest { key_id: key_id.clone() }).await {
+    match client
+        .delete_kms_key(DeleteKmsKeyRequest {
+            key_id: key_id.clone(),
+        })
+        .await
+    {
         Ok(_) => Response::builder()
             .status(StatusCode::NO_CONTENT)
             .body(axum::body::Body::empty())
@@ -1030,7 +1041,9 @@ pub async fn admin_kms_get_config(
     auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(&state, &auth, &headers, "kms:Status", "arn:obio:kms:::").await {
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:Status", "arn:obio:kms:::").await
+    {
         return deny;
     }
     let cfg = load_backend_config_from_meta(state.meta_client.clone())
@@ -1058,14 +1071,8 @@ pub async fn admin_kms_put_config(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(
-        &state,
-        &auth,
-        &headers,
-        "kms:CreateKey",
-        "arn:obio:kms:::*",
-    )
-    .await
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:CreateKey", "arn:obio:kms:::*").await
     {
         return deny;
     }
@@ -1083,10 +1090,7 @@ pub async fn admin_kms_put_config(
     // built-in Local backend is always available because it's what backs
     // SSE-S3 on Community too.
     if matches!(new_cfg, KmsBackendConfig::Vault { .. })
-        && let Err(r) = crate::license_gate::require_feature(
-            &state,
-            objectio_license::Feature::Kms,
-        )
+        && let Err(r) = crate::license_gate::require_feature(&state, objectio_license::Feature::Kms)
     {
         return r;
     }
@@ -1121,8 +1125,11 @@ pub async fn admin_kms_put_config(
         );
     }
     // Rebuild providers from the new config and atomic-swap.
-    let (local, provider) =
-        build_kms_provider(state.meta_client.clone(), state.master_key.as_ref(), &new_cfg);
+    let (local, provider) = build_kms_provider(
+        state.meta_client.clone(),
+        state.master_key.as_ref(),
+        &new_cfg,
+    );
     state.set_kms(provider, local);
     tracing::info!("KMS backend reloaded to {}", new_cfg.label());
     let view = redact_config(&new_cfg);
@@ -1143,14 +1150,8 @@ pub async fn admin_kms_delete_config(
     auth: Option<Extension<AuthResult>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(
-        &state,
-        &auth,
-        &headers,
-        "kms:DeleteKey",
-        "arn:obio:kms:::*",
-    )
-    .await
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:DeleteKey", "arn:obio:kms:::*").await
     {
         return deny;
     }
@@ -1187,14 +1188,8 @@ pub async fn admin_kms_test(
     headers: HeaderMap,
     Json(body): Json<KmsTestBody>,
 ) -> Response {
-    if let Some(deny) = check_kms_policy(
-        &state,
-        &auth,
-        &headers,
-        "kms:KeyStatus",
-        "arn:obio:kms:::*",
-    )
-    .await
+    if let Some(deny) =
+        check_kms_policy(&state, &auth, &headers, "kms:KeyStatus", "arn:obio:kms:::*").await
     {
         return deny;
     }
@@ -1220,7 +1215,11 @@ pub async fn admin_kms_test(
     {
         Ok(data_key) => {
             match provider
-                .decrypt(&body.key_id, &data_key.wrapped_dek, &body.encryption_context)
+                .decrypt(
+                    &body.key_id,
+                    &data_key.wrapped_dek,
+                    &body.encryption_context,
+                )
                 .await
             {
                 Ok(dek) if dek == data_key.plaintext_dek => {

@@ -322,7 +322,10 @@ impl CrushMap {
             FailureDomain::Disk => format!("{}:disk", node.id),
             FailureDomain::Node => node.id.to_string(),
             FailureDomain::Host => {
-                format!("{}:{}:{}:{}:{}", fd.region, fd.zone, fd.datacenter, fd.rack, fd.host)
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    fd.region, fd.zone, fd.datacenter, fd.rack, fd.host
+                )
             }
             FailureDomain::Rack => {
                 format!("{}:{}:{}:{}", fd.region, fd.zone, fd.datacenter, fd.rack)

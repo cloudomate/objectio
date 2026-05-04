@@ -81,10 +81,7 @@ pub struct IcebergState {
 ///   400 if the warehouse name is empty
 ///   404 if meta doesn't know this warehouse
 ///   503 if meta is unreachable
-async fn resolve_warehouse_location(
-    state: &IcebergState,
-    warehouse: &str,
-) -> Result<String> {
+async fn resolve_warehouse_location(state: &IcebergState, warehouse: &str) -> Result<String> {
     if warehouse.is_empty() {
         return Err(IcebergError::bad_request(
             "warehouse query parameter is required",
@@ -245,6 +242,10 @@ async fn check_table_policy(
 // ---- Config ----
 
 /// `GET /v1/config` — return catalog configuration.
+///
+/// # Errors
+/// Returns `IcebergError::bad_request` if the `warehouse` query parameter
+/// is empty or names an unknown warehouse.
 pub async fn get_config(
     State(state): State<Arc<IcebergState>>,
     Query(wh): Query<WarehouseParam>,
@@ -694,7 +695,16 @@ pub async fn load_table(
         let user_arn = auth
             .as_ref()
             .map_or("anonymous", |Extension(a)| a.user_arn.as_str());
-        let creds = sts.issue(user_arn, &metadata_location);
+        // Scope to the table base directory, not the metadata file. The
+        // metadata location is `s3://warehouse/db/table/metadata/00001-…json`
+        // — Spark/PyIceberg need to read/write `data/` under the same table
+        // dir, so strip the trailing `metadata/...` to recover the base.
+        let table_base = iceberg_table_base_from_metadata_location(&metadata_location);
+        let creds = sts.issue(
+            user_arn,
+            &table_base,
+            objectio_auth::sts::Operation::ReadWrite,
+        );
         let mut cfg = std::collections::HashMap::new();
         cfg.insert("s3.access-key-id".to_string(), creds.access_key_id);
         cfg.insert("s3.secret-access-key".to_string(), creds.secret_access_key);
@@ -804,11 +814,22 @@ pub async fn update_table(
     }))
 }
 
+/// Per-table commit pre-prepared from a `CommitTransactionRequest` entry —
+/// validated, requirements checked, ready to be proposed as a single CAS op.
+struct PreparedCommit {
+    levels: Vec<String>,
+    table: String,
+    current_location: String,
+    new_location: String,
+    new_bytes: Vec<u8>,
+    new_metadata: serde_json::Value,
+}
+
 /// `POST /v1/transactions/commit` — atomic multi-table commit.
 ///
 /// Iceberg REST spec endpoint. Every entry in `table-changes` goes
 /// through the same requirements-then-updates path as `update_table`,
-/// but all per-table CAS ops land as a single Raft MultiCas at the meta
+/// but all per-table CAS ops land as a single Raft `MultiCas` at the meta
 /// layer — if any requirement fails, or any current metadata location
 /// is stale, every change in the batch aborts with no writes. The
 /// response mirrors the request order.
@@ -816,6 +837,7 @@ pub async fn update_table(
 /// # Errors
 /// Returns `IcebergError::FailedPrecondition` on requirements mismatch
 /// or stale current location; the client retries after a re-load.
+#[allow(clippy::too_many_lines)] // linear prepare → propose → respond pipeline; splitting hurts readability
 pub async fn commit_transaction(
     State(state): State<Arc<IcebergState>>,
     auth: Option<Extension<AuthResult>>,
@@ -828,22 +850,11 @@ pub async fn commit_transaction(
 
     let catalog = state.catalog.with_warehouse(&wh.warehouse);
 
-    struct Prepared {
-        levels: Vec<String>,
-        table: String,
-        current_location: String,
-        new_location: String,
-        new_bytes: Vec<u8>,
-        new_metadata: serde_json::Value,
-    }
-
-    let mut prepared: Vec<Prepared> = Vec::with_capacity(req.table_changes.len());
+    let mut prepared: Vec<PreparedCommit> = Vec::with_capacity(req.table_changes.len());
 
     for (idx, change) in req.table_changes.iter().enumerate() {
         let identifier = change.identifier.as_ref().ok_or_else(|| {
-            IcebergError::bad_request(format!(
-                "table-changes[{idx}]: identifier is required"
-            ))
+            IcebergError::bad_request(format!("table-changes[{idx}]: identifier is required"))
         })?;
         let table = identifier.name.clone();
         let levels: Vec<String> = identifier.namespace.clone();
@@ -863,8 +874,7 @@ pub async fn commit_transaction(
         // assemble new metadata blob pipeline as the single-table
         // update_table handler. Done before any CAS proposal so the
         // whole batch either prepares or aborts cleanly.
-        let (current_location, metadata_bytes) =
-            catalog.load_table(levels.clone(), &table).await?;
+        let (current_location, metadata_bytes) = catalog.load_table(levels.clone(), &table).await?;
         if metadata_bytes.is_empty() {
             return Err(IcebergError::internal(format!(
                 "table-changes[{idx}] ({namespace_joined}.{table}): metadata is empty"
@@ -914,7 +924,7 @@ pub async fn commit_transaction(
             ))
         })?;
 
-        prepared.push(Prepared {
+        prepared.push(PreparedCommit {
             levels,
             table,
             current_location,
@@ -1866,6 +1876,27 @@ fn chrono_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Recover the table base directory from an Iceberg `metadata_location`.
+///
+/// `metadata_location` is a file URL like
+/// `s3://warehouse/db/table/metadata/00001-abc.json`. The vended STS scope
+/// must cover the whole table directory (including `data/`, `metadata/`,
+/// `snapshots/`), so we strip everything from `/metadata/` onward and
+/// re-append a trailing slash.
+///
+/// Returns the input unchanged if the path doesn't contain `/metadata/`,
+/// which keeps the behavior safe for non-standard layouts.
+fn iceberg_table_base_from_metadata_location(metadata_location: &str) -> String {
+    metadata_location.rfind("/metadata/").map_or_else(
+        || metadata_location.to_string(),
+        |idx| {
+            let mut base = metadata_location[..idx].to_string();
+            base.push('/');
+            base
+        },
+    )
 }
 
 fn last_column_id(schema: &serde_json::Value) -> i64 {

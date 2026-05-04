@@ -468,7 +468,7 @@ async fn migrate_shard_one(
             );
             // Pull the current full ObjectMeta so reconstruct can see the
             // surviving ShardLocations.
-            let owner_ch_r = open_channel(&item.owner_addr).await?;
+            let owner_ch_r = open_channel(item.owner_addr).await?;
             let mut owner_r = StorageServiceClient::new(owner_ch_r);
             let Some(object_for_rc) = tokio::time::timeout(
                 PER_OSD_TIMEOUT,
@@ -492,7 +492,7 @@ async fn migrate_shard_one(
             return reconstruct_dangling_shard(
                 meta,
                 draining,
-                &item.owner_addr,
+                item.owner_addr,
                 target_node,
                 &object_for_rc,
                 item.stripe_id,
@@ -526,7 +526,7 @@ async fn migrate_shard_one(
 
     // 4. Update ObjectMeta on the primary (the OSD that returned this
     //    object in step a — `owner_addr`).
-    let owner_ch = open_channel(&item.owner_addr).await?;
+    let owner_ch = open_channel(item.owner_addr).await?;
     let mut owner = StorageServiceClient::new(owner_ch);
     let Some(mut object) = tokio::time::timeout(
         PER_OSD_TIMEOUT,

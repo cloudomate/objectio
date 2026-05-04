@@ -180,10 +180,7 @@ fn ensure_file(path: &std::path::Path, bytes: u64, skip_prefill: bool) -> Result
         .unwrap_or(false);
 
     if exists_at_right_size {
-        tracing::info!(
-            "reusing existing test file ({} MiB)",
-            bytes / (1024 * 1024)
-        );
+        tracing::info!("reusing existing test file ({} MiB)", bytes / (1024 * 1024));
         return Ok(());
     }
     if skip_prefill {
@@ -248,12 +245,30 @@ fn print_stats(backend: Backend, s: &RunStats) {
     println!("[{}]", backend);
     println!("  ops:         {}", s.op_count);
     println!("  elapsed:     {:.3} s", secs);
-    println!("  throughput:  {:.1} MB/s  ({:.0} ops/s)", thpt, ops_per_sec);
-    println!("  p50 lat:     {:.1} μs", us(compute_percentile(&latencies, 0.50)));
-    println!("  p90 lat:     {:.1} μs", us(compute_percentile(&latencies, 0.90)));
-    println!("  p99 lat:     {:.1} μs", us(compute_percentile(&latencies, 0.99)));
-    println!("  p99.9 lat:   {:.1} μs", us(compute_percentile(&latencies, 0.999)));
-    println!("  max lat:     {:.1} μs", us(*latencies.last().unwrap_or(&0)));
+    println!(
+        "  throughput:  {:.1} MB/s  ({:.0} ops/s)",
+        thpt, ops_per_sec
+    );
+    println!(
+        "  p50 lat:     {:.1} μs",
+        us(compute_percentile(&latencies, 0.50))
+    );
+    println!(
+        "  p90 lat:     {:.1} μs",
+        us(compute_percentile(&latencies, 0.90))
+    );
+    println!(
+        "  p99 lat:     {:.1} μs",
+        us(compute_percentile(&latencies, 0.99))
+    );
+    println!(
+        "  p99.9 lat:   {:.1} μs",
+        us(compute_percentile(&latencies, 0.999))
+    );
+    println!(
+        "  max lat:     {:.1} μs",
+        us(*latencies.last().unwrap_or(&0))
+    );
     println!();
 }
 
@@ -297,9 +312,7 @@ async fn run_pread_async(args: &Args) -> Result<RunStats> {
                 let rnd: u64 = rng.r#gen::<u64>() % max_offset;
                 (rnd / 4096) * 4096
             }
-            Op::SequentialRead | Op::SequentialWrite => {
-                ((i * bs) % max_offset / 4096) * 4096
-            }
+            Op::SequentialRead | Op::SequentialWrite => ((i * bs) % max_offset / 4096) * 4096,
         };
         let file_c = std::sync::Arc::clone(&file);
         let op = args.op;
@@ -378,9 +391,7 @@ async fn run_uring_async(args: &Args) -> Result<RunStats> {
                 let rnd: u64 = rng.r#gen::<u64>() % max_offset;
                 (rnd / 4096) * 4096
             }
-            Op::SequentialRead | Op::SequentialWrite => {
-                ((i * bs) % max_offset / 4096) * 4096
-            }
+            Op::SequentialRead | Op::SequentialWrite => ((i * bs) % max_offset / 4096) * 4096,
         };
         let t0 = Instant::now();
         match args.op {
@@ -428,9 +439,9 @@ const fn o_direct_flag() -> i32 {
 #[cfg(not(target_os = "linux"))]
 const fn o_direct_flag() -> i32 {
     0 // macOS uses F_NOCACHE via fcntl; Windows has FILE_FLAG_NO_BUFFERING
-      // at CreateFile. Neither is a custom_flags bit you can pass at
-      // open time, so on non-Linux hosts we just fall back to buffered
-      // I/O — the bench is Linux-primary anyway.
+    // at CreateFile. Neither is a custom_flags bit you can pass at
+    // open time, so on non-Linux hosts we just fall back to buffered
+    // I/O — the bench is Linux-primary anyway.
 }
 
 /// Allocate a buffer 4 KiB-aligned for O_DIRECT. `Vec<u8>` isn't
@@ -455,7 +466,10 @@ fn drop_page_caches() -> Result<()> {
     // Requires root. Best-effort; log and continue if it fails.
     use std::io::Write;
     sync_all_filesystems();
-    match OpenOptions::new().write(true).open("/proc/sys/vm/drop_caches") {
+    match OpenOptions::new()
+        .write(true)
+        .open("/proc/sys/vm/drop_caches")
+    {
         Ok(mut f) => {
             let _ = f.write_all(b"3");
             tracing::info!("page caches dropped");

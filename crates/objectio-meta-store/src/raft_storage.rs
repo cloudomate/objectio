@@ -362,6 +362,13 @@ fn cas_table_name(t: &CasTable) -> &str {
         CasTable::MultipartUploads => "multipart_uploads",
         CasTable::ObjectListings => "object_listings",
         CasTable::PlacementGroups => "placement_groups",
+        CasTable::UnityCatalogs => "unity_catalogs",
+        CasTable::UnitySchemas => "unity_schemas",
+        CasTable::UnityTables => "unity_tables",
+        CasTable::UnityFunctions => "unity_functions",
+        CasTable::UnityVolumes => "unity_volumes",
+        CasTable::UnityModels => "unity_models",
+        CasTable::UnityModelVersions => "unity_model_versions",
         CasTable::Named(n) => n,
     }
 }

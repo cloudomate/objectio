@@ -264,12 +264,9 @@ pub async fn run(
     // `--disk-filter` globs are expanded, root-FS device + mounted
     // partitions excluded, superblocks classified.
     let disks = {
-        let discovered = discovery::discover(
-            &explicit_disks,
-            &args.disk_filters,
-            args.disk_min_size,
-        )
-        .map_err(|e| anyhow::anyhow!("disk discovery failed: {e}"))?;
+        let discovered =
+            discovery::discover(&explicit_disks, &args.disk_filters, args.disk_min_size)
+                .map_err(|e| anyhow::anyhow!("disk discovery failed: {e}"))?;
 
         let mut claim = Vec::new();
         for d in &discovered {

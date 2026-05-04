@@ -133,6 +133,106 @@ pub fn presign_get(
     )
 }
 
+/// Generate a presigned S3 ListObjectsV2 GET URL.
+///
+/// Returns a URL that hits `GET /{bucket}/?list-type=2&prefix=<prefix>&...`
+/// (continuation token + max-keys honored). The body is XML in the standard
+/// S3 `ListBucketResult` format.
+///
+/// # Arguments
+/// - `endpoint` — base URL of the gateway
+/// - `region`, `access_key_id`, `secret_access_key` — `SigV4` credentials
+/// - `bucket` — bucket name
+/// - `prefix` — `prefix` query value (may be empty)
+/// - `continuation_token` — `continuation-token` query value, if paginating
+/// - `max_keys` — `max-keys` query value (capped server-side)
+/// - `expires_in` — URL validity window
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn presign_list_objects_v2(
+    endpoint: &str,
+    region: &str,
+    access_key_id: &str,
+    secret_access_key: &str,
+    bucket: &str,
+    prefix: &str,
+    continuation_token: Option<&str>,
+    max_keys: Option<u32>,
+    expires_in: Duration,
+) -> String {
+    let now = Utc::now();
+    let date_str = now.format("%Y%m%d").to_string();
+    let datetime_str = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let expires_secs = expires_in.as_secs();
+
+    let service = "s3";
+    let credential_scope = format!("{date_str}/{region}/{service}/aws4_request");
+    let credential = format!("{access_key_id}/{credential_scope}");
+    let host = endpoint
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    // SigV4 requires the canonical query string parameters to be sorted by name.
+    // Build (name, value) pairs first, then sort, then encode + join.
+    let cred_enc = uri_encode(&credential);
+    let exp_str = expires_secs.to_string();
+    let max_keys_str = max_keys.map(|v| v.to_string());
+
+    let mut pairs: Vec<(&str, &str)> = vec![
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256"),
+        ("X-Amz-Credential", &cred_enc),
+        ("X-Amz-Date", &datetime_str),
+        ("X-Amz-Expires", &exp_str),
+        ("X-Amz-SignedHeaders", "host"),
+        ("list-type", "2"),
+    ];
+    if !prefix.is_empty() {
+        pairs.push(("prefix", prefix));
+    }
+    if let Some(ref s) = max_keys_str {
+        pairs.push(("max-keys", s));
+    }
+    if let Some(token) = continuation_token {
+        pairs.push(("continuation-token", token));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+
+    let canonical_qs = pairs
+        .iter()
+        .map(|(k, v)| {
+            // X-Amz-Credential is already encoded; everything else needs encoding.
+            // We include the literal value when it's already pre-encoded above.
+            if *k == "X-Amz-Credential" {
+                format!("{k}={v}")
+            } else {
+                format!("{}={}", k, uri_encode(v))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    // Bucket-level URI is /{bucket}/ — no key segment.
+    let canonical_uri = format!("/{}/", uri_encode(bucket));
+    let canonical_headers = format!("host:{host}\n");
+    let signed_headers = "host";
+    let canonical_request = format!(
+        "GET\n{canonical_uri}\n{canonical_qs}\n{canonical_headers}\n{signed_headers}\nUNSIGNED-PAYLOAD",
+    );
+
+    let cr_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{datetime_str}\n{credential_scope}\n{cr_hash}",);
+    let signing_key = derive_signing_key(secret_access_key, &date_str, region, service);
+    let mut mac = HmacSha256::new_from_slice(&signing_key).expect("HMAC accepts any key length");
+    mac.update(string_to_sign.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    format!(
+        "{endpoint}{canonical_uri}?{canonical_qs}&X-Amz-Signature={signature}",
+        endpoint = endpoint.trim_end_matches('/'),
+    )
+}
+
 /// Derive the SigV4 signing key from the secret access key and scope components.
 fn derive_signing_key(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
     let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date.as_bytes());
@@ -166,5 +266,42 @@ mod tests {
         assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
         assert!(url.contains("X-Amz-Signature="));
         assert!(url.contains("X-Amz-Expires=3600"));
+    }
+
+    #[test]
+    fn test_presign_list_objects_v2_includes_required_params() {
+        let url = presign_list_objects_v2(
+            "http://localhost:9000",
+            "us-east-1",
+            "AKID",
+            "secret",
+            "lake",
+            "warehouse/sales/events/_delta_log/",
+            None,
+            Some(1000),
+            Duration::from_secs(900),
+        );
+        assert!(url.starts_with("http://localhost:9000/lake/?"));
+        assert!(url.contains("list-type=2"));
+        assert!(url.contains("max-keys=1000"));
+        assert!(url.contains("prefix=warehouse%2Fsales%2Fevents%2F_delta_log%2F"));
+        assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(url.contains("X-Amz-Signature="));
+    }
+
+    #[test]
+    fn test_presign_list_objects_v2_paginates_with_continuation_token() {
+        let url = presign_list_objects_v2(
+            "http://localhost:9000",
+            "us-east-1",
+            "AKID",
+            "secret",
+            "lake",
+            "p/",
+            Some("opaqueToken=="),
+            None,
+            Duration::from_secs(60),
+        );
+        assert!(url.contains("continuation-token=opaqueToken%3D%3D"));
     }
 }

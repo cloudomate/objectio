@@ -33,6 +33,7 @@ members = [
     # separate private `objectio-enterprise` repo.
     "enterprise/crates/objectio-iceberg",
     "enterprise/crates/objectio-delta-sharing",
+    "enterprise/crates/objectio-unity-catalog",
 ]
 
 [workspace.package]
@@ -135,6 +136,7 @@ objectio-auth = { path = "crates/objectio-auth" }
 objectio-block = { path = "crates/objectio-block" }
 objectio-iceberg = { path = "enterprise/crates/objectio-iceberg" }
 objectio-delta-sharing = { path = "enterprise/crates/objectio-delta-sharing" }
+objectio-unity-catalog = { path = "enterprise/crates/objectio-unity-catalog" }
 objectio-kms = { path = "crates/objectio-kms" }
 objectio-license = { path = "crates/objectio-license" }
 

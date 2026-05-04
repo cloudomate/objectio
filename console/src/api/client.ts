@@ -13,7 +13,14 @@ export interface ConfigEntry {
 
 export interface User {
   user_id: string;
-  username: string;
+  /// Server returns `display_name`. Older code referenced `username` — keep
+  /// that as a deprecated alias so existing call sites stay compiling while
+  /// callers migrate.
+  display_name: string;
+  username?: string;
+  arn?: string;
+  email?: string;
+  tenant?: string;
   status: string;
   created_at: number;
 }
@@ -103,6 +110,35 @@ export const users = {
     request<void>("DELETE", `/_admin/access-keys/${keyId}`),
 };
 
+// IAM Groups API. Mirrors `users` — same `/_admin/...` shape, same auth gate.
+// The meta service stores group ARNs as `arn:objectio:iam::group/<name>`;
+// attaching a policy to a group is the same call as attaching to a user but
+// with `group_id` in the body instead of `user_id`.
+export interface Group {
+  group_id: string;
+  group_name: string;
+  arn: string;
+  member_user_ids: string[];
+  created_at: number;
+}
+
+export const groups = {
+  list: () => request<{ groups: Group[] }>("GET", "/_admin/groups"),
+  create: (group_name: string) =>
+    request<Group>("POST", "/_admin/groups", { group_name }),
+  delete: (groupId: string) =>
+    request<void>("DELETE", `/_admin/groups/${groupId}`),
+  addMember: (groupId: string, userId: string) =>
+    request<void>("POST", `/_admin/groups/${groupId}/members`, {
+      user_id: userId,
+    }),
+  removeMember: (groupId: string, userId: string) =>
+    request<void>(
+      "DELETE",
+      `/_admin/groups/${groupId}/members/${userId}`,
+    ),
+};
+
 // Buckets API (S3)
 export const buckets = {
   list: () =>
@@ -154,6 +190,393 @@ export const iceberg = {
       "DELETE",
       `/iceberg/v1/namespaces/${ns}/tables/${table}?purgeRequested=false${warehouse ? `&warehouse=${encodeURIComponent(warehouse)}` : ""}`
     ),
+};
+
+// Unity Catalog API — Databricks-style three-level namespace
+// (catalog.schema.table) over /api/2.1/unity-catalog/*.
+export interface UnityCatalogInfo {
+  name: string;
+  comment?: string;
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+}
+
+export interface UnitySchemaInfo {
+  name: string;
+  catalog_name: string;
+  full_name?: string;
+  comment?: string;
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+}
+
+export interface UnityColumnInfo {
+  name: string;
+  type_text: string;
+  type_name?: string;
+  type_json?: string;
+  position: number;
+  nullable?: boolean;
+  comment?: string;
+  partition_index?: number | null;
+}
+
+export interface UnityRowFilter {
+  function_full_name: string;
+  input_column_names?: string[];
+}
+
+export interface UnityColumnMask {
+  function_full_name: string;
+  using_column_names?: string[];
+}
+
+export interface UnityTableInfo {
+  name: string;
+  catalog_name: string;
+  schema_name: string;
+  full_name?: string;
+  table_type: string; // "MANAGED" | "EXTERNAL"
+  data_source_format: string; // "DELTA" | "ICEBERG" | "PARQUET" | ...
+  storage_location: string;
+  columns?: UnityColumnInfo[];
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+  table_id?: string;
+  row_filter?: UnityRowFilter | null;
+  column_masks?: Record<string, UnityColumnMask>;
+}
+
+export interface UnityFunctionInfo {
+  name: string;
+  catalog_name: string;
+  schema_name: string;
+  full_name?: string;
+  routine_definition?: string; // Source text (the SQL/code)
+  routine_body: string; // "SQL" | "EXTERNAL"
+  external_language?: string; // Runtime for EXTERNAL bodies (e.g. "PYTHON")
+  data_type?: string;
+  full_data_type?: string;
+  parameter_style?: string;
+  is_deterministic?: boolean;
+  sql_data_access?: string;
+  is_null_call?: boolean;
+  security_type?: string;
+  specific_name?: string;
+  comment?: string;
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+  function_id?: string;
+}
+
+export interface UnityVolumeInfo {
+  name: string;
+  catalog_name: string;
+  schema_name: string;
+  full_name?: string;
+  volume_type: string; // "MANAGED" | "EXTERNAL"
+  storage_location: string;
+  comment?: string;
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+  volume_id?: string;
+}
+
+export interface UnityModelInfo {
+  name: string;
+  catalog_name: string;
+  schema_name: string;
+  full_name?: string;
+  storage_location: string;
+  comment?: string;
+  owner?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+  model_id?: string;
+}
+
+export interface UnityModelVersionInfo {
+  model_name: string;
+  catalog_name: string;
+  schema_name: string;
+  version: number;
+  source: string;
+  run_id?: string;
+  status: string; // "PENDING_REGISTRATION" | "READY" | "FAILED_REGISTRATION"
+  description?: string;
+  created_at: number;
+  updated_at: number;
+  properties?: Record<string, string>;
+  version_id?: string;
+}
+
+const UC = "/api/2.1/unity-catalog";
+
+export const unity = {
+  // Catalogs
+  listCatalogs: () =>
+    request<{ catalogs: UnityCatalogInfo[] }>("GET", `${UC}/catalogs`),
+  createCatalog: (name: string, comment = "") =>
+    request<UnityCatalogInfo>("POST", `${UC}/catalogs`, { name, comment }),
+  getCatalog: (name: string) =>
+    request<UnityCatalogInfo>("GET", `${UC}/catalogs/${encodeURIComponent(name)}`),
+  deleteCatalog: (name: string, force = false) =>
+    request<void>(
+      "DELETE",
+      `${UC}/catalogs/${encodeURIComponent(name)}${force ? "?force=true" : ""}`,
+    ),
+
+  // Schemas — addressed via "{catalog}.{schema}".
+  listSchemas: (catalog: string) =>
+    request<{ schemas: UnitySchemaInfo[] }>(
+      "GET",
+      `${UC}/schemas?catalog_name=${encodeURIComponent(catalog)}`,
+    ),
+  createSchema: (catalog: string, name: string, comment = "") =>
+    request<UnitySchemaInfo>("POST", `${UC}/schemas`, {
+      name,
+      catalog_name: catalog,
+      comment,
+    }),
+  getSchema: (catalog: string, schema: string) =>
+    request<UnitySchemaInfo>(
+      "GET",
+      `${UC}/schemas/${encodeURIComponent(`${catalog}.${schema}`)}`,
+    ),
+  deleteSchema: (catalog: string, schema: string) =>
+    request<void>(
+      "DELETE",
+      `${UC}/schemas/${encodeURIComponent(`${catalog}.${schema}`)}`,
+    ),
+
+  // Tables — addressed via "{catalog}.{schema}.{table}".
+  listTables: (catalog: string, schema: string) =>
+    request<{ tables: UnityTableInfo[] }>(
+      "GET",
+      `${UC}/tables?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}`,
+    ),
+  createTable: (req: {
+    name: string;
+    catalog_name: string;
+    schema_name: string;
+    table_type?: string;
+    data_source_format?: string;
+    storage_location?: string;
+    columns?: UnityColumnInfo[];
+  }) => request<UnityTableInfo>("POST", `${UC}/tables`, req),
+  getTable: (catalog: string, schema: string, table: string) =>
+    request<UnityTableInfo>(
+      "GET",
+      `${UC}/tables/${encodeURIComponent(`${catalog}.${schema}.${table}`)}`,
+    ),
+  deleteTable: (catalog: string, schema: string, table: string) =>
+    request<void>(
+      "DELETE",
+      `${UC}/tables/${encodeURIComponent(`${catalog}.${schema}.${table}`)}`,
+    ),
+
+  // Functions — addressed via "{catalog}.{schema}.{function}".
+  listFunctions: (catalog: string, schema: string) =>
+    request<{ functions: UnityFunctionInfo[] }>(
+      "GET",
+      `${UC}/functions?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}`,
+    ),
+  createFunction: (req: {
+    name: string;
+    catalog_name: string;
+    schema_name: string;
+    routine_definition: string;
+    routine_body?: string; // "SQL" | "EXTERNAL", defaults to SQL
+    external_language?: string;
+    data_type?: string;
+    comment?: string;
+  }) =>
+    // Wrap in `function_info` envelope per Databricks spec — the same
+    // shape the official Databricks SDK posts.
+    request<UnityFunctionInfo>("POST", `${UC}/functions`, {
+      function_info: req,
+    }),
+  getFunction: (catalog: string, schema: string, name: string) =>
+    request<UnityFunctionInfo>(
+      "GET",
+      `${UC}/functions/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+  deleteFunction: (catalog: string, schema: string, name: string) =>
+    request<void>(
+      "DELETE",
+      `${UC}/functions/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+
+  // Volumes — addressed via "{catalog}.{schema}.{volume}".
+  listVolumes: (catalog: string, schema: string) =>
+    request<{ volumes: UnityVolumeInfo[] }>(
+      "GET",
+      `${UC}/volumes?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}`,
+    ),
+  createVolume: (req: {
+    name: string;
+    catalog_name: string;
+    schema_name: string;
+    volume_type?: string;
+    storage_location?: string;
+    comment?: string;
+  }) => request<UnityVolumeInfo>("POST", `${UC}/volumes`, req),
+  getVolume: (catalog: string, schema: string, name: string) =>
+    request<UnityVolumeInfo>(
+      "GET",
+      `${UC}/volumes/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+  deleteVolume: (catalog: string, schema: string, name: string) =>
+    request<void>(
+      "DELETE",
+      `${UC}/volumes/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+
+  // Models — addressed via "{catalog}.{schema}.{model}".
+  listModels: (catalog: string, schema: string) =>
+    request<{ registered_models: UnityModelInfo[] }>(
+      "GET",
+      `${UC}/models?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schema)}`,
+    ),
+  createModel: (req: {
+    name: string;
+    catalog_name: string;
+    schema_name: string;
+    storage_location?: string;
+    comment?: string;
+  }) => request<UnityModelInfo>("POST", `${UC}/models`, req),
+  getModel: (catalog: string, schema: string, name: string) =>
+    request<UnityModelInfo>(
+      "GET",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+  deleteModel: (catalog: string, schema: string, name: string) =>
+    request<void>(
+      "DELETE",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${name}`)}`,
+    ),
+
+  // Model Versions
+  listModelVersions: (catalog: string, schema: string, model: string) =>
+    request<{ model_versions: UnityModelVersionInfo[] }>(
+      "GET",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${model}`)}/versions`,
+    ),
+  createModelVersion: (
+    catalog: string,
+    schema: string,
+    model: string,
+    req: { source: string; run_id?: string; description?: string },
+  ) =>
+    request<UnityModelVersionInfo>(
+      "POST",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${model}`)}/versions`,
+      { ...req, catalog_name: catalog, schema_name: schema, model_name: model },
+    ),
+  updateModelVersionStatus: (
+    catalog: string,
+    schema: string,
+    model: string,
+    version: number,
+    status: string,
+  ) =>
+    request<UnityModelVersionInfo>(
+      "PATCH",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${model}`)}/versions/${version}`,
+      { status },
+    ),
+  deleteModelVersion: (
+    catalog: string,
+    schema: string,
+    model: string,
+    version: number,
+  ) =>
+    request<void>(
+      "DELETE",
+      `${UC}/models/${encodeURIComponent(`${catalog}.${schema}.${model}`)}/versions/${version}`,
+    ),
+
+  // Entity-level policies (admin only). These sit alongside the IAM policies
+  // managed in /policies — Unity evaluates IAM-attached first, then walks
+  // catalog → schema → table policies. Body shape: { policy: <JSON> }.
+  getCatalogPolicy: (name: string) =>
+    request<{ policy: unknown }>(
+      "GET",
+      `${UC}/catalogs/${encodeURIComponent(name)}/policy`,
+    ),
+  setCatalogPolicy: (name: string, policy: unknown) =>
+    request<void>(
+      "PUT",
+      `${UC}/catalogs/${encodeURIComponent(name)}/policy`,
+      { policy },
+    ),
+  getSchemaPolicy: (catalog: string, schema: string) =>
+    request<{ policy: unknown }>(
+      "GET",
+      `${UC}/schemas/${encodeURIComponent(`${catalog}.${schema}`)}/policy`,
+    ),
+  setSchemaPolicy: (catalog: string, schema: string, policy: unknown) =>
+    request<void>(
+      "PUT",
+      `${UC}/schemas/${encodeURIComponent(`${catalog}.${schema}`)}/policy`,
+      { policy },
+    ),
+  getTablePolicy: (catalog: string, schema: string, table: string) =>
+    request<{ policy: unknown }>(
+      "GET",
+      `${UC}/tables/${encodeURIComponent(`${catalog}.${schema}.${table}`)}/policy`,
+    ),
+  setTablePolicy: (
+    catalog: string,
+    schema: string,
+    table: string,
+    policy: unknown,
+  ) =>
+    request<void>(
+      "PUT",
+      `${UC}/tables/${encodeURIComponent(`${catalog}.${schema}.${table}`)}/policy`,
+      { policy },
+    ),
+
+  // Bind (or clear) a row filter and/or column masks on a table.
+  // Pass `row_filter: null` and an empty `column_masks` object to clear.
+  setTableSecurity: (
+    catalog: string,
+    schema: string,
+    table: string,
+    body: {
+      row_filter?: UnityRowFilter | null;
+      column_masks?: Record<string, UnityColumnMask>;
+    },
+  ) =>
+    request<UnityTableInfo>(
+      "PUT",
+      `${UC}/tables/${encodeURIComponent(`${catalog}.${schema}.${table}`)}/security`,
+      body,
+    ),
+
+  // Caller identity — engines use this for current_user() / is_member().
+  whoami: () =>
+    request<{
+      user_name: string;
+      user_id: string;
+      user_arn: string;
+      groups: string[];
+      group_arns: string[];
+      tenant: string;
+      is_admin: boolean;
+    }>("GET", `${UC}/me`),
 };
 
 // Health/metrics

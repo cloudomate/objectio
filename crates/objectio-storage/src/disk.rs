@@ -113,7 +113,6 @@ impl DiskManager {
         })
     }
 
-
     /// Get the disk ID
     pub fn id(&self) -> DiskId {
         self.superblock.read().disk_id
@@ -143,16 +142,9 @@ impl DiskManager {
     /// region and persist. Idempotent — safe to call even if the disk
     /// already has a matching identity; errors out if the existing
     /// cluster_uuid disagrees (cross-cluster guard).
-    pub fn set_identity(
-        &self,
-        cluster_uuid: uuid::Uuid,
-        osd_node_id: [u8; 16],
-    ) -> Result<()> {
+    pub fn set_identity(&self, cluster_uuid: uuid::Uuid, osd_node_id: [u8; 16]) -> Result<()> {
         let mut sb = self.superblock.write();
-        if sb.has_identity()
-            && sb.cluster_uuid != cluster_uuid
-            && !cluster_uuid.is_nil()
-        {
+        if sb.has_identity() && sb.cluster_uuid != cluster_uuid && !cluster_uuid.is_nil() {
             return Err(Error::Storage(format!(
                 "refusing to rewrite disk identity: on-disk cluster_uuid={} \
                  does not match caller's {}",

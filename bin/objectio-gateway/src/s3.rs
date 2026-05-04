@@ -16,12 +16,12 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::Response,
 };
+use base64::Engine;
 use bytes::Bytes;
 use objectio_auth::{
     AuthResult,
     policy::{BucketPolicy, PolicyDecision, PolicyEvaluator, RequestContext},
 };
-use base64::Engine;
 use objectio_common::ErasureConfig;
 use objectio_erasure::{
     ErasureCodec,
@@ -29,13 +29,13 @@ use objectio_erasure::{
 };
 use objectio_proto::metadata::{
     AbortMultipartUploadRequest,
+    BucketSseConfiguration,
     CompleteMultipartUploadRequest as ProtoCompleteMultipartUploadRequest,
     CreateAccessKeyRequest,
     CreateBucketRequest,
     CreateMultipartUploadRequest,
     // IAM types
     CreateUserRequest,
-    BucketSseConfiguration,
     DeleteAccessKeyRequest,
     DeleteBucketEncryptionRequest,
     DeleteBucketLifecycleRequest,
@@ -43,14 +43,14 @@ use objectio_proto::metadata::{
     DeleteBucketRequest,
     DeleteUserRequest,
     ErasureType,
+    GetAccessKeyForAuthRequest,
     GetBucketEncryptionRequest,
     GetBucketLifecycleRequest,
-    GetMultipartUploadRequest,
-    GetAccessKeyForAuthRequest,
     GetBucketPolicyRequest,
     GetBucketRequest,
     GetBucketVersioningRequest,
     GetListingNodesRequest,
+    GetMultipartUploadRequest,
     GetObjectLockConfigRequest,
     GetPlacementRequest,
     GetUserRequest,
@@ -340,8 +340,7 @@ fn parse_sse_c_headers(headers: &HeaderMap) -> Result<Option<SseCKey>, Response>
             // MD5 binding — catches key-header corruption and prevents a
             // wrong key from silently producing garbage plaintext on GET.
             let computed = md5::compute(&key_bytes);
-            let computed_b64 =
-                base64::engine::general_purpose::STANDARD.encode(computed.0);
+            let computed_b64 = base64::engine::general_purpose::STANDARD.encode(computed.0);
             if computed_b64 != m {
                 return Err(S3Error::xml_response(
                     "InvalidArgument",
@@ -391,7 +390,9 @@ fn parse_encryption_context_header(
         Ok(m) => Ok(m),
         Err(e) => Err(S3Error::xml_response(
             "InvalidArgument",
-            &format!("x-amz-server-side-encryption-context must decode to a JSON object of strings: {e}"),
+            &format!(
+                "x-amz-server-side-encryption-context must decode to a JSON object of strings: {e}"
+            ),
             StatusCode::BAD_REQUEST,
         )),
     }
@@ -446,11 +447,11 @@ async fn apply_put_sse(
         return Ok((
             Bytes::from(buf),
             SseAlgorithm::SseC,
-            String::new(),  // no KMS key
-            Vec::new(),     // no wrapped DEK — the client holds the key
+            String::new(), // no KMS key
+            Vec::new(),    // no wrapped DEK — the client holds the key
             iv.to_vec(),
             HashMap::new(),
-            None,           // SSE-C uses customer-algorithm headers, not x-amz-server-side-encryption
+            None, // SSE-C uses customer-algorithm headers, not x-amz-server-side-encryption
             cust.md5_b64,
         ));
     }
@@ -471,9 +472,7 @@ async fn apply_put_sse(
     match decision.algorithm {
         SseAlgorithm::SseS3 => {
             let Some(mk) = state.master_key.as_ref() else {
-                error!(
-                    "Bucket {bucket} requires SSE-S3 but gateway has no master key configured"
-                );
+                error!("Bucket {bucket} requires SSE-S3 but gateway has no master key configured");
                 return Err(S3Error::xml_response(
                     "ServiceUnavailable",
                     "SSE master key not configured on the gateway — contact the administrator",
@@ -533,7 +532,10 @@ async fn apply_put_sse(
                     ));
                 }
                 Err(e) => {
-                    error!("KMS generate_data_key for {} failed: {e}", decision.kms_key_id);
+                    error!(
+                        "KMS generate_data_key for {} failed: {e}",
+                        decision.kms_key_id
+                    );
                     return Err(S3Error::xml_response(
                         "InternalError",
                         &e.to_string(),
@@ -711,10 +713,7 @@ fn sse_condition_vars(headers: Option<&HeaderMap>) -> HashMap<String, String> {
         .get("x-amz-server-side-encryption")
         .and_then(|v| v.to_str().ok())
     {
-        vars.insert(
-            "s3:x-amz-server-side-encryption".to_string(),
-            v.to_string(),
-        );
+        vars.insert("s3:x-amz-server-side-encryption".to_string(), v.to_string());
     }
     if let Some(v) = h
         .get("x-amz-server-side-encryption-aws-kms-key-id")
@@ -741,6 +740,7 @@ async fn check_bucket_policy(
     action: &str,
     resource: &str,
     headers: Option<&HeaderMap>,
+    auth_mode: objectio_auth::AuthMode,
 ) -> Option<Response> {
     let mut client = state.meta_client.clone();
 
@@ -761,6 +761,12 @@ async fn check_bucket_policy(
                         for (k, v) in sse_condition_vars(headers) {
                             context = context.with_variable(k, v);
                         }
+                        // Surface credential-type so policies can deny
+                        // permanent-key direct access while allowing STS.
+                        context = context.with_variable(
+                            "obio:CredentialType".to_string(),
+                            auth_mode.as_str().to_string(),
+                        );
                         let decision = state.policy_evaluator.evaluate(&policy, &context);
 
                         match decision {
@@ -1605,6 +1611,7 @@ pub async fn list_objects(
             "s3:ListBucket",
             &resource,
             None,
+            auth_result.auth_mode,
         )
         .await
         {
@@ -1656,8 +1663,7 @@ pub async fn list_objects(
             delimiter: delimiter.clone().unwrap_or_default(),
             start_after: String::new(),
             continuation_token: continuation_token
-                .clone()
-                .map(|s| s.to_string())
+                .map(ToString::to_string)
                 .unwrap_or_default(),
             max_keys,
             include_versions: false,
@@ -1897,27 +1903,33 @@ async fn copy_sse_decision(
             StatusCode::SERVICE_UNAVAILABLE,
         ));
     }
-    let source_meta =
-        match get_object_meta_from_any(&state.osd_pool, &src_placement.nodes, source_bucket, source_key).await {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                return Err(S3Error::xml_response(
-                    "NoSuchKey",
-                    "The specified source does not exist",
-                    StatusCode::NOT_FOUND,
-                ));
-            }
-            Err(e) => {
-                return Err(S3Error::xml_response(
-                    "InternalError",
-                    &e.to_string(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ));
-            }
-        };
+    let source_meta = match get_object_meta_from_any(
+        &state.osd_pool,
+        &src_placement.nodes,
+        source_bucket,
+        source_key,
+    )
+    .await
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err(S3Error::xml_response(
+                "NoSuchKey",
+                "The specified source does not exist",
+                StatusCode::NOT_FOUND,
+            ));
+        }
+        Err(e) => {
+            return Err(S3Error::xml_response(
+                "InternalError",
+                &e.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ));
+        }
+    };
 
-    let src_algo = SseAlgorithm::try_from(source_meta.encryption_algorithm)
-        .unwrap_or(SseAlgorithm::SseNone);
+    let src_algo =
+        SseAlgorithm::try_from(source_meta.encryption_algorithm).unwrap_or(SseAlgorithm::SseNone);
     if src_algo == SseAlgorithm::SseC {
         return Err(S3Error::xml_response(
             "NotImplemented",
@@ -1943,8 +1955,7 @@ async fn copy_sse_decision(
         (SseAlgorithm::SseNone, None) => false,
         (SseAlgorithm::SseS3, Some(d)) if d.algorithm == SseAlgorithm::SseS3 => false,
         (SseAlgorithm::SseKms, Some(d))
-            if d.algorithm == SseAlgorithm::SseKms
-                && d.kms_key_id == source_meta.kms_key_id =>
+            if d.algorithm == SseAlgorithm::SseKms && d.kms_key_id == source_meta.kms_key_id =>
         {
             false
         }
@@ -2128,6 +2139,7 @@ pub async fn put_object(
                 "s3:PutObject",
                 &resource,
                 Some(&headers),
+                auth_result.auth_mode,
             )
             .await
             {
@@ -2338,6 +2350,7 @@ pub async fn put_object(
             "s3:PutObject",
             &resource,
             Some(&headers),
+            auth_result.auth_mode,
         )
         .await
         {
@@ -2992,6 +3005,7 @@ pub async fn get_object(
             "s3:GetObject",
             &resource,
             Some(&headers),
+            auth_result.auth_mode,
         )
         .await
         {
@@ -3042,8 +3056,7 @@ pub async fn get_object(
     // and fills any gaps in node_address_map. Empty on older meta servers
     // that don't carry failure_domain in ListingNode — in that case every
     // node ranks as `Unknown` distance and the ranked sort is a no-op.
-    let mut node_topo_map: HashMap<Vec<u8>, objectio_placement::FailureDomainInfo> =
-        HashMap::new();
+    let mut node_topo_map: HashMap<Vec<u8>, objectio_placement::FailureDomainInfo> = HashMap::new();
     if let Ok(resp) = meta_client
         .get_listing_nodes(GetListingNodesRequest {
             bucket: String::new(),
@@ -3109,11 +3122,7 @@ pub async fn get_object(
     // `sse_response_header` is the value for `x-amz-server-side-encryption`
     // when the object is SSE-S3/KMS. `sse_c_key_md5` is populated for SSE-C
     // and drives the `x-amz-server-side-encryption-customer-*` headers.
-    let (
-        get_sse_dek,
-        sse_response_header,
-        sse_c_key_md5,
-    ): (
+    let (get_sse_dek, sse_response_header, sse_c_key_md5): (
         Option<[u8; objectio_kms::DEK_LEN]>,
         Option<&'static str>,
         String,
@@ -3427,14 +3436,15 @@ pub async fn get_object(
         // preserves the legacy "data shards before parity" preference
         // when topology info is absent or ties.
         let me = &state.self_topology;
-        let mut ranked_positions: Vec<(u32, objectio_placement::TopologyDistance)> = (0..total_shards
-            as u32)
+        let mut ranked_positions: Vec<(u32, objectio_placement::TopologyDistance)> = (0
+            ..total_shards as u32)
             .filter_map(|pos| {
                 let shard_loc = shard_map.get(&pos)?;
-                let dist = node_topo_map.get(&shard_loc.node_id).map_or(
-                    objectio_placement::TopologyDistance::Unknown,
-                    |fd| objectio_placement::distance(me, fd),
-                );
+                let dist = node_topo_map
+                    .get(&shard_loc.node_id)
+                    .map_or(objectio_placement::TopologyDistance::Unknown, |fd| {
+                        objectio_placement::distance(me, fd)
+                    });
                 Some((pos, dist))
             })
             .collect();
@@ -3447,12 +3457,9 @@ pub async fn get_object(
             let Some(shard_loc) = shard_map.get(&pos) else {
                 continue;
             };
-            let node_addr = resolve_node_address(
-                &mut node_address_map,
-                &mut meta_client,
-                &shard_loc.node_id,
-            )
-            .await;
+            let node_addr =
+                resolve_node_address(&mut node_address_map, &mut meta_client, &shard_loc.node_id)
+                    .await;
             let node_placement = objectio_proto::metadata::NodePlacement {
                 position: shard_loc.position,
                 node_id: shard_loc.node_id.clone(),
@@ -3547,7 +3554,10 @@ pub async fn get_object(
                 let slice_start = range.start.saturating_sub(stripe_byte_offset) as usize;
                 let slice_end = std::cmp::min(range.end + 1, stripe_end)
                     .saturating_sub(stripe_byte_offset) as usize;
-                (stripe_data[slice_start..slice_end].to_vec(), slice_start as u64)
+                (
+                    stripe_data[slice_start..slice_end].to_vec(),
+                    slice_start as u64,
+                )
             } else {
                 (stripe_data, 0)
             };
@@ -3770,6 +3780,7 @@ pub async fn head_object(
             "s3:GetObject",
             &resource,
             None,
+            auth_result.auth_mode,
         )
         .await
         {
@@ -3819,8 +3830,8 @@ pub async fn head_object(
 
             // Surface server-side encryption to HEAD responses so clients can
             // see how an object was stored without downloading it.
-            let sse_algo = SseAlgorithm::try_from(obj.encryption_algorithm)
-                .unwrap_or(SseAlgorithm::SseNone);
+            let sse_algo =
+                SseAlgorithm::try_from(obj.encryption_algorithm).unwrap_or(SseAlgorithm::SseNone);
             match sse_algo {
                 SseAlgorithm::SseS3 => {
                     builder = builder.header("x-amz-server-side-encryption", "AES256");
@@ -3838,8 +3849,8 @@ pub async fn head_object(
                     // Advertise the customer-algorithm marker so clients know
                     // this object needs a customer-key on GET. We don't know
                     // the key's md5 server-side; clients already do.
-                    builder = builder
-                        .header("x-amz-server-side-encryption-customer-algorithm", "AES256");
+                    builder =
+                        builder.header("x-amz-server-side-encryption-customer-algorithm", "AES256");
                 }
                 SseAlgorithm::SseNone => {}
             }
@@ -3878,6 +3889,7 @@ pub async fn delete_object(
             "s3:DeleteObject",
             &resource,
             Some(&headers),
+            auth_result.auth_mode,
         )
         .await
         {
@@ -4119,6 +4131,7 @@ pub async fn delete_objects(
                 "s3:DeleteObject",
                 &resource,
                 None,
+                auth_result.auth_mode,
             )
             .await
             {
@@ -4427,13 +4440,7 @@ async fn grep_object_internal(
         }
         get_headers.insert(k, v.clone());
     }
-    let resp = get_object(
-        State(state.clone()),
-        Path((bucket, key)),
-        auth,
-        get_headers,
-    )
-    .await;
+    let resp = get_object(State(state.clone()), Path((bucket, key)), auth, get_headers).await;
     if !resp.status().is_success() {
         return resp; // NotFound, AccessDenied, etc. — pass through
     }
@@ -4459,7 +4466,7 @@ async fn grep_object_internal(
     let body_stream = resp
         .into_body()
         .into_data_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        .map_err(std::io::Error::other);
     let reader = StreamReader::new(body_stream);
     grep::respond(req, reader, size, etag)
 }
@@ -4525,13 +4532,12 @@ async fn grep_prefix_internal(
 
     // Capture the pagination cursor — emitted in the End frame so the
     // client can continue on the next request.
-    let mut next_token: Option<String> = if list_resp.is_truncated
-        && !list_resp.next_continuation_token.is_empty()
-    {
-        Some(list_resp.next_continuation_token.clone())
-    } else {
-        None
-    };
+    let mut next_token: Option<String> =
+        if list_resp.is_truncated && !list_resp.next_continuation_token.is_empty() {
+            Some(list_resp.next_continuation_token.clone())
+        } else {
+            None
+        };
 
     // Meta's OBJECT_LISTINGS table may be empty for pre-migration
     // objects. Fall back to the scatter-gather path (same as
@@ -4629,7 +4635,7 @@ async fn grep_prefix_internal(
                 .get(header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(size_hint as u64);
+                .unwrap_or(size_hint);
             let etag = resp
                 .headers()
                 .get(header::ETAG)
@@ -4637,10 +4643,8 @@ async fn grep_prefix_internal(
                 .unwrap_or("")
                 .to_string();
 
-            let _ = crate::grep::emit_object_start(
-                &bucket_for_task, &key, file_size, &etag, &tx,
-            )
-            .await;
+            let _ =
+                crate::grep::emit_object_start(&bucket_for_task, &key, file_size, &etag, &tx).await;
 
             // Stream the body directly into the scanner — no
             // collect-to-bytes, no memory cap, per-line processing.
@@ -4649,7 +4653,7 @@ async fn grep_prefix_internal(
             let body_stream = resp
                 .into_body()
                 .into_data_stream()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+                .map_err(std::io::Error::other);
             let reader = StreamReader::new(body_stream);
 
             let remaining = caps.max_matches_global as u64 - matches_global;
@@ -4953,16 +4957,8 @@ pub async fn put_object_with_params(
 ) -> Response {
     // If uploadId and partNumber are present, this is a multipart part upload
     if let (Some(upload_id), Some(part_number)) = (params.upload_id, params.part_number) {
-        return upload_part_internal(
-            state,
-            bucket,
-            key,
-            upload_id,
-            part_number,
-            headers,
-            body,
-        )
-        .await;
+        return upload_part_internal(state, bucket, key, upload_id, part_number, headers, body)
+            .await;
     }
     if params.retention.is_some() {
         return put_object_retention_internal(state, bucket, key, body).await;
@@ -5033,8 +5029,8 @@ async fn upload_part_internal(
                     StatusCode::NOT_FOUND,
                 );
             }
-            let algo = SseAlgorithm::try_from(mpu.encryption_algorithm)
-                .unwrap_or(SseAlgorithm::SseNone);
+            let algo =
+                SseAlgorithm::try_from(mpu.encryption_algorithm).unwrap_or(SseAlgorithm::SseNone);
             match algo {
                 SseAlgorithm::SseS3 => {
                     let Some(mk) = state.master_key.as_ref() else {
@@ -5480,7 +5476,9 @@ async fn upload_part_internal(
                 part_number, bucket, key, upload_id, part_size
             );
 
-            let mut builder = Response::builder().status(StatusCode::OK).header("ETag", &etag);
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header("ETag", &etag);
             if let Some(v) = sse_response_header {
                 builder = builder.header("x-amz-server-side-encryption", v);
                 if v == "aws:kms" && !sse_kms_key_id.is_empty() {
@@ -5617,8 +5615,8 @@ async fn complete_multipart_upload_internal(
                     }
                 };
 
-                if !placement.nodes.is_empty() {
-                    if let Err(e) = put_object_meta_to_all(
+                if !placement.nodes.is_empty()
+                    && let Err(e) = put_object_meta_to_all(
                         &state.osd_pool,
                         &placement.nodes,
                         &bucket,
@@ -5627,14 +5625,13 @@ async fn complete_multipart_upload_internal(
                         false,
                     )
                     .await
-                    {
-                        error!("Failed to store object metadata on OSDs: {}", e);
-                        return S3Error::xml_response(
-                            "InternalError",
-                            &format!("Failed to store object metadata: {}", e),
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                        );
-                    }
+                {
+                    error!("Failed to store object metadata on OSDs: {}", e);
+                    return S3Error::xml_response(
+                        "InternalError",
+                        &format!("Failed to store object metadata: {}", e),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
                 }
 
                 let result = CompleteMultipartUploadResult {
@@ -6669,7 +6666,11 @@ async fn get_bucket_encryption_internal(state: Arc<AppState>, bucket: String) ->
                                 Some(r.kms_key_id.clone())
                             },
                         }),
-                        bucket_key_enabled: if r.bucket_key_enabled { Some(true) } else { None },
+                        bucket_key_enabled: if r.bucket_key_enabled {
+                            Some(true)
+                        } else {
+                            None
+                        },
                     })
                 })
                 .collect();
@@ -6794,25 +6795,22 @@ async fn put_object_retention_internal(
         Err(resp) => return resp,
     };
 
-    let mut object_meta =
-        match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
-            Ok(Some(meta)) => meta,
-            Ok(None) => {
-                return S3Error::xml_response(
-                    "NoSuchKey",
-                    "Object not found",
-                    StatusCode::NOT_FOUND,
-                );
-            }
-            Err(e) => {
-                error!("Failed to get object metadata: {}", e);
-                return S3Error::xml_response(
-                    "InternalError",
-                    &e.to_string(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                );
-            }
-        };
+    let mut object_meta = match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key)
+        .await
+    {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return S3Error::xml_response("NoSuchKey", "Object not found", StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            error!("Failed to get object metadata: {}", e);
+            return S3Error::xml_response(
+                "InternalError",
+                &e.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
 
     object_meta.retention = Some(ObjectRetention {
         mode: mode.into(),
@@ -6913,25 +6911,22 @@ async fn put_object_legal_hold_internal(
         Err(resp) => return resp,
     };
 
-    let mut object_meta =
-        match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key).await {
-            Ok(Some(meta)) => meta,
-            Ok(None) => {
-                return S3Error::xml_response(
-                    "NoSuchKey",
-                    "Object not found",
-                    StatusCode::NOT_FOUND,
-                );
-            }
-            Err(e) => {
-                error!("Failed to get object metadata: {}", e);
-                return S3Error::xml_response(
-                    "InternalError",
-                    &e.to_string(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                );
-            }
-        };
+    let mut object_meta = match get_object_meta_from_any(&state.osd_pool, &nodes, &bucket, &key)
+        .await
+    {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            return S3Error::xml_response("NoSuchKey", "Object not found", StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            error!("Failed to get object metadata: {}", e);
+            return S3Error::xml_response(
+                "InternalError",
+                &e.to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            );
+        }
+    };
 
     object_meta.legal_hold = Some(LegalHold { status });
 

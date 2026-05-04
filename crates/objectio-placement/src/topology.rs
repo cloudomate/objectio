@@ -296,10 +296,7 @@ impl TopologyDistance {
     /// (Phase 3) and by the UI to colorize locality.
     #[must_use]
     pub const fn is_local(self) -> bool {
-        matches!(
-            self,
-            Self::SameHost | Self::SameRack | Self::SameDatacenter
-        )
+        matches!(self, Self::SameHost | Self::SameRack | Self::SameDatacenter)
     }
 }
 

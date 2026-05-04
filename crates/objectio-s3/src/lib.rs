@@ -12,6 +12,6 @@ pub mod xml;
 pub use auth::SigV4Authenticator;
 pub use error::S3Error;
 pub use metrics::{
-    IcebergOperation, OperationTimer, ProtectionConfig, S3Metrics, S3Operation,
+    IcebergOperation, OperationTimer, ProtectionConfig, S3Metrics, S3Operation, UnityOperation,
     observe_locality_read_bytes, s3_metrics,
 };

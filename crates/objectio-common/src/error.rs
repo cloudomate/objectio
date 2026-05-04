@@ -237,7 +237,6 @@ impl Error {
             | Self::DiskNotFound(_) => 503,
         }
     }
-
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 objectio-auth = { workspace = true, features = ["oidc"] }
 objectio-iceberg = { workspace = true }
+objectio-unity-catalog = { workspace = true }
 objectio-delta-sharing = { workspace = true }
 objectio-kms = { workspace = true }
 objectio-license = { workspace = true }

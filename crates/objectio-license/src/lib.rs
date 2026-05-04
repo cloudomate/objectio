@@ -233,6 +233,27 @@ impl License {
         }
     }
 
+    /// In-process Developer license — bypasses signature verification.
+    ///
+    /// Intended **only** for the `objectio-aio` single-process dev binary
+    /// and integration tests. Production gateways must obtain a real
+    /// signed license file via [`Self::load_from_bytes`]. Callers that
+    /// take an unsigned Developer license here are also responsible for
+    /// communicating that this is a dev-only mode (e.g. logging at
+    /// startup).
+    #[must_use]
+    pub fn developer_unsigned() -> Self {
+        Self {
+            tier: Tier::Developer,
+            licensee: "objectio-aio (dev)".to_string(),
+            issued_at: 0,
+            expires_at: 0,
+            features: Vec::new(),
+            max_nodes: 0,
+            max_raw_capacity_bytes: 0,
+        }
+    }
+
     /// Parse + signature-verify + expiry-check a license given as raw bytes.
     /// Pass `now_unix_secs` from the caller so tests can control time.
     ///
@@ -240,8 +261,8 @@ impl License {
     /// Returns [`LicenseError::Malformed`] if the bytes aren't valid JSON in
     /// the `LicenseFile` wire format, and any error from [`Self::from_file`].
     pub fn load_from_bytes(bytes: &[u8], now_unix_secs: u64) -> Result<Self, LicenseError> {
-        let file: LicenseFile = serde_json::from_slice(bytes)
-            .map_err(|e| LicenseError::Malformed(e.to_string()))?;
+        let file: LicenseFile =
+            serde_json::from_slice(bytes).map_err(|e| LicenseError::Malformed(e.to_string()))?;
         Self::from_file(file, now_unix_secs)
     }
 
@@ -360,7 +381,8 @@ fn verify_signature_with_pubkey(
     let sig = Signature::from_slice(&sig_bytes).map_err(|_| LicenseError::BadSignature)?;
 
     let msg = canonical_payload(payload)?;
-    vk.verify(&msg, &sig).map_err(|_| LicenseError::BadSignature)
+    vk.verify(&msg, &sig)
+        .map_err(|_| LicenseError::BadSignature)
 }
 
 /// Sign a payload using a raw 32-byte Ed25519 private key. Exposed so the

@@ -8,7 +8,9 @@
 
 use crate::access::authenticate_request;
 use crate::catalog::DeltaCatalog;
+use crate::delta_log::{self, DeltaSnapshot};
 use crate::error::DeltaError;
+use crate::presigned_reader::{DEFAULT_LOG_URL_TTL, PresignedHttpReader};
 use crate::types::{
     AddTableRequest, CreateRecipientRequest, CreateRecipientResponse, CreateShareRequest,
     FileEntry, FileLine, Format, ListSchemasResponse, ListSharesResponse, ListTablesResponse,
@@ -21,8 +23,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use objectio_auth::presign::presign_get;
 use objectio_proto::metadata::{
-    IcebergLoadTableRequest, metadata_service_client::MetadataServiceClient,
+    DeltaShareTableEntry, IcebergLoadTableRequest, metadata_service_client::MetadataServiceClient,
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -43,6 +46,11 @@ pub struct DeltaState {
     pub access_key_id: String,
     /// Admin secret access key for presigning
     pub secret_access_key: String,
+    /// HTTP client used to fetch `_delta_log/` files via presigned URLs
+    pub http: reqwest::Client,
+    /// Default lifetime of presigned data-file URLs returned in /query responses.
+    /// Operators can tune this for long-running Spark/Databricks queries.
+    pub default_url_ttl: Duration,
 }
 
 impl DeltaState {
@@ -221,10 +229,16 @@ pub async fn get_table_version(
 ) -> Result<impl IntoResponse> {
     authenticate_request(&headers, &state.catalog, Some(&share)).await?;
 
-    // Verify the table is in this share
-    validate_table_in_share(&state, &share, &schema, &table).await?;
+    let entry = find_share_table(&state, &share, &schema, &table).await?;
 
-    let version = get_snapshot_id(&state, &schema, &table).await?;
+    let version = match table_kind(&entry)? {
+        TableKind::Delta => {
+            let snapshot = build_delta_snapshot(&state, &entry).await?;
+            snapshot.version
+        }
+        TableKind::Iceberg => get_snapshot_id(&state, &schema, &table).await?,
+    };
+
     Ok(Json(TableVersionResponse {
         delta_table_version: version,
     }))
@@ -240,16 +254,24 @@ pub async fn get_table_metadata(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
     authenticate_request(&headers, &state.catalog, Some(&share)).await?;
-    validate_table_in_share(&state, &share, &schema, &table).await?;
+    let entry = find_share_table(&state, &share, &schema, &table).await?;
 
-    let meta = state
-        .load_iceberg_table_meta(&schema, &table)
-        .await?
-        .ok_or_else(|| DeltaError::not_found(format!("table {schema}.{table} has no metadata")))?;
+    let (protocol_line, metadata_line) = match table_kind(&entry)? {
+        TableKind::Delta => {
+            let snapshot = build_delta_snapshot(&state, &entry).await?;
+            build_delta_metadata_lines(&table, &snapshot)
+        }
+        TableKind::Iceberg => {
+            let meta = state
+                .load_iceberg_table_meta(&schema, &table)
+                .await?
+                .ok_or_else(|| {
+                    DeltaError::not_found(format!("table {schema}.{table} has no metadata"))
+                })?;
+            build_metadata_lines(&table, &meta)
+        }
+    };
 
-    let (protocol_line, metadata_line) = build_metadata_lines(&table, &meta);
-
-    // Delta Sharing metadata response: NDJSON with protocol + metadata lines
     let body = format!(
         "{}\n{}\n",
         serde_json::to_string(&protocol_line).unwrap_or_default(),
@@ -273,17 +295,27 @@ pub async fn query_table(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse> {
     authenticate_request(&headers, &state.catalog, Some(&share)).await?;
-    validate_table_in_share(&state, &share, &schema, &table).await?;
+    let entry = find_share_table(&state, &share, &schema, &table).await?;
 
-    let meta = state
-        .load_iceberg_table_meta(&schema, &table)
-        .await?
-        .ok_or_else(|| DeltaError::not_found(format!("table {schema}.{table} has no metadata")))?;
-
-    let (protocol_line, metadata_line) = build_metadata_lines(&table, &meta);
-
-    // Extract Parquet file paths from the current snapshot
-    let file_lines = extract_file_lines(&state, &schema, &meta);
+    let (protocol_line, metadata_line, file_lines) = match table_kind(&entry)? {
+        TableKind::Delta => {
+            let snapshot = build_delta_snapshot(&state, &entry).await?;
+            let (p, m) = build_delta_metadata_lines(&table, &snapshot);
+            let files = build_delta_file_lines(&state, &entry, &snapshot);
+            (p, m, files)
+        }
+        TableKind::Iceberg => {
+            let meta = state
+                .load_iceberg_table_meta(&schema, &table)
+                .await?
+                .ok_or_else(|| {
+                    DeltaError::not_found(format!("table {schema}.{table} has no metadata"))
+                })?;
+            let (p, m) = build_metadata_lines(&table, &meta);
+            let files = extract_file_lines(&state, &schema, &meta);
+            (p, m, files)
+        }
+    };
 
     let mut body = String::new();
     body.push_str(&serde_json::to_string(&protocol_line).unwrap_or_default());
@@ -492,23 +524,166 @@ pub async fn admin_drop_recipient(
 
 // ---- Helpers ----
 
-/// Verify that `table` exists in `share/schema`.
-async fn validate_table_in_share(
+/// Find the share table entry for `share/schema/table`, or 404.
+async fn find_share_table(
     state: &DeltaState,
     share: &str,
     schema: &str,
     table: &str,
-) -> Result<()> {
+) -> Result<DeltaShareTableEntry> {
     let tables = state.catalog.list_tables(share, schema).await?;
-    let found = tables
-        .iter()
-        .any(|t| t.table_name == table && t.schema == schema);
-    if found {
-        Ok(())
+    tables
+        .into_iter()
+        .find(|t| t.table_name == table && t.schema == schema)
+        .ok_or_else(|| {
+            DeltaError::not_found(format!(
+                "table '{schema}.{table}' not found in share '{share}'"
+            ))
+        })
+}
+
+/// Backing-table dispatch kind. Determined by `entry.table_type`.
+#[derive(Debug)]
+enum TableKind {
+    /// Native Delta Lake table (`_delta_log/` JSON commits in `bucket`/`path`)
+    Delta,
+    /// Iceberg table loaded via the warehouse meta service
+    Iceberg,
+}
+
+fn table_kind(entry: &DeltaShareTableEntry) -> Result<TableKind> {
+    match entry.table_type.as_str() {
+        "delta" => Ok(TableKind::Delta),
+        "" | "iceberg" | "uniform" => Ok(TableKind::Iceberg),
+        other => Err(DeltaError::bad_request(format!(
+            "unknown share table_type: '{other}'"
+        ))),
+    }
+}
+
+/// Build a Delta snapshot for a delta-typed share table entry by reading
+/// `_delta_log/` from `entry.bucket` + `entry.path` via presigned URLs.
+async fn build_delta_snapshot(
+    state: &DeltaState,
+    entry: &DeltaShareTableEntry,
+) -> Result<DeltaSnapshot> {
+    if entry.bucket.is_empty() {
+        return Err(DeltaError::bad_request(format!(
+            "share table '{}.{}' has table_type=delta but no bucket configured",
+            entry.schema, entry.table_name,
+        )));
+    }
+    let reader = PresignedHttpReader::new(
+        &state.endpoint,
+        &state.region,
+        &state.access_key_id,
+        &state.secret_access_key,
+        DEFAULT_LOG_URL_TTL,
+        &state.http,
+    );
+    delta_log::build_snapshot(&reader, &entry.bucket, &entry.path).await
+}
+
+/// Build Protocol + Metadata NDJSON lines from a Delta snapshot.
+fn build_delta_metadata_lines(
+    table_name: &str,
+    snapshot: &DeltaSnapshot,
+) -> (ProtocolLine, MetadataLine) {
+    let configuration = if snapshot.metadata.configuration.is_empty() {
+        None
     } else {
-        Err(DeltaError::not_found(format!(
-            "table '{schema}.{table}' not found in share '{share}'"
-        )))
+        Some(snapshot.metadata.configuration.clone())
+    };
+    let provider = snapshot
+        .metadata
+        .format
+        .as_ref()
+        .map_or_else(|| "parquet".to_string(), |f| f.provider.clone());
+
+    let protocol = ProtocolLine {
+        protocol: Protocol {
+            min_reader_version: snapshot.protocol.min_reader_version,
+        },
+    };
+    let metadata = MetadataLine {
+        metadata: TableMetadata {
+            id: if snapshot.metadata.id.is_empty() {
+                table_name.to_string()
+            } else {
+                snapshot.metadata.id.clone()
+            },
+            format: Format { provider },
+            schema_string: snapshot.metadata.schema_string.clone(),
+            partition_columns: snapshot.metadata.partition_columns.clone(),
+            configuration,
+            created_time: snapshot.metadata.created_time,
+            name: snapshot
+                .metadata
+                .name
+                .clone()
+                .or_else(|| Some(table_name.to_string())),
+            description: snapshot.metadata.description.clone(),
+            num_files: i64::try_from(snapshot.adds.len()).ok(),
+            size: Some(snapshot.adds.iter().map(|a| a.size).sum()),
+            num_records: None,
+        },
+    };
+    (protocol, metadata)
+}
+
+/// Build one File NDJSON line per live `add` action in the snapshot. Each
+/// `url` is a fresh presigned GET against `entry.bucket` + `entry.path` +
+/// `add.path`, valid for `state.default_url_ttl`.
+fn build_delta_file_lines(
+    state: &DeltaState,
+    entry: &DeltaShareTableEntry,
+    snapshot: &DeltaSnapshot,
+) -> Vec<FileLine> {
+    snapshot
+        .adds
+        .iter()
+        .map(|add| {
+            let key = file_key(&entry.path, &add.path);
+            let url = presign_get(
+                &state.endpoint,
+                &state.region,
+                &state.access_key_id,
+                &state.secret_access_key,
+                &entry.bucket,
+                &key,
+                state.default_url_ttl,
+            );
+            // Stable per-path id — recipients use it for cross-page dedup.
+            let id = hex::encode(Sha256::digest(add.path.as_bytes()));
+            // Drop None partition values — Delta Sharing protocol has no
+            // representation for tombstoned partitions in File entries.
+            let partition_values = add
+                .partition_values
+                .iter()
+                .filter_map(|(k, v)| v.as_ref().map(|val| (k.clone(), val.clone())))
+                .collect();
+            FileLine {
+                file: FileEntry {
+                    url,
+                    id,
+                    partition_values,
+                    size: add.size,
+                    stats: add.stats.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Join `table_root` and `add.path` (which is relative to the table root) into
+/// a full S3 object key. Both inputs may or may not have trailing/leading slashes.
+fn file_key(table_root: &str, file_path: &str) -> String {
+    let root_trim = table_root.trim_end_matches('/');
+    let file_trim = file_path.trim_start_matches('/');
+    if root_trim.is_empty() {
+        file_trim.to_string()
+    } else {
+        format!("{root_trim}/{file_trim}")
     }
 }
 
@@ -664,4 +839,209 @@ fn extract_file_lines(
             stats: None,
         },
     }]
+}
+
+#[cfg(test)]
+#[allow(clippy::significant_drop_tightening)] // test fixtures intentionally hold state across asserts
+mod tests {
+    use super::*;
+    use crate::delta_log::{AddAction, MetadataAction, ProtocolAction};
+    use std::collections::HashMap;
+
+    fn delta_entry() -> DeltaShareTableEntry {
+        DeltaShareTableEntry {
+            share: "s".into(),
+            schema: "sc".into(),
+            table_name: "t".into(),
+            share_id: String::new(),
+            table_type: "delta".into(),
+            bucket: "lake".into(),
+            path: "warehouse/sales/events/".into(),
+            warehouse: String::new(),
+            namespace: String::new(),
+        }
+    }
+
+    #[test]
+    fn table_kind_dispatches_known_types() {
+        let mut e = delta_entry();
+        assert!(matches!(table_kind(&e).unwrap(), TableKind::Delta));
+        e.table_type = String::new();
+        assert!(matches!(table_kind(&e).unwrap(), TableKind::Iceberg));
+        e.table_type = "iceberg".into();
+        assert!(matches!(table_kind(&e).unwrap(), TableKind::Iceberg));
+        e.table_type = "uniform".into();
+        assert!(matches!(table_kind(&e).unwrap(), TableKind::Iceberg));
+    }
+
+    #[test]
+    fn table_kind_rejects_unknown_type() {
+        let mut e = delta_entry();
+        e.table_type = "hudi".into();
+        let err = table_kind(&e).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("hudi"));
+    }
+
+    #[test]
+    fn file_key_joins_root_and_relative_path() {
+        assert_eq!(
+            file_key("warehouse/sales/events/", "part-00000.parquet"),
+            "warehouse/sales/events/part-00000.parquet"
+        );
+        assert_eq!(
+            file_key("warehouse/sales/events", "part-00000.parquet"),
+            "warehouse/sales/events/part-00000.parquet"
+        );
+        assert_eq!(
+            file_key("warehouse/sales/events/", "/part-00000.parquet"),
+            "warehouse/sales/events/part-00000.parquet"
+        );
+        assert_eq!(
+            file_key("warehouse", "country=US/part-0.parquet"),
+            "warehouse/country=US/part-0.parquet"
+        );
+        assert_eq!(file_key("", "part.parquet"), "part.parquet");
+    }
+
+    fn snapshot_with_two_adds() -> DeltaSnapshot {
+        let mut p1 = HashMap::new();
+        p1.insert("country".to_string(), Some("US".to_string()));
+        let mut p2 = HashMap::new();
+        p2.insert("country".to_string(), Some("CA".to_string()));
+        // a partition value that's None — must be dropped from the wire format
+        p2.insert("region".to_string(), None);
+        DeltaSnapshot {
+            version: 7,
+            protocol: ProtocolAction {
+                min_reader_version: 3,
+                min_writer_version: 5,
+            },
+            metadata: MetadataAction {
+                id: "abc".into(),
+                schema_string: r#"{"type":"struct"}"#.into(),
+                partition_columns: vec!["country".into(), "region".into()],
+                created_time: Some(1_700_000_000_000),
+                ..MetadataAction::default()
+            },
+            adds: vec![
+                AddAction {
+                    path: "country=US/part-0.parquet".into(),
+                    partition_values: p1,
+                    size: 100,
+                    modification_time: 0,
+                    stats: Some(r#"{"numRecords":10}"#.into()),
+                    data_change: true,
+                },
+                AddAction {
+                    path: "country=CA/part-0.parquet".into(),
+                    partition_values: p2,
+                    size: 200,
+                    modification_time: 0,
+                    stats: None,
+                    data_change: true,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn build_delta_metadata_lines_carries_snapshot_state() {
+        let snap = snapshot_with_two_adds();
+        let (proto, meta) = build_delta_metadata_lines("events", &snap);
+        assert_eq!(proto.protocol.min_reader_version, 3);
+        assert_eq!(meta.metadata.id, "abc");
+        assert_eq!(meta.metadata.format.provider, "parquet");
+        assert_eq!(meta.metadata.partition_columns.len(), 2);
+        assert_eq!(meta.metadata.num_files, Some(2));
+        assert_eq!(meta.metadata.size, Some(300));
+        assert_eq!(meta.metadata.created_time, Some(1_700_000_000_000));
+        assert_eq!(meta.metadata.name.as_deref(), Some("events"));
+    }
+
+    #[test]
+    fn build_delta_metadata_lines_falls_back_to_table_name_when_id_missing() {
+        let mut snap = snapshot_with_two_adds();
+        snap.metadata.id = String::new();
+        let (_, meta) = build_delta_metadata_lines("events", &snap);
+        assert_eq!(meta.metadata.id, "events");
+    }
+
+    fn fake_state() -> DeltaState {
+        // Only the presigning fields are exercised by build_delta_file_lines —
+        // the rest can be defaults / dummies.
+        let (channel, _) = tonic::transport::Channel::balance_channel::<u32>(1);
+        DeltaState {
+            catalog: DeltaCatalog::new(MetadataServiceClient::new(channel.clone())),
+            meta_client: MetadataServiceClient::new(channel),
+            endpoint: "http://localhost:9000".into(),
+            region: "us-east-1".into(),
+            access_key_id: "AKID".into(),
+            secret_access_key: "secret".into(),
+            http: reqwest::Client::new(),
+            default_url_ttl: Duration::from_secs(900),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_delta_file_lines_emits_one_per_add_with_presigned_urls() {
+        let snap = snapshot_with_two_adds();
+        let entry = delta_entry();
+        let state = fake_state();
+        let files = build_delta_file_lines(&state, &entry, &snap);
+        assert_eq!(files.len(), 2);
+        for f in &files {
+            assert!(
+                f.file
+                    .url
+                    .starts_with("http://localhost:9000/lake/warehouse/sales/events/"),
+            );
+            assert!(f.file.url.contains("X-Amz-Signature="));
+            assert!(f.file.url.contains("X-Amz-Expires=900"));
+        }
+        assert_eq!(files[0].file.size, 100);
+        assert_eq!(files[0].file.stats.as_deref(), Some(r#"{"numRecords":10}"#));
+        assert_eq!(files[1].file.size, 200);
+        assert!(files[1].file.stats.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_delta_file_lines_drops_none_partition_values() {
+        let snap = snapshot_with_two_adds();
+        let entry = delta_entry();
+        let state = fake_state();
+        let files = build_delta_file_lines(&state, &entry, &snap);
+        // First add has only Some("US")
+        assert_eq!(
+            files[0]
+                .file
+                .partition_values
+                .get("country")
+                .map(String::as_str),
+            Some("US"),
+        );
+        // Second add had Some("CA") + None for region — region must be filtered out
+        assert_eq!(
+            files[1]
+                .file
+                .partition_values
+                .get("country")
+                .map(String::as_str),
+            Some("CA"),
+        );
+        assert!(!files[1].file.partition_values.contains_key("region"));
+    }
+
+    #[tokio::test]
+    async fn build_delta_file_lines_uses_stable_path_hash_for_id() {
+        let snap = snapshot_with_two_adds();
+        let entry = delta_entry();
+        let state = fake_state();
+        let files = build_delta_file_lines(&state, &entry, &snap);
+        // SHA-256 hex digest is 64 chars; identical input → identical id.
+        assert_eq!(files[0].file.id.len(), 64);
+        let again = build_delta_file_lines(&state, &entry, &snap);
+        assert_eq!(files[0].file.id, again[0].file.id);
+        assert_ne!(files[0].file.id, files[1].file.id);
+    }
 }

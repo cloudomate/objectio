@@ -67,7 +67,11 @@ pub struct PolicyStatement {
     pub sid: Option<String>,
     /// Effect: Allow or Deny
     pub effect: Effect,
-    /// Principal: who this statement applies to
+    /// Principal: who this statement applies to. Defaults to `*` so that
+    /// AWS-shape inline IAM policies (which omit Principal — the implicit
+    /// principal is whoever the policy is attached to) parse without
+    /// having to be hand-edited.
+    #[serde(default)]
     pub principal: Principal,
     /// Actions this statement covers
     pub action: ActionList,
@@ -172,9 +176,10 @@ pub enum Effect {
 }
 
 /// Principal specification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Principal {
     /// Wildcard ("*") - applies to everyone
+    #[default]
     Wildcard,
     /// Specific OBIO principals (user/role ARNs)
     OBIO(Vec<String>),

@@ -372,7 +372,6 @@ pub async fn put_object_meta_to_all(
 
     let mut futs = Vec::with_capacity(targets.len());
     for placement in &targets {
-        let pool = pool;
         let req = PutObjectMetaRequest {
             bucket: bucket.to_string(),
             key: key.to_string(),
@@ -555,7 +554,6 @@ pub async fn delete_object_meta_from_all(
 
     let mut futs = Vec::with_capacity(targets.len());
     for placement in &targets {
-        let pool = pool;
         let req = DeleteObjectMetaRequest {
             bucket: bucket.to_string(),
             key: key.to_string(),

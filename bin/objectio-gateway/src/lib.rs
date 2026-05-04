@@ -4,11 +4,11 @@
 //! Credentials are managed by the metadata service for persistence.
 
 pub mod admin;
-pub mod grep;
-pub mod grep_engine;
 pub mod auth_middleware;
 pub mod chunked_decode;
 pub mod console_auth;
+pub mod grep;
+pub mod grep_engine;
 pub mod host_provider;
 pub mod iceberg_auth;
 pub mod kms;
@@ -63,6 +63,17 @@ async fn load_initial_license(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+
+    // 0. Dev-mode escape hatch — `objectio-aio` and integration tests
+    //    set this so all Enterprise features are usable without needing
+    //    a signed license. Production deployments must NOT set this; it
+    //    bypasses every license-gated check.
+    if std::env::var("OBJECTIO_DEV_NO_LICENSE").is_ok_and(|v| !v.is_empty() && v != "0") {
+        warn!(
+            "OBJECTIO_DEV_NO_LICENSE is set — running with in-process Developer license. This is a development convenience and MUST NOT be used in production."
+        );
+        return objectio_license::License::developer_unsigned();
+    }
 
     // 1. CLI flag
     if let Some(path) = cli_path {
@@ -219,6 +230,13 @@ pub struct Args {
     /// Admin secret access key for Delta Sharing presigned URL generation.
     #[arg(long, default_value = "")]
     pub delta_secret_key: String,
+
+    /// Lifetime in seconds of presigned data-file URLs returned by the Delta
+    /// Sharing /query endpoint. 0 falls back to the crate default (3600s).
+    /// Tune higher when recipients run long Spark/Databricks jobs against
+    /// large native Delta tables — past this window data-file URLs return 403.
+    #[arg(long, default_value = "0")]
+    pub delta_url_ttl_seconds: u64,
 
     /// OIDC issuer URL for Iceberg JWT authentication (e.g., https://keycloak.example.com/realms/myrealm)
     #[arg(long)]
@@ -472,13 +490,18 @@ pub async fn run(
     // Build Iceberg REST Catalog router and Delta Sharing router. Both are
     // Enterprise features, gated at runtime by `feature_gate` middleware —
     // without a valid Enterprise license the routers reject with 403.
+    //
+    // The Unity Catalog router (mounted at /api/2.1/unity-catalog/*) shares
+    // the same iceberg auth layer and is gated by the same Iceberg feature
+    // flag — there is no separate Feature::Unity, since Unity is just an
+    // alternate REST surface over the same catalog metadata.
     let iceberg_router = {
         let router = objectio_iceberg::router(
             meta_client.clone(),
             PolicyEvaluator::new(),
-            admin_principals,
-            Some(sts_provider),
-            s3_endpoint,
+            admin_principals.clone(),
+            Some(sts_provider.clone()),
+            s3_endpoint.clone(),
         );
         info!(
             "Iceberg REST Catalog at /iceberg/v1/* ({})",
@@ -513,6 +536,36 @@ pub async fn run(
         }
     };
 
+    // Unity Catalog REST router — same auth layer as Iceberg (SigV4 + OIDC
+    // bearer + session cookie), same Feature::Iceberg license gate. Mounted
+    // at the gateway root so its `/api/2.1/unity-catalog/*` paths land where
+    // Databricks-style clients expect them.
+    let unity_router = {
+        let router = objectio_unity_catalog::router(
+            meta_client.clone(),
+            PolicyEvaluator::new(),
+            admin_principals,
+            Some(sts_provider),
+            s3_endpoint,
+        );
+        info!(
+            "Unity Catalog REST API at /api/2.1/unity-catalog/* ({})",
+            if oidc_provider.is_some() {
+                "SigV4 + OIDC + session cookie"
+            } else {
+                "SigV4 + session cookie"
+            }
+        );
+        let unity_auth_state = Arc::new(iceberg_auth::IcebergAuthState {
+            sigv4_state: Arc::clone(&auth_state),
+            oidc_provider: oidc_provider.clone(),
+        });
+        router.layer(middleware::from_fn_with_state(
+            unity_auth_state,
+            iceberg_auth::iceberg_unified_auth_layer,
+        ))
+    };
+
     // Warehouse prefix rewrite layer — harmless when the license gate
     // rejects Iceberg: rewritten requests simply short-circuit with 403.
     let warehouse_rewrite =
@@ -543,17 +596,24 @@ pub async fn run(
         } else {
             args.external_endpoint.clone()
         };
+        let url_ttl = if args.delta_url_ttl_seconds > 0 {
+            Some(args.delta_url_ttl_seconds)
+        } else {
+            None
+        };
         let delta_config = DeltaSharingConfig {
             endpoint: external_endpoint.clone(),
             region: args.region.clone(),
             access_key_id: args.delta_access_key_id.clone(),
             secret_access_key: args.delta_secret_key.clone(),
+            default_url_ttl_seconds: url_ttl,
         };
         let delta_admin_config = DeltaSharingConfig {
             endpoint: external_endpoint,
             region: args.region.clone(),
             access_key_id: args.delta_access_key_id.clone(),
             secret_access_key: args.delta_secret_key.clone(),
+            default_url_ttl_seconds: url_ttl,
         };
         info!("Delta Sharing protocol enabled at /delta-sharing/v1/*");
         info!("Delta Sharing admin API enabled at /_admin/delta-sharing/*");
@@ -626,8 +686,7 @@ pub async fn run(
     // meta config at `license/active`. No license → Community tier (all
     // Enterprise features remain gated). Parse/verify failures log a warning
     // and fall back to Community — never hard-fail startup on a broken license.
-    let license =
-        load_initial_license(args.license.as_deref(), meta_client.clone()).await;
+    let license = load_initial_license(args.license.as_deref(), meta_client.clone()).await;
     match license.tier {
         objectio_license::Tier::Enterprise => info!(
             "License: Enterprise — licensee='{}' expires_at={} max_nodes={}",
@@ -668,41 +727,40 @@ pub async fn run(
     // return 501 — safe default for dev clusters with no platform to
     // talk to. `k8s` connects to the in-cluster API; startup fails
     // fast if the ServiceAccount isn't wired.
-    let host_provider: Arc<dyn host_provider::HostProvider> =
-        match args.host_provider.as_str() {
-            "noop" => Arc::new(host_provider::NoopHostProvider),
-            "k8s" => {
-                info!(
-                    "Host provider: k8s (namespace={}, osd_sts={})",
-                    args.host_provider_namespace, args.host_provider_osd_sts
-                );
-                match host_provider::K8sHostProvider::try_new(
-                    args.host_provider_namespace.clone(),
-                    args.host_provider_osd_sts.clone(),
-                )
-                .await
-                {
-                    Ok(p) => Arc::new(p),
-                    Err(e) => {
-                        // Don't hard-fail boot — if the k8s API is
-                        // briefly unreachable (CNI still starting, RBAC
-                        // propagation) we'd rather serve S3 + return 503
-                        // on host-action endpoints than refuse traffic
-                        // entirely. Startup logs will flag the config
-                        // for ops to check.
-                        warn!("k8s host provider init failed, falling back to noop: {e}");
-                        Arc::new(host_provider::NoopHostProvider)
-                    }
+    let host_provider: Arc<dyn host_provider::HostProvider> = match args.host_provider.as_str() {
+        "noop" => Arc::new(host_provider::NoopHostProvider),
+        "k8s" => {
+            info!(
+                "Host provider: k8s (namespace={}, osd_sts={})",
+                args.host_provider_namespace, args.host_provider_osd_sts
+            );
+            match host_provider::K8sHostProvider::try_new(
+                args.host_provider_namespace.clone(),
+                args.host_provider_osd_sts.clone(),
+            )
+            .await
+            {
+                Ok(p) => Arc::new(p),
+                Err(e) => {
+                    // Don't hard-fail boot — if the k8s API is
+                    // briefly unreachable (CNI still starting, RBAC
+                    // propagation) we'd rather serve S3 + return 503
+                    // on host-action endpoints than refuse traffic
+                    // entirely. Startup logs will flag the config
+                    // for ops to check.
+                    warn!("k8s host provider init failed, falling back to noop: {e}");
+                    Arc::new(host_provider::NoopHostProvider)
                 }
             }
-            other => {
-                warn!(
-                    "unknown --host-provider={:?}; falling back to noop. Accepted: noop, k8s",
-                    other
-                );
-                Arc::new(host_provider::NoopHostProvider)
-            }
-        };
+        }
+        other => {
+            warn!(
+                "unknown --host-provider={:?}; falling back to noop. Accepted: noop, k8s",
+                other
+            );
+            Arc::new(host_provider::NoopHostProvider)
+        }
+    };
 
     // Create application state. KMS fields are held behind RwLocks so
     // `PUT /_admin/kms/config` can hot-swap the backend at runtime; we seed
@@ -808,7 +866,10 @@ pub async fn run(
             post(admin::admin_reboot_osd),
         )
         .route("/_admin/hosts", post(admin::admin_add_hosts))
-        .route("/_admin/host-provider", get(admin::admin_host_provider_info))
+        .route(
+            "/_admin/host-provider",
+            get(admin::admin_host_provider_info),
+        )
         .route("/_admin/drain-status", get(admin::admin_drain_status))
         .route(
             "/_admin/rebalance-status",
@@ -840,6 +901,18 @@ pub async fn run(
         .route(
             "/_admin/policies/attached",
             get(admin::admin_list_attached_policies),
+        )
+        // IAM groups
+        .route("/_admin/groups", get(admin::admin_list_groups))
+        .route("/_admin/groups", post(admin::admin_create_group))
+        .route("/_admin/groups/{group_id}", delete(admin::admin_delete_group))
+        .route(
+            "/_admin/groups/{group_id}/members",
+            post(admin::admin_add_group_member),
+        )
+        .route(
+            "/_admin/groups/{group_id}/members/{user_id}",
+            delete(admin::admin_remove_group_member),
         )
         // Tenant-aware Table Sharing admin
         .route("/_admin/shares", get(admin::admin_list_shares_tenant))
@@ -880,7 +953,10 @@ pub async fn run(
         .route("/_admin/kms/keys", get(kms::admin_list_kms_keys))
         .route("/_admin/kms/keys", post(kms::admin_create_kms_key))
         .route("/_admin/kms/keys/{key_id}", get(kms::admin_get_kms_key))
-        .route("/_admin/kms/keys/{key_id}", delete(kms::admin_delete_kms_key))
+        .route(
+            "/_admin/kms/keys/{key_id}",
+            delete(kms::admin_delete_kms_key),
+        )
         // Dynamic backend config: console-driven runtime reconfiguration
         .route("/_admin/kms/config", get(kms::admin_kms_get_config))
         .route("/_admin/kms/config", put(kms::admin_kms_put_config))
@@ -966,21 +1042,27 @@ pub async fn run(
             (Arc::clone(&state), objectio_license::Feature::Iceberg),
             license_gate::feature_gate,
         ));
+        // Unity shares the Iceberg feature flag — same metadata surface,
+        // alternate REST shape.
+        let unity_gated = unity_router.layer(middleware::from_fn_with_state(
+            (Arc::clone(&state), objectio_license::Feature::Iceberg),
+            license_gate::feature_gate,
+        ));
         let delta_gated = delta_sharing_router.layer(middleware::from_fn_with_state(
             (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
             license_gate::feature_gate,
         ));
-        let delta_admin_gated =
-            delta_sharing_admin_router.layer(middleware::from_fn_with_state(
-                (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-                license_gate::feature_gate,
-            ));
+        let delta_admin_gated = delta_sharing_admin_router.layer(middleware::from_fn_with_state(
+            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
+            license_gate::feature_gate,
+        ));
         Router::new()
             .merge(protected)
             .merge(admin_routes)
             .merge(console_api_routes)
             .merge(console_oidc_routes)
             .nest("/iceberg", iceberg_gated)
+            .merge(unity_gated)
             .nest("/delta-sharing", delta_gated)
             .nest("/_admin/delta-sharing", delta_admin_gated)
             .nest_service("/_console", console_service)
@@ -1004,21 +1086,25 @@ pub async fn run(
             (Arc::clone(&state), objectio_license::Feature::Iceberg),
             license_gate::feature_gate,
         ));
+        let unity_gated = unity_router.layer(middleware::from_fn_with_state(
+            (Arc::clone(&state), objectio_license::Feature::Iceberg),
+            license_gate::feature_gate,
+        ));
         let delta_gated = delta_sharing_router.layer(middleware::from_fn_with_state(
             (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
             license_gate::feature_gate,
         ));
-        let delta_admin_gated =
-            delta_sharing_admin_router.layer(middleware::from_fn_with_state(
-                (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-                license_gate::feature_gate,
-            ));
+        let delta_admin_gated = delta_sharing_admin_router.layer(middleware::from_fn_with_state(
+            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
+            license_gate::feature_gate,
+        ));
         Router::new()
             .merge(s3_routes)
             .merge(admin_routes)
             .merge(console_api_routes)
             .merge(console_oidc_routes)
             .nest("/iceberg", iceberg_gated)
+            .merge(unity_gated)
             .nest("/delta-sharing", delta_gated)
             .nest("/_admin/delta-sharing", delta_admin_gated)
             .nest_service("/_console", console_service_noauth)
