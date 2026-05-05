@@ -1,22 +1,33 @@
 import { useEffect, useState } from "react";
-import { KeyRound, LogIn, Lock, User } from "lucide-react";
+import { KeyRound, LogIn, Lock, User, Building2 } from "lucide-react";
 import wordmark from "../assets/brand/wordmark-light.svg";
 
 interface Props {
   onLogin: (user: string, tenant: string) => void;
+  /// Which bundle is rendering this Login. Lets us tweak the Account
+  /// field's required/optional treatment without forcing two copies of
+  /// the page. Defaults to "ops" so older callers (and the legacy
+  /// single-bundle build) keep their current behavior.
+  appKind?: "ops" | "tenant";
 }
 
-type Environment = "production" | "laboratory";
+interface TenantSso {
+  tenant: string;
+  display_name: string;
+  sso_enabled: boolean;
+  provider_name?: string;
+}
 
 /// Console sign-in. The real auth flow is access-key + secret — Username
-/// and Password fields map to those. The "Cluster Endpoint" field is
-/// display-only on the deployed console (the client is already talking
-/// to the endpoint that served this page), but we keep it visible to
-/// reassure operators they're about to drive the intended cluster.
-export default function Login({ onLogin }: Props) {
+/// and Password fields map to those.
+///
+/// AWS-style tenant scoping: a `?tenant=NAME` URL query (or the Account
+/// input below) scopes both AK/SK and SSO to that tenant. The SSO button
+/// then shows only the tenant's own provider, not the system providers.
+export default function Login({ onLogin, appKind = "ops" }: Props) {
+  const tenantApp = appKind === "tenant";
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
-  const [environment, setEnvironment] = useState<Environment>("production");
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -24,6 +35,14 @@ export default function Login({ onLogin }: Props) {
   const [providers, setProviders] = useState<
     { name: string; label: string }[]
   >([]);
+
+  // Tenant scoping. `tenantInput` is what the user typed (or pre-filled
+  // from ?tenant=). `tenantSso` is the resolved server response that
+  // tells us whether to show a tenant-specific SSO button. Empty input =
+  // system-wide login (no tenant scoping; system SSO providers visible).
+  const [tenantInput, setTenantInput] = useState("");
+  const [tenantSso, setTenantSso] = useState<TenantSso | null>(null);
+  const [tenantLookupError, setTenantLookupError] = useState("");
 
   useEffect(() => {
     fetch("/_console/api/oidc/enabled")
@@ -40,7 +59,34 @@ export default function Login({ onLogin }: Props) {
       setError(err);
       window.history.replaceState({}, "", window.location.pathname);
     }
+    const t = params.get("tenant");
+    if (t) {
+      setTenantInput(t);
+      lookupTenant(t);
+    }
   }, []);
+
+  // Resolve the tenant's SSO config. Called on URL pre-fill and on
+  // input blur so we don't fire a request on every keystroke.
+  const lookupTenant = async (name: string) => {
+    setTenantLookupError("");
+    setTenantSso(null);
+    if (!name.trim()) return;
+    try {
+      const r = await fetch(`/_console/api/tenant/${encodeURIComponent(name)}/sso`);
+      if (r.status === 404) {
+        setTenantLookupError(`Tenant "${name}" not found`);
+        return;
+      }
+      if (!r.ok) {
+        setTenantLookupError(`Tenant lookup failed (${r.status})`);
+        return;
+      }
+      setTenantSso(await r.json());
+    } catch {
+      setTenantLookupError("Tenant lookup failed");
+    }
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,11 +97,21 @@ export default function Login({ onLogin }: Props) {
       const resp = await fetch("/_console/api/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accessKey, secretKey }),
+        body: JSON.stringify({
+          accessKey,
+          secretKey,
+          // Forward the account input only when supplied. Backend
+          // refuses login if the typed account doesn't match the
+          // tenant encoded in the access key — catches "wrong account"
+          // mistakes that would otherwise silently land the user in
+          // the wrong tenant scope.
+          ...(tenantInput.trim() ? { account: tenantInput.trim() } : {}),
+        }),
       });
 
       if (!resp.ok) {
-        setError("Invalid access key or secret key");
+        const body = await resp.text().catch(() => "");
+        setError(body || "Invalid access key or secret key");
         return;
       }
 
@@ -69,14 +125,12 @@ export default function Login({ onLogin }: Props) {
   };
 
   const handleSsoLogin = (providerName?: string) => {
-    const params = providerName ? `?provider=${encodeURIComponent(providerName)}` : "";
-    window.location.href = `/_console/api/oidc/authorize${params}`;
+    const qs = new URLSearchParams();
+    if (providerName) qs.set("provider", providerName);
+    if (tenantSso?.tenant) qs.set("tenant", tenantSso.tenant);
+    const params = qs.toString();
+    window.location.href = `/_console/api/oidc/authorize${params ? `?${params}` : ""}`;
   };
-
-  const host =
-    typeof window !== "undefined"
-      ? window.location.host
-      : "cluster.local";
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-white to-gray-100 flex items-center justify-center p-6">
@@ -96,30 +150,11 @@ export default function Login({ onLogin }: Props) {
               </span>
             </div>
 
-            {/* Env toggle */}
-            <div className="flex items-center justify-end mb-5">
-              <div className="inline-flex p-0.5 rounded-lg bg-gray-100">
-                {(["production", "laboratory"] as Environment[]).map((env) => (
-                  <button
-                    key={env}
-                    onClick={() => setEnvironment(env)}
-                    className={`px-3 py-1 text-[11px] font-medium rounded-md capitalize transition-colors ${
-                      environment === env
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-500 hover:text-gray-700"
-                    }`}
-                  >
-                    {env}
-                  </button>
-                ))}
-              </div>
-            </div>
-
             <h1 className="text-[20px] font-semibold text-gray-900 mb-1">
-              Connect to Cluster
+              Sign in
             </h1>
             <p className="text-[12px] text-gray-500 mb-5">
-              Enter your endpoint and credentials to access the console.
+              Enter your credentials to access the console.
             </p>
 
             {error && (
@@ -130,27 +165,50 @@ export default function Login({ onLogin }: Props) {
             )}
 
             <form onSubmit={handleLogin} className="space-y-3">
-              {/* Endpoint — display-only for console that's already connected */}
+              {/* Account / Tenant. On the tenant console the field is
+                  always meaningful (every login here is a tenant
+                  login); on the ops console it's optional — empty
+                  means system-admin login. */}
               <div>
                 <label className="block text-[11px] font-semibold text-gray-700 mb-1">
-                  Cluster Endpoint
+                  Account
+                  {!tenantApp && (
+                    <span className="text-gray-400 font-normal"> (optional)</span>
+                  )}
                 </label>
                 <div className="relative">
-                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <rect x="2" y="3" width="12" height="4" rx="1" />
-                      <rect x="2" y="9" width="12" height="4" rx="1" />
-                      <circle cx="4.5" cy="5" r="0.5" fill="currentColor" />
-                      <circle cx="4.5" cy="11" r="0.5" fill="currentColor" />
-                    </svg>
-                  </span>
+                  <Building2
+                    size={13}
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400"
+                  />
                   <input
-                    readOnly
-                    value={host}
-                    className="w-full pl-8 pr-2.5 py-2 bg-gray-50 border border-gray-200 rounded-lg text-[13px] font-mono text-gray-700 focus:outline-none"
-                    aria-readonly="true"
+                    type="text"
+                    value={tenantInput}
+                    onChange={(e) => {
+                      setTenantInput(e.target.value);
+                      // Clear stale lookup until they tab out / submit.
+                      setTenantSso(null);
+                      setTenantLookupError("");
+                    }}
+                    onBlur={(e) => lookupTenant(e.target.value)}
+                    placeholder={
+                      tenantApp ? "your account name" : "tenant name (leave blank for system)"
+                    }
+                    autoFocus={tenantApp}
+                    className="w-full pl-8 pr-2.5 py-2 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-1 focus:ring-blue-500"
                   />
                 </div>
+                {tenantLookupError && (
+                  <p className="mt-1 text-[11px] text-red-600">{tenantLookupError}</p>
+                )}
+                {tenantSso && (
+                  <p className="mt-1 text-[11px] text-gray-500">
+                    {tenantSso.display_name || tenantSso.tenant}
+                    {tenantSso.sso_enabled
+                      ? " · SSO available"
+                      : " · password-only (no SSO configured)"}
+                  </p>
+                )}
               </div>
 
               {/* Access key */}
@@ -169,7 +227,7 @@ export default function Login({ onLogin }: Props) {
                     onChange={(e) => setAccessKey(e.target.value)}
                     placeholder="AKIA…"
                     className="w-full pl-8 pr-2.5 py-2 border border-gray-300 rounded-lg text-[13px] focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    autoFocus
+                    autoFocus={!tenantApp}
                   />
                 </div>
               </div>
@@ -226,7 +284,14 @@ export default function Login({ onLogin }: Props) {
               </button>
             </form>
 
-            {oidcEnabled && (
+            {/* SSO. Two distinct rendering modes:
+              *   - Tenant scope active (Account input filled + lookup OK):
+              *     show ONE button for the tenant's own SSO, never the
+              *     system providers (so a tenant user can't accidentally
+              *     log into the wrong account).
+              *   - No tenant scope: show the system-wide provider list as
+              *     before.                                              */}
+            {tenantSso?.sso_enabled ? (
               <>
                 <div className="relative my-5">
                   <div className="absolute inset-0 flex items-center">
@@ -234,41 +299,59 @@ export default function Login({ onLogin }: Props) {
                   </div>
                   <div className="relative flex justify-center text-[10px]">
                     <span className="bg-white px-2 text-gray-400 uppercase tracking-wider">
-                      Or continue with
+                      Or sign in to {tenantSso.display_name || tenantSso.tenant}
                     </span>
                   </div>
                 </div>
 
-                {providers.length <= 1 ? (
-                  <button
-                    onClick={() => handleSsoLogin(providers[0]?.name)}
-                    className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-gray-50 border border-gray-200 text-gray-800 rounded-lg text-[13px] font-medium hover:bg-gray-100"
-                  >
-                    <LogIn size={14} />
-                    {providers[0]?.label || "SSO / Active Directory"}
-                  </button>
-                ) : (
-                  <div className="space-y-1.5">
-                    {providers.map((p) => (
-                      <button
-                        key={p.name}
-                        onClick={() => handleSsoLogin(p.name)}
-                        className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 text-gray-800 rounded-lg text-[12px] font-medium hover:bg-gray-100"
-                      >
-                        <LogIn size={13} />
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <button
+                  onClick={() => handleSsoLogin(tenantSso.provider_name)}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-gray-50 border border-gray-200 text-gray-800 rounded-lg text-[13px] font-medium hover:bg-gray-100"
+                >
+                  <LogIn size={14} />
+                  Continue with SSO
+                </button>
               </>
-            )}
-          </div>
+            ) : (
+              !tenantInput.trim() &&
+              oidcEnabled && (
+                <>
+                  <div className="relative my-5">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-gray-200" />
+                    </div>
+                    <div className="relative flex justify-center text-[10px]">
+                      <span className="bg-white px-2 text-gray-400 uppercase tracking-wider">
+                        Or continue with
+                      </span>
+                    </div>
+                  </div>
 
-          <div className="px-7 py-2.5 bg-gray-50 border-t border-gray-100 text-[10px] text-gray-400 text-center">
-            {environment === "laboratory"
-              ? "Laboratory mode — ephemeral cluster, non-persistent state"
-              : "Production mode — live cluster"}
+                  {providers.length <= 1 ? (
+                    <button
+                      onClick={() => handleSsoLogin(providers[0]?.name)}
+                      className="w-full flex items-center justify-center gap-2 px-3 py-2.5 bg-gray-50 border border-gray-200 text-gray-800 rounded-lg text-[13px] font-medium hover:bg-gray-100"
+                    >
+                      <LogIn size={14} />
+                      {providers[0]?.label || "SSO / Active Directory"}
+                    </button>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {providers.map((p) => (
+                        <button
+                          key={p.name}
+                          onClick={() => handleSsoLogin(p.name)}
+                          className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 text-gray-800 rounded-lg text-[12px] font-medium hover:bg-gray-100"
+                        >
+                          <LogIn size={13} />
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )
+            )}
           </div>
         </div>
 

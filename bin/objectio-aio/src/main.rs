@@ -91,6 +91,26 @@ struct Args {
     /// auto-created admin credentials are printed at startup.
     #[arg(long)]
     auth: bool,
+
+    /// Optional dedicated port for the admin API (`/_admin/*` + `/metrics`).
+    /// Bound on `--listen-addr`. When set, admin endpoints move OFF
+    /// the data port. Pass 0 to leave admin co-mounted on `--port`
+    /// (legacy behavior).
+    #[arg(long, default_value_t = 0)]
+    admin_port: u16,
+
+    /// Optional dedicated port for the **ops** console SPA (full
+    /// admin surface for system operators). Bound on `--listen-addr`.
+    /// When set, the ops bundle is served on this port; the data
+    /// port no longer serves `/_console/`. Pass 0 to skip.
+    #[arg(long, default_value_t = 0)]
+    ops_console_port: u16,
+
+    /// Optional dedicated port for the **tenant** console SPA
+    /// (self-service: my buckets, my keys, my catalogs). Bound on
+    /// `--listen-addr`. Safe to expose publicly. Pass 0 to skip.
+    #[arg(long, default_value_t = 0)]
+    tenant_console_port: u16,
 }
 
 /// Pick a free loopback port by binding to :0 and releasing.
@@ -354,13 +374,35 @@ async fn main() -> Result<()> {
     // it. Callers can override OBJECTIO_CONSOLE_DIR themselves if they
     // want to serve a locally-built tree instead (e.g. during frontend
     // dev against this aio binary).
+    //
+    // The embedded tree contains both `ops/` and `tenant/` subdirs
+    // (multi-page Vite output). The gateway resolves
+    // OBJECTIO_OPS_CONSOLE_DIR / OBJECTIO_TENANT_CONSOLE_DIR relative
+    // to OBJECTIO_CONSOLE_DIR by default, so a single extraction
+    // covers both split-mode and legacy paths.
     // ------------------------------------------------------------
-    if std::env::var("OBJECTIO_CONSOLE_DIR").is_err() {
+    {
         let console_dst = data_root.join("console");
+        // Embedded tree contains ops/ and tenant/ subdirs (multi-bundle
+        // Vite output). Extract once; point each env var at the matching
+        // subdir so both legacy single-port and split-mode flows resolve.
         extract_embedded_console(&console_dst)?;
-        // SAFETY: same as above — no tasks have been spawned yet.
+        let ops_dir = console_dst.join("ops");
+        let tenant_dir = console_dst.join("tenant");
+        // SAFETY: no tasks have been spawned yet, so no concurrent reads.
         unsafe {
-            std::env::set_var("OBJECTIO_CONSOLE_DIR", &console_dst);
+            if std::env::var("OBJECTIO_CONSOLE_DIR").is_err() {
+                // Legacy mode = serve the ops bundle from the data
+                // listener (matches pre-split behavior — system admins
+                // and tenant users land on the same SPA).
+                std::env::set_var("OBJECTIO_CONSOLE_DIR", &ops_dir);
+            }
+            if std::env::var("OBJECTIO_OPS_CONSOLE_DIR").is_err() {
+                std::env::set_var("OBJECTIO_OPS_CONSOLE_DIR", &ops_dir);
+            }
+            if std::env::var("OBJECTIO_TENANT_CONSOLE_DIR").is_err() {
+                std::env::set_var("OBJECTIO_TENANT_CONSOLE_DIR", &tenant_dir);
+            }
         }
     }
 
@@ -479,6 +521,37 @@ async fn main() -> Result<()> {
     if !args.auth {
         gw_argv.push("--no-auth".into());
     }
+    // Forward optional split-mode listener flags. Empty / port 0 →
+    // legacy single-port behavior (current default).
+    let split_addrs: Vec<u16> = [
+        args.admin_port,
+        args.ops_console_port,
+        args.tenant_console_port,
+    ]
+    .into_iter()
+    .filter(|p| *p != 0)
+    .collect();
+    for &p in &split_addrs {
+        if !port_free(&args.listen_addr, p) {
+            return Err(anyhow!(
+                "{}:{} requested for split listener is already in use",
+                args.listen_addr,
+                p
+            ));
+        }
+    }
+    if args.admin_port != 0 {
+        gw_argv.push("--admin-listen".into());
+        gw_argv.push(format!("{}:{}", args.listen_addr, args.admin_port));
+    }
+    if args.ops_console_port != 0 {
+        gw_argv.push("--ops-console-listen".into());
+        gw_argv.push(format!("{}:{}", args.listen_addr, args.ops_console_port));
+    }
+    if args.tenant_console_port != 0 {
+        gw_argv.push("--tenant-console-listen".into());
+        gw_argv.push(format!("{}:{}", args.listen_addr, args.tenant_console_port));
+    }
     let gw_args = <objectio_gateway::Args as clap::Parser>::parse_from(&gw_argv);
     let gw_handle: JoinHandle<Result<()>> = {
         let sd = sub_shutdown(&shutdown_tx);
@@ -497,7 +570,18 @@ async fn main() -> Result<()> {
     eprintln!();
     eprintln!("━━━ ObjectIO ready ━━━");
     eprintln!("  S3 / Iceberg / Delta Sharing : http://{display_host}:{gateway_port}");
-    eprintln!("  Console                       : http://{display_host}:{gateway_port}/_console/");
+    if args.ops_console_port == 0 && args.tenant_console_port == 0 {
+        eprintln!("  Console                       : http://{display_host}:{gateway_port}/_console/");
+    }
+    if args.admin_port != 0 {
+        eprintln!("  Admin API + /metrics          : http://{display_host}:{port}/_admin/  (split listener)", port = args.admin_port);
+    }
+    if args.ops_console_port != 0 {
+        eprintln!("  Ops console                   : http://{display_host}:{port}/_console/  (system admins)", port = args.ops_console_port);
+    }
+    if args.tenant_console_port != 0 {
+        eprintln!("  Tenant console                : http://{display_host}:{port}/_console/  (end users)", port = args.tenant_console_port);
+    }
     if args.listen_addr == "0.0.0.0" {
         eprintln!(
             "  LAN bind                      : 0.0.0.0 — reachable from \

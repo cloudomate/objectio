@@ -7,7 +7,7 @@
 //! Both methods result in the same `objectio-session` cookie.
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -73,6 +73,33 @@ fn build_oidc_provider_from_config(
     ))
 }
 
+/// Which composite listener received this request. Set per-listener as
+/// an Axum `Extension` layer in `lib.rs` so handlers can refuse session
+/// flows that don't fit the listener's audience — e.g. system-admin
+/// login at the public tenant console.
+///
+/// Absent in tests and any code path that pre-dates the multi-listener
+/// split, so handlers must always treat it as `Option`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerKind {
+    /// `--listen` in legacy mode — single port carrying everything.
+    /// No login restrictions (current behavior preserved).
+    Legacy,
+    /// `--listen` in split mode — S3 / Iceberg / Delta Sharing only.
+    /// Console login isn't reachable here (the route isn't mounted).
+    Data,
+    /// `--admin-listen` — admin API + `/metrics`. Console login is
+    /// mounted (so a CLI user could call it) but no UI is served.
+    /// Treated like the ops listener for login-gating purposes.
+    AdminApi,
+    /// `--ops-console-listen` — system-admin SPA + admin API.
+    /// Refuses login by tenant-scoped users.
+    OpsConsole,
+    /// `--tenant-console-listen` — end-user SPA + admin API
+    /// (server-side tenant-scoped). Refuses login by system admins.
+    TenantConsole,
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Secret used to sign session tokens — derived from a fixed prefix.
@@ -88,6 +115,13 @@ pub struct LoginRequest {
     access_key: String,
     #[serde(rename = "secretKey")]
     secret_key: String,
+    /// AWS-style "account" hint typed by the user on the login page.
+    /// Optional. When supplied, the server refuses login if it
+    /// doesn't match the tenant encoded in the access key — catches
+    /// "wrong account" mistakes that would otherwise silently log
+    /// the user into the wrong tenant scope.
+    #[serde(default)]
+    account: String,
 }
 
 #[derive(Serialize)]
@@ -110,6 +144,7 @@ pub struct SessionInfo {
 /// POST /_console/api/login
 pub async fn console_login(
     State(state): State<Arc<AppState>>,
+    listener: Option<Extension<ListenerKind>>,
     Json(body): Json<LoginRequest>,
 ) -> Response {
     // Validate credentials via meta service
@@ -142,6 +177,65 @@ pub async fn console_login(
         Some(u) => (u.tenant, u.display_name, u.email),
         None => (String::new(), String::new(), String::new()),
     };
+
+    // Per-listener audience gate.
+    //
+    // - Ops console (system-admin surface, mgmt-network only) refuses
+    //   tenant-scoped logins. A tenant user landing on the ops URL is
+    //   either misconfigured or hostile — in either case they should
+    //   not be able to mint a session here.
+    // - Tenant console (public, end-user surface) refuses system-admin
+    //   logins. Admin credentials should never flow through the
+    //   internet-facing endpoint; the operator firewalled the ops
+    //   console for a reason.
+    //
+    // Returns 403 with a hint pointing at the correct portal so a
+    // confused human can re-route themselves.
+    if let Some(Extension(kind)) = listener {
+        match kind {
+            ListenerKind::OpsConsole if !tenant.is_empty() => {
+                warn!(
+                    "ops-console login refused: user '{}' is tenant-scoped (tenant={})",
+                    user_id, tenant
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    "This account is tenant-scoped — sign in at the tenant console.",
+                )
+                    .into_response();
+            }
+            ListenerKind::TenantConsole if tenant.is_empty() => {
+                warn!(
+                    "tenant-console login refused: user '{}' is a system admin",
+                    user_id
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    "System-admin login is on the ops console.",
+                )
+                    .into_response();
+            }
+            _ => {}
+        }
+    }
+
+    // "Wrong account" guard. If the user typed an account name in the
+    // login form, it must match the tenant encoded in the access key.
+    // Empty (= system-admin) creds with a typed account = also a
+    // mismatch. We compare case-insensitively because the AWS-style
+    // input is forgiving (Account name).
+    let typed = body.account.trim();
+    if !typed.is_empty() && !typed.eq_ignore_ascii_case(&tenant) {
+        warn!(
+            "login refused: typed account '{}' does not match credential tenant '{}' (user={})",
+            typed, tenant, user_id
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "Account name does not match these credentials.",
+        )
+            .into_response();
+    }
 
     // Build session token: base64(user_id|access_key|tenant|expires_at|hmac)
     let now = std::time::SystemTime::now()
@@ -432,14 +526,36 @@ pub async fn my_delete_key(
 // OIDC SSO Login
 // ============================================================
 
-/// GET /_console/api/oidc/enabled — check if OIDC is configured, list providers
-pub async fn oidc_enabled(State(state): State<Arc<ConsoleOidcState>>) -> Json<serde_json::Value> {
+/// GET /_console/api/oidc/enabled — check if OIDC is configured, list providers.
+///
+/// Filtered by listener kind so the login page only surfaces buttons
+/// that can lead to a usable session on this listener:
+///
+/// - **TenantConsole** returns an empty provider list. Tenant SSO is
+///   discovered via `/_console/api/tenant/{name}/sso` (the AWS-style
+///   per-account lookup) — the global `User SSO` button would just
+///   round-trip through Entra and then get refused by the audience
+///   gate in `oidc_callback`, so we don't show it.
+/// - **OpsConsole** returns only providers flagged `system_admin: true`
+///   (plus the global `--oidc-*` provider, which is implicitly
+///   system-admin). Tenant-bound providers don't belong here.
+/// - **Legacy / AdminApi / Data** return everything (pre-split
+///   behavior preserved).
+pub async fn oidc_enabled(
+    State(state): State<Arc<ConsoleOidcState>>,
+    listener: Option<Extension<ListenerKind>>,
+) -> Json<serde_json::Value> {
+    let kind = listener.map(|l| l.0).unwrap_or(ListenerKind::Legacy);
+
+    if kind == ListenerKind::TenantConsole {
+        return Json(serde_json::json!({"enabled": false, "providers": []}));
+    }
+
+    let only_system_admin = kind == ListenerKind::OpsConsole;
     let has_global = state.oidc_provider.is_some();
 
-    // List per-tenant OIDC providers from config store
     let mut providers = Vec::new();
 
-    // Fetch tenant OIDC configs from meta service
     let mut client = state.meta_client.clone();
     if let Ok(resp) = client
         .list_config(objectio_proto::metadata::ListConfigRequest {
@@ -462,18 +578,29 @@ pub async fn oidc_enabled(State(state): State<Arc<ConsoleOidcState>>) -> Json<se
                     .get("enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                if enabled {
-                    providers.push(serde_json::json!({
-                        "name": provider_name,
-                        "label": format!("User SSO{}", if display != "SSO" { format!(" ({display})") } else { String::new() }),
-                    }));
+                let system_admin = config
+                    .get("system_admin")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !enabled {
+                    continue;
                 }
+                // Ops console only surfaces system-admin-flagged providers.
+                if only_system_admin && !system_admin {
+                    continue;
+                }
+                providers.push(serde_json::json!({
+                    "name": provider_name,
+                    "label": format!("User SSO{}", if display != "SSO" { format!(" ({display})") } else { String::new() }),
+                }));
             }
         }
     }
 
-    // Add global/system SSO if configured
-    if has_global {
+    // Global `--oidc-*` provider is implicitly system-admin scoped, so
+    // skip it on listeners that don't want system-admin SSO buttons.
+    let surface_global = has_global && !matches!(kind, ListenerKind::TenantConsole);
+    if surface_global {
         providers.insert(
             0,
             serde_json::json!({
@@ -484,7 +611,7 @@ pub async fn oidc_enabled(State(state): State<Arc<ConsoleOidcState>>) -> Json<se
     }
 
     Json(serde_json::json!({
-        "enabled": has_global || !providers.is_empty(),
+        "enabled": surface_global || !providers.is_empty(),
         "providers": providers,
     }))
 }
@@ -498,6 +625,55 @@ pub struct AuthorizeParams {
     /// Tenant name (looks up tenant's oidc_provider)
     #[serde(default)]
     pub tenant: String,
+}
+
+/// `GET /_console/api/tenant/{name}/sso` — what does the login page need
+/// to render for this tenant? No auth required — the answer is just
+/// "is there an SSO button to show, and what should it say".
+///
+/// This is the AWS-style "account login" lookup: a user lands on
+/// `/_console/?tenant=corerun`, the page hits this endpoint, and we
+/// reply with whether to show an SSO button (and its label) or not.
+/// Returning a 404 for unknown tenants is intentional — leaks fewer
+/// tenant names than returning `{exists:false}`.
+pub async fn tenant_sso_info(
+    State(state): State<Arc<ConsoleOidcState>>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    let mut client = state.meta_client.clone();
+    let tenant = match client
+        .get_tenant(objectio_proto::metadata::GetTenantRequest { name: name.clone() })
+        .await
+    {
+        Ok(resp) => {
+            let r = resp.into_inner();
+            if !r.found {
+                return (StatusCode::NOT_FOUND, "tenant not found").into_response();
+            }
+            match r.tenant {
+                Some(t) => t,
+                None => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
+            }
+        }
+        Err(_) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
+    };
+
+    if tenant.oidc_provider.is_empty() {
+        return Json(serde_json::json!({
+            "tenant": name,
+            "display_name": tenant.display_name,
+            "sso_enabled": false,
+        }))
+        .into_response();
+    }
+
+    Json(serde_json::json!({
+        "tenant": name,
+        "display_name": tenant.display_name,
+        "sso_enabled": true,
+        "provider_name": tenant.oidc_provider,
+    }))
+    .into_response()
 }
 
 /// GET /_console/api/oidc/authorize — redirect to OIDC provider
@@ -646,6 +822,7 @@ pub struct OidcCallbackParams {
 /// GET /_console/api/oidc/callback — handle OIDC provider redirect
 pub async fn oidc_callback(
     State(state): State<Arc<ConsoleOidcState>>,
+    listener: Option<Extension<ListenerKind>>,
     headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Response {
@@ -880,6 +1057,40 @@ pub async fn oidc_callback(
             }
         }
     };
+
+    // Per-listener audience gate (mirror of the AK/SK login gate in
+    // `console_login`). The redirect-based OIDC flow can land on
+    // either the ops or tenant listener depending on which "Sign in"
+    // button the user clicked; the resolved tenant tells us where
+    // the resulting session would be valid. If the listener and the
+    // tenant don't match, redirect back to the SPA with an error
+    // instead of minting a usable cross-portal session.
+    if let Some(Extension(kind)) = listener {
+        let mismatch = match kind {
+            ListenerKind::OpsConsole => !tenant.is_empty(),
+            ListenerKind::TenantConsole => tenant.is_empty(),
+            _ => false,
+        };
+        if mismatch {
+            warn!(
+                "OIDC callback refused on {:?}: resolved tenant='{}' does not match listener audience",
+                kind, tenant
+            );
+            let msg = if tenant.is_empty() {
+                "System-admin SSO is only on the ops console"
+            } else {
+                "Tenant SSO is only on the tenant console"
+            };
+            return Response::builder()
+                .status(StatusCode::FOUND)
+                .header(
+                    header::LOCATION,
+                    format!("/_console/?error={}", urlencoding::encode(msg)),
+                )
+                .body(axum::body::Body::empty())
+                .unwrap();
+        }
+    }
 
     // Build session cookie (same format as AK/SK login)
     let now = std::time::SystemTime::now()

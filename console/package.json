@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && npm run build:ops && npm run build:tenant",
+    "build:ops": "APP=ops vite build && mv dist/ops/ops.html dist/ops/index.html",
+    "build:tenant": "APP=tenant vite build && mv dist/tenant/tenant.html dist/tenant/index.html",
+    "build:legacy": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },

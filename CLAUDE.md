@@ -232,3 +232,21 @@ Design docs and user-facing reference live in a separate sibling repo `../object
 | OSD           | 9200        | 9201             |
 | Block Gateway | 9300 (gRPC) | —                |
 | Block Gateway | 10809 (NBD) | —                |
+
+### Gateway listener split (optional)
+
+By default the gateway is single-port (`:9000` carries S3, Iceberg,
+Delta Sharing, `/_admin/*`, `/metrics`, and `/_console/*`). Production
+deployments can split the control plane onto separate listeners by
+setting any combination of `--admin-listen`, `--ops-console-listen`,
+`--tenant-console-listen`. When set, `/_admin/*` and `/metrics` move
+**off** `:9000` entirely. The `/_console/*` SPA also splits into two
+bundles — an "ops" surface (full system admin) and a "tenant" surface
+(end-user self-service). See `console/vite.config.ts` for the
+multi-bundle build, `console/src/apps/{ops,tenant}/` for the per-bundle
+route maps, and `../objectio-docs/architecture/design/console-split.md`
+for the rationale.
+
+The aio binary mirrors these flags as `--admin-port`,
+`--ops-console-port`, `--tenant-console-port` (default `0` = legacy
+single-port behavior).

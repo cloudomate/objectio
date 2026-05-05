@@ -22,13 +22,14 @@ pub mod scatter_gather;
 use anyhow::Result;
 use auth_middleware::{AuthState, auth_layer, optional_auth_layer};
 use axum::{
-    Router,
+    Extension, Router,
     extract::DefaultBodyLimit,
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{delete, get, head, post, put},
 };
+use console_auth::ListenerKind;
 use clap::Parser;
 use objectio_auth::policy::PolicyEvaluator;
 use objectio_delta_sharing::{
@@ -148,9 +149,38 @@ pub struct Args {
     #[arg(short, long, default_value = "/etc/objectio/gateway.toml")]
     pub config: String,
 
-    /// Listen address for S3 API
+    /// Listen address for the data plane (S3 + Iceberg + Delta Sharing).
+    /// In legacy single-port mode, also serves /_admin/* and /_console/*.
     #[arg(short, long, default_value = "0.0.0.0:9000")]
     pub listen: String,
+
+    /// Optional dedicated listener for the admin API (`/_admin/*`) and
+    /// `/metrics`. When set, the admin surface moves OFF `--listen`
+    /// entirely and only this address serves it. Bind to a mgmt
+    /// interface (e.g. `127.0.0.1:9001` or `10.0.5.10:9001`) so the
+    /// public S3 endpoint stays the only Internet-facing port. Empty =
+    /// legacy single-port (admin stays on `--listen`).
+    #[arg(long, default_value = "")]
+    pub admin_listen: String,
+
+    /// Optional dedicated listener for the **ops** console (full
+    /// surface — pools, OSDs, balancer, tenants, billing). Mounts the
+    /// SPA from `OBJECTIO_OPS_CONSOLE_DIR` plus the `/_admin/*` API
+    /// (so the browser stays same-origin — no CORS). Bind to a mgmt
+    /// interface in production. Empty = ops console is served on
+    /// `--listen` (legacy) or omitted entirely if `--tenant-console-listen`
+    /// is set without this one.
+    #[arg(long, default_value = "")]
+    pub ops_console_listen: String,
+
+    /// Optional dedicated listener for the **tenant** console
+    /// (self-service: my buckets, my keys, my catalogs). Mounts the
+    /// SPA from `OBJECTIO_TENANT_CONSOLE_DIR` plus the same `/_admin/*`
+    /// surface (server-side tenant-scoped). Safe to expose publicly so
+    /// end users can self-serve. Empty = tenant console is not served
+    /// separately (ops console covers both surfaces in legacy mode).
+    #[arg(long, default_value = "")]
+    pub tenant_console_listen: String,
 
     /// Metadata service endpoint
     #[arg(long, default_value = "http://localhost:9001")]
@@ -787,8 +817,10 @@ pub async fn run(
 
     // Build S3 routes (behind SigV4 auth when enabled)
     let s3_routes = Router::new()
-        // Metrics and health routes FIRST (no auth, must come before wildcards)
-        .route("/metrics", get(metrics_handler))
+        // /health stays no-auth so a load balancer can probe the data
+        // listener directly. /metrics now lives on the admin listener
+        // (or the legacy combined router) — splitting it off lets
+        // operators firewall metrics/admin together on a mgmt VLAN.
         .route("/health", get(s3::health_check))
         // Service endpoint (list buckets)
         .route("/", get(s3::list_buckets))
@@ -1010,132 +1042,242 @@ pub async fn run(
             "/_console/api/oidc/callback",
             get(console_auth::oidc_callback),
         )
+        // Public per-tenant SSO discovery — what the login page calls
+        // when the URL carries ?tenant=NAME or the user types a tenant
+        // in the account-name input. Matches AWS "account alias" UX.
+        .route(
+            "/_console/api/tenant/{name}/sso",
+            get(console_auth::tenant_sso_info),
+        )
         .with_state(console_oidc_state);
 
-    // Merge S3 routes with shared layers. Iceberg and Delta Sharing are nested
-    // OUTSIDE the SigV4 auth layer — they use their own auth (OAuth/bearer tokens)
-    // so standard clients (PyIceberg, Spark, Trino) can connect without SigV4.
-    let app = if !args.no_auth {
+    // ============================================================
+    // Multi-listener composition
+    //
+    // Layout:
+    //   data    (--listen)                : S3 + Iceberg + Unity + Delta Sharing + /health
+    //   admin   (--admin-listen)          : /_admin/* + /metrics + /health
+    //   ops     (--ops-console-listen)    : /_console/* SPA + /_console/api/* + /_admin/* + /health
+    //   tenant  (--tenant-console-listen) : same shape as ops, different SPA bundle
+    //
+    // Legacy single-port mode (no split flag set): everything is merged
+    // onto --listen, identical to pre-split deployments.
+    // ============================================================
+    if !args.no_auth {
         info!("Authentication is ENABLED (credentials from metadata service)");
         info!("Admin API is ENABLED (requires 'admin' user credentials)");
-        info!("Metrics endpoint: /metrics (no auth)");
         info!("Iceberg REST Catalog: /iceberg/v1/* (no SigV4, use OAuth/bearer)");
-        // Protected routes (SigV4 auth applied) — S3 API only
-        let protected = Router::new()
-            .merge(s3_routes)
-            .layer(middleware::from_fn(chunked_decode::s3_chunked_decode_layer))
-            .layer(body_limit)
-            .layer(middleware::from_fn_with_state(auth_state, auth_layer));
-        // Unprotected: Iceberg + Delta Sharing use their own auth
-        // Console: static SPA served from /_console/
-        let console_service = tower_http::services::ServeDir::new(
-            std::env::var("OBJECTIO_CONSOLE_DIR")
-                .unwrap_or_else(|_| "/usr/share/objectio/console".to_string()),
-        )
-        .fallback(tower_http::services::ServeFile::new(format!(
-            "{}/index.html",
-            std::env::var("OBJECTIO_CONSOLE_DIR")
-                .unwrap_or_else(|_| "/usr/share/objectio/console".to_string())
-        )));
-
-        let iceberg_gated = iceberg_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::Iceberg),
-            license_gate::feature_gate,
-        ));
-        // Unity shares the Iceberg feature flag — same metadata surface,
-        // alternate REST shape.
-        let unity_gated = unity_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::Iceberg),
-            license_gate::feature_gate,
-        ));
-        let delta_gated = delta_sharing_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-            license_gate::feature_gate,
-        ));
-        let delta_admin_gated = delta_sharing_admin_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-            license_gate::feature_gate,
-        ));
-        Router::new()
-            .merge(protected)
-            .merge(admin_routes)
-            .merge(console_api_routes)
-            .merge(console_oidc_routes)
-            .nest("/iceberg", iceberg_gated)
-            .merge(unity_gated)
-            .nest("/delta-sharing", delta_gated)
-            .nest("/_admin/delta-sharing", delta_admin_gated)
-            .nest_service("/_console", console_service)
-            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
-            .layer(TraceLayer::new_for_http())
     } else {
         info!("Authentication is DISABLED (development mode)");
         info!("Admin API is ENABLED (no auth required in dev mode)");
-        info!("Metrics endpoint: /metrics");
-        let console_service_noauth = tower_http::services::ServeDir::new(
-            std::env::var("OBJECTIO_CONSOLE_DIR")
-                .unwrap_or_else(|_| "/usr/share/objectio/console".to_string()),
-        )
-        .fallback(tower_http::services::ServeFile::new(format!(
-            "{}/index.html",
-            std::env::var("OBJECTIO_CONSOLE_DIR")
-                .unwrap_or_else(|_| "/usr/share/objectio/console".to_string())
-        )));
+    }
 
-        let iceberg_gated = iceberg_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::Iceberg),
-            license_gate::feature_gate,
-        ));
-        let unity_gated = unity_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::Iceberg),
-            license_gate::feature_gate,
-        ));
-        let delta_gated = delta_sharing_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-            license_gate::feature_gate,
-        ));
-        let delta_admin_gated = delta_sharing_admin_router.layer(middleware::from_fn_with_state(
-            (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
-            license_gate::feature_gate,
-        ));
-        Router::new()
-            .merge(s3_routes)
-            .merge(admin_routes)
-            .merge(console_api_routes)
-            .merge(console_oidc_routes)
-            .nest("/iceberg", iceberg_gated)
-            .merge(unity_gated)
-            .nest("/delta-sharing", delta_gated)
-            .nest("/_admin/delta-sharing", delta_admin_gated)
-            .nest_service("/_console", console_service_noauth)
-            .layer(middleware::from_fn(chunked_decode::s3_chunked_decode_layer))
-            .layer(body_limit)
-            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
-            .layer(TraceLayer::new_for_http())
+    // License-gated wrappers — built once, cloned into each composite
+    // router that exposes them.
+    let iceberg_gated = iceberg_router.layer(middleware::from_fn_with_state(
+        (Arc::clone(&state), objectio_license::Feature::Iceberg),
+        license_gate::feature_gate,
+    ));
+    let unity_gated = unity_router.layer(middleware::from_fn_with_state(
+        (Arc::clone(&state), objectio_license::Feature::Iceberg),
+        license_gate::feature_gate,
+    ));
+    let delta_gated = delta_sharing_router.layer(middleware::from_fn_with_state(
+        (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
+        license_gate::feature_gate,
+    ));
+    let delta_admin_gated = delta_sharing_admin_router.layer(middleware::from_fn_with_state(
+        (Arc::clone(&state), objectio_license::Feature::DeltaSharing),
+        license_gate::feature_gate,
+    ));
+
+    // SPA dirs.
+    //   OBJECTIO_CONSOLE_DIR        — legacy single-bundle (default for legacy mode)
+    //   OBJECTIO_OPS_CONSOLE_DIR    — ops bundle for --ops-console-listen
+    //   OBJECTIO_TENANT_CONSOLE_DIR — tenant bundle for --tenant-console-listen
+    let legacy_console_dir = std::env::var("OBJECTIO_CONSOLE_DIR")
+        .unwrap_or_else(|_| "/usr/share/objectio/console".to_string());
+    let ops_console_dir = std::env::var("OBJECTIO_OPS_CONSOLE_DIR")
+        .unwrap_or_else(|_| format!("{legacy_console_dir}/ops"));
+    let tenant_console_dir = std::env::var("OBJECTIO_TENANT_CONSOLE_DIR")
+        .unwrap_or_else(|_| format!("{legacy_console_dir}/tenant"));
+
+    let console_service = |dir: &str| {
+        tower_http::services::ServeDir::new(dir)
+            .fallback(tower_http::services::ServeFile::new(format!("{dir}/index.html")))
     };
 
-    // Parse listen address
-    let addr: SocketAddr = args
+    // S3-side layer stack (chunked-decode + body limit + optional SigV4 auth).
+    let build_s3_protected = || {
+        let r = Router::new()
+            .merge(s3_routes.clone())
+            .layer(middleware::from_fn(chunked_decode::s3_chunked_decode_layer))
+            .layer(body_limit);
+        if args.no_auth {
+            r
+        } else {
+            r.layer(middleware::from_fn_with_state(
+                Arc::clone(&auth_state),
+                auth_layer,
+            ))
+        }
+    };
+
+    // Parse the optional split-mode addrs.
+    let parse_opt = |label: &str, val: &str| -> Result<Option<SocketAddr>> {
+        if val.is_empty() {
+            Ok(None)
+        } else {
+            val.parse::<SocketAddr>()
+                .map(Some)
+                .map_err(|e| anyhow::anyhow!("Invalid {label}={val}: {e}"))
+        }
+    };
+    let admin_addr = parse_opt("--admin-listen", &args.admin_listen)?;
+    let ops_console_addr = parse_opt("--ops-console-listen", &args.ops_console_listen)?;
+    let tenant_console_addr = parse_opt("--tenant-console-listen", &args.tenant_console_listen)?;
+    let split_mode =
+        admin_addr.is_some() || ops_console_addr.is_some() || tenant_console_addr.is_some();
+
+    let data_addr: SocketAddr = args
         .listen
         .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid listen address {}: {}", args.listen, e))?;
+        .map_err(|e| anyhow::anyhow!("Invalid --listen {}: {}", args.listen, e))?;
 
-    info!("Starting S3 API server on {}", addr);
+    // Each entry: (bind addr, router, label-for-logs).
+    let mut listeners: Vec<(SocketAddr, Router, &'static str)> = Vec::new();
 
-    // Start server
-    let listener = TcpListener::bind(addr).await?;
+    if !split_mode {
+        // ---------- Legacy single-port: everything on --listen ----------
+        // ListenerKind::Legacy = no audience gating on console_login /
+        // oidc_callback (preserves pre-split behavior — any creds work
+        // anywhere because there IS only one "anywhere").
+        let combined = Router::new()
+            .merge(build_s3_protected())
+            .merge(admin_routes.clone())
+            .merge(console_api_routes.clone())
+            .merge(console_oidc_routes.clone())
+            .nest("/iceberg", iceberg_gated.clone())
+            .merge(unity_gated.clone())
+            .nest("/delta-sharing", delta_gated.clone())
+            .nest("/_admin/delta-sharing", delta_admin_gated.clone())
+            .nest_service("/_console", console_service(&legacy_console_dir))
+            .route("/metrics", get(metrics_handler))
+            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
+            .layer(Extension(ListenerKind::Legacy))
+            .layer(TraceLayer::new_for_http());
+        listeners.push((data_addr, combined, "data (legacy: + admin + console)"));
+    } else {
+        // ---------- Split mode ----------
+        // Data plane only.
+        let data_router = Router::new()
+            .merge(build_s3_protected())
+            .nest("/iceberg", iceberg_gated.clone())
+            .merge(unity_gated.clone())
+            .nest("/delta-sharing", delta_gated.clone())
+            .layer(middleware::from_fn(metrics_middleware::metrics_layer))
+            .layer(Extension(ListenerKind::Data))
+            .layer(TraceLayer::new_for_http());
+        listeners.push((data_addr, data_router, "data plane (S3 + Iceberg + Delta Sharing)"));
 
-    // Apply warehouse prefix rewrite as a tower service wrapper (runs before Axum routing)
-    let app = tower::ServiceBuilder::new()
-        .layer(warehouse_rewrite)
-        .service(app);
+        if let Some(addr) = admin_addr {
+            if addr.ip().is_unspecified() {
+                warn!(
+                    "--admin-listen is bound to {} (all interfaces) — for production, \
+                     pin it to a management interface so the admin API isn't internet-reachable.",
+                    addr
+                );
+            }
+            let admin_only = Router::new()
+                .route("/health", get(s3::health_check))
+                .route("/metrics", get(metrics_handler))
+                .merge(admin_routes.clone())
+                .merge(console_api_routes.clone())
+                .merge(console_oidc_routes.clone())
+                .nest("/_admin/delta-sharing", delta_admin_gated.clone())
+                .layer(Extension(ListenerKind::AdminApi))
+                .layer(TraceLayer::new_for_http());
+            listeners.push((addr, admin_only, "admin API + metrics"));
+        }
 
-    axum::serve(listener, tower::make::Shared::new(app))
-        .with_graceful_shutdown(async move {
-            shutdown.await;
-            info!("Shutting down...");
-        })
-        .await?;
+        if let Some(addr) = ops_console_addr {
+            if addr.ip().is_unspecified() {
+                warn!(
+                    "--ops-console-listen is bound to {} — for production, pin to a \
+                     management interface (the ops console is for system admins, not end users).",
+                    addr
+                );
+            }
+            info!("Ops console SPA: {}", ops_console_dir);
+            let ops_router = Router::new()
+                .route("/health", get(s3::health_check))
+                .merge(admin_routes.clone())
+                .merge(console_api_routes.clone())
+                .merge(console_oidc_routes.clone())
+                .nest("/_admin/delta-sharing", delta_admin_gated.clone())
+                .nest_service("/_console", console_service(&ops_console_dir))
+                .layer(Extension(ListenerKind::OpsConsole))
+                .layer(TraceLayer::new_for_http());
+            listeners.push((addr, ops_router, "ops console"));
+        }
+
+        if let Some(addr) = tenant_console_addr {
+            info!("Tenant console SPA: {}", tenant_console_dir);
+            let tenant_router = Router::new()
+                .route("/health", get(s3::health_check))
+                // Tenant console mounts the same `/_admin/*` surface; the
+                // handlers themselves enforce per-tenant scoping
+                // (see `require_tenant_admin_access`). The bundle that
+                // ships from `/_console/` only exposes tenant-relevant
+                // pages so end users never see system-admin views, and
+                // `console_login` refuses system-admin AK/SK here so the
+                // public listener can't mint admin sessions.
+                .merge(admin_routes.clone())
+                .merge(console_api_routes.clone())
+                .merge(console_oidc_routes.clone())
+                .nest("/_admin/delta-sharing", delta_admin_gated.clone())
+                .nest_service("/_console", console_service(&tenant_console_dir))
+                .layer(Extension(ListenerKind::TenantConsole))
+                .layer(TraceLayer::new_for_http());
+            listeners.push((addr, tenant_router, "tenant console"));
+        }
+    }
+
+    // Bind all listeners and serve concurrently. A shared broadcast channel
+    // fans the user's shutdown future out to every axum::serve.
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(listeners.len().max(1));
+    let mut tasks = Vec::with_capacity(listeners.len());
+    for (addr, router, label) in listeners {
+        let listener = TcpListener::bind(addr).await?;
+        info!("Listener: {label} on {addr}");
+        // Iceberg path rewrite (`/iceberg/v1/ws/{wh}/...` →
+        // `/iceberg/v1/...?warehouse={wh}`) is harmless on listeners
+        // that don't serve Iceberg, but cheap to apply universally.
+        let app = tower::ServiceBuilder::new()
+            .layer(warehouse_rewrite.clone())
+            .service(router);
+        let mut rx = shutdown_tx.subscribe();
+        tasks.push(tokio::spawn(async move {
+            axum::serve(listener, tower::make::Shared::new(app))
+                .with_graceful_shutdown(async move {
+                    let _ = rx.recv().await;
+                })
+                .await
+        }));
+    }
+
+    // Wait for caller-provided shutdown future, then fan out to all listeners.
+    shutdown.await;
+    info!("Shutting down all listeners...");
+    let _ = shutdown_tx.send(());
+
+    for t in tasks {
+        match t.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("Listener exited with error: {}", e),
+            Err(e) => warn!("Listener task join error: {}", e),
+        }
+    }
 
     info!("Gateway shut down gracefully");
 
