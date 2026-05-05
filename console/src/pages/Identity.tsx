@@ -99,7 +99,9 @@ export default function Identity() {
       setAdminRolesStr(p.value.admin_roles?.join(", ") || "");
       setEditing(name);
     } else {
-      setProviderName("");
+      // Tenant admins own exactly the slug `t-{tenant}`; system admin
+      // can pick any name.
+      setProviderName(sessionTenant ? `t-${sessionTenant.toLowerCase()}` : "");
       setForm({ ...emptyProvider });
       setAdminRolesStr("");
       setEditing("__new__");
@@ -113,20 +115,14 @@ export default function Identity() {
       ...form,
       admin_roles: adminRolesStr.split(",").map((s) => s.trim()).filter(Boolean),
     };
+    // For tenant admins, the gateway auto-binds tenant.oidc_provider when
+    // the slug `identity/openid/t-{tenant}` is PUT, so no separate
+    // tenant-update call is required.
     await fetch(`/_admin/config/identity/openid/${providerName}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
-    // If tenant user, auto-assign this provider to their tenant
-    if (sessionTenant && editing === "__new__") {
-      await fetch(`/_admin/tenants/${sessionTenant}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: sessionTenant, oidc_provider: providerName }),
-      });
-    }
 
     setEditing(null);
     load();
@@ -179,10 +175,15 @@ export default function Identity() {
               <input
                 value={providerName}
                 onChange={(e) => setProviderName(e.target.value)}
-                disabled={editing !== "__new__"}
+                disabled={editing !== "__new__" || !!sessionTenant}
                 placeholder="e.g. entra, keycloak, okta"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none disabled:bg-gray-100"
               />
+              {sessionTenant && editing === "__new__" && (
+                <p className="mt-1 text-xs text-gray-500">
+                  Tenant-owned providers are auto-named <code>t-{sessionTenant.toLowerCase()}</code>.
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Display Name</label>

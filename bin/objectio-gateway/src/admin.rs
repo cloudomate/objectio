@@ -159,9 +159,21 @@ pub async fn admin_list_config(
     headers: HeaderMap,
     Query(params): Query<ListConfigParams>,
 ) -> Response {
-    if let Some(deny) = require_system_admin(&auth, &headers) {
-        return deny;
-    }
+    // Tenant admins can list ONLY their own tenant's OIDC config keys (so
+    // the Identity page can render them). Anything else stays system-admin
+    // gated.
+    let caller = extract_caller(&auth, &headers);
+    let scoped_keys: Option<Vec<String>> = if is_system_admin(&caller) {
+        None
+    } else if caller.authenticated {
+        let keys = caller_tenant_oidc_config_keys(&state, &auth, &headers).await;
+        if keys.is_empty() {
+            return Json::<Vec<serde_json::Value>>(Vec::new()).into_response();
+        }
+        Some(keys)
+    } else {
+        return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    };
 
     let mut client = state.meta_client.clone();
     match client
@@ -174,6 +186,7 @@ pub async fn admin_list_config(
             let entries = resp.into_inner().entries;
             let result: Vec<serde_json::Value> = entries
                 .iter()
+                .filter(|e| scoped_keys.as_ref().is_none_or(|ks| ks.contains(&e.key)))
                 .map(|e| {
                     let value = redact_if_secret(&e.key, &e.value);
                     serde_json::json!({
@@ -201,8 +214,16 @@ pub async fn admin_get_config(
     headers: HeaderMap,
     Path(section): Path<String>,
 ) -> Response {
-    if let Some(deny) = require_system_admin(&auth, &headers) {
-        return deny;
+    let caller = extract_caller(&auth, &headers);
+    if !is_system_admin(&caller) {
+        if !caller.authenticated {
+            return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+        }
+        // Tenant admins can read ONLY their own tenant's OIDC config keys.
+        let allowed = caller_tenant_oidc_config_keys(&state, &auth, &headers).await;
+        if !allowed.contains(&section) {
+            return (StatusCode::FORBIDDEN, "System admin access required").into_response();
+        }
     }
 
     let mut client = state.meta_client.clone();
@@ -246,8 +267,19 @@ pub async fn admin_set_config(
     Path(section): Path<String>,
     body: Bytes,
 ) -> Response {
-    if let Some(deny) = require_system_admin(&auth, &headers) {
-        return deny;
+    let caller = extract_caller(&auth, &headers);
+    if !is_system_admin(&caller) {
+        if !caller.authenticated {
+            return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+        }
+        // Tenant admins can manage ONLY their own tenant's OIDC config —
+        // they cannot wire a different provider name (which would not be
+        // bound to any tenant) or touch non-OIDC config like balancer
+        // tuning.
+        let allowed = caller_tenant_oidc_config_keys(&state, &auth, &headers).await;
+        if !allowed.contains(&section) {
+            return (StatusCode::FORBIDDEN, "System admin access required").into_response();
+        }
     }
 
     // Enterprise gates on specific config keys. `identity/openid/*` controls
@@ -282,6 +314,44 @@ pub async fn admin_set_config(
         Ok(resp) => {
             let entry = resp.into_inner().entry;
             info!("Config updated: {}", section);
+
+            // Slug bootstrap: if the caller is a tenant user (not the
+            // system admin) and just PUT their tenant's slug-style OIDC
+            // key `identity/openid/t-{tenant}`, auto-bind the tenant's
+            // `oidc_provider` field to it. This lets a tenant admin
+            // create their first OIDC config without needing the system
+            // admin to wire it up.
+            if !is_system_admin(&caller)
+                && let Some((tenant_name, slug_key)) = caller_tenant_slug_key(&auth, &headers)
+                && section == slug_key
+            {
+                let slug = tenant_oidc_slug(&tenant_name);
+                if let Ok(t_resp) = client
+                    .clone()
+                    .get_tenant(GetTenantRequest {
+                        name: tenant_name.clone(),
+                    })
+                    .await
+                    && let Some(mut tenant) = t_resp.into_inner().tenant
+                    && tenant.oidc_provider != slug
+                {
+                    tenant.oidc_provider = slug;
+                    if let Err(e) = client
+                        .update_tenant(UpdateTenantRequest {
+                            tenant: Some(tenant),
+                        })
+                        .await
+                    {
+                        warn!(
+                            "Slug-bound OIDC saved but tenant binding update failed for '{}': {}",
+                            tenant_name, e
+                        );
+                    } else {
+                        info!("Auto-bound tenant '{}' to OIDC provider slug", tenant_name);
+                    }
+                }
+            }
+
             if let Some(entry) = entry {
                 let value = redact_if_secret(&entry.key, &entry.value);
                 Json(serde_json::json!({
@@ -308,8 +378,15 @@ pub async fn admin_delete_config(
     headers: HeaderMap,
     Path(section): Path<String>,
 ) -> Response {
-    if let Some(deny) = require_system_admin(&auth, &headers) {
-        return deny;
+    let caller = extract_caller(&auth, &headers);
+    if !is_system_admin(&caller) {
+        if !caller.authenticated {
+            return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+        }
+        let allowed = caller_tenant_oidc_config_keys(&state, &auth, &headers).await;
+        if !allowed.contains(&section) {
+            return (StatusCode::FORBIDDEN, "System admin access required").into_response();
+        }
     }
 
     let mut client = state.meta_client.clone();
@@ -495,6 +572,70 @@ pub fn require_system_admin(
         return None;
     }
     Some((StatusCode::FORBIDDEN, "System admin access required").into_response())
+}
+
+/// Slug-style provider name reserved for a tenant's own OIDC config.
+/// Tenant admins can create/manage exactly `identity/openid/{slug}` where
+/// slug is `t-{tenant_name}`. The `t-` prefix is a namespace marker so
+/// tenant-owned configs can never collide with system-admin-named ones.
+fn tenant_oidc_slug(tenant: &str) -> String {
+    format!("t-{}", tenant.to_lowercase())
+}
+
+/// The OIDC provider config keys the caller is allowed to read/manage when
+/// they're a tenant admin (not the system admin). Returns:
+///   - the tenant's slug-owned key `identity/openid/t-{tenant}` (always
+///     allowed; tenant admin may bootstrap their own provider here), and
+///   - the key for `tenant.oidc_provider` if it's set to anything else
+///     (so a system-admin-provisioned provider stays visible/manageable
+///     by the tenant admin who uses it).
+///
+/// Returns an empty Vec if the caller is unauthenticated or has no tenant.
+async fn caller_tenant_oidc_config_keys(
+    state: &AppState,
+    auth: &Option<Extension<AuthResult>>,
+    headers: &axum::http::HeaderMap,
+) -> Vec<String> {
+    let caller = extract_caller(auth, headers);
+    if !caller.authenticated || caller.tenant.is_empty() {
+        return Vec::new();
+    }
+    let mut keys = vec![format!(
+        "identity/openid/{}",
+        tenant_oidc_slug(&caller.tenant)
+    )];
+    if let Ok(resp) = state
+        .meta_client
+        .clone()
+        .get_tenant(GetTenantRequest {
+            name: caller.tenant.clone(),
+        })
+        .await
+        && let Some(t) = resp.into_inner().tenant
+        && !t.oidc_provider.is_empty()
+    {
+        let bound = format!("identity/openid/{}", t.oidc_provider);
+        if !keys.contains(&bound) {
+            keys.push(bound);
+        }
+    }
+    keys
+}
+
+/// Tenant slug key for the caller, if they have a tenant scope. Used by
+/// `admin_set_config` to detect when the caller just PUT their own slug
+/// and auto-bind it to the tenant.
+fn caller_tenant_slug_key(
+    auth: &Option<Extension<AuthResult>>,
+    headers: &axum::http::HeaderMap,
+) -> Option<(String, String)> {
+    let caller = extract_caller(auth, headers);
+    if !caller.authenticated || caller.tenant.is_empty() {
+        return None;
+    }
+    let slug = tenant_oidc_slug(&caller.tenant);
+    let key = format!("identity/openid/{slug}");
+    Some((caller.tenant, key))
 }
 
 /// Extract tenant from SigV4 auth or session cookie. Empty = system admin.
