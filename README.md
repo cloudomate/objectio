@@ -81,7 +81,7 @@ VERSION=v0.1.0
 OS=$(uname | tr '[:upper:]' '[:lower:]' | sed 's/darwin/darwin/;s/linux/linux/')
 ARCH=$(uname | tr '[:upper:]' '[:lower:]' | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')
 curl -L -o objectio-aio \
-   "https://github.com/cloudomate/objectio/releases/download/${VERSION}/objectio-aio-${VERSION}-${OS}-${ARCH}"
+    "https://github.com/cloudomate/objectio/releases/download/${VERSION}/objectio-aio-${VERSION}-${OS}-${ARCH}"
 chmod +x objectio-aio
 sudo mv objectio-aio /usr/local/bin/
 objectio-aio
@@ -94,9 +94,9 @@ The banner prints:
 ```
 ━━━ ObjectIO ready ━━━
   S3 / Iceberg / Delta / Unity : http://localhost:9000
-  Console                        : http://localhost:9000/_console/
-  Admin access key               : AKIA...
-  Admin secret key               : ...
+  Console                         : http://localhost:9000/_console/
+  Admin access key                : AKIA...
+  Admin secret key                : ...
   AWS_ACCESS_KEY_ID=AKIA... AWS_SECRET_ACCESS_KEY=... \
     aws --endpoint-url http://localhost:9000 s3 mb s3://test
 ```
@@ -109,8 +109,8 @@ cleanly.
 
 ```sh
 helm install objectio oci://ghcr.io/cloudomate/charts/objectio \
-  --version 0.1.0 \
-  -f your-values.yaml
+   --version 0.1.0 \
+   -f your-values.yaml
 ```
 
 Or for a local-dev cluster that exercises the same chart against kind:
@@ -135,7 +135,7 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/
 #   http://localhost:9000/iceberg/v1
 # Create a warehouse first:
 curl -s -u $AK:$SK -X POST -H 'Content-Type: application/json' \
-   -d '{"name":"analytics"}' \
+    -d '{"name":"analytics"}' \
   http://localhost:9000/_admin/warehouses
 
 # Delta Sharing (bearer-token auth)
@@ -166,17 +166,23 @@ Source: [cloudomate/objectio-docs](https://github.com/cloudomate/objectio-docs).
 
 ## License
 
-Dual-licensed:
+This repository uses a split licensing model:
 
-- **Apache 2.0** — everything outside `enterprise/`
+- **Apache 2.0** — everything outside `enterprise/`; fully open-source,
+  free to use, modify, and distribute
 - **BUSL 1.1** — `enterprise/crates/objectio-iceberg`,
-   `enterprise/crates/objectio-delta-sharing`, and
-   `enterprise/crates/objectio-unity-catalog`; converts to Apache-2.0
-  on 2030-04-18. BUSL permits reading, self-hosting, and modifying;
-  it only restricts offering the Enterprise features as a competing
-  paid managed service.
+    `enterprise/crates/objectio-delta-sharing`, and
+    `enterprise/crates/objectio-unity-catalog`; source-available with
+  an additional-use grant (you may run it internally), but you may not
+  offer it as a competing paid managed service
 
-Enterprise features additionally require an Ed25519-signed license at
-runtime; without one, those endpoints return `403
-EnterpriseLicenseRequired`. See [NOTICE](./NOTICE) for the split and
-`docs.objectio.io` for the full licensing + tiering reference.
+On **2030-04-18** the BUSL-licensed files automatically convert to
+Apache 2.0 under the BUSL change-license clause.
+
+Enterprise features are also gated at runtime by an Ed25519-signed
+license file; without one, those endpoints return `403
+EnterpriseLicenseRequired`. Install a license through the console or
+`PUT /_admin/license`.
+
+See [NOTICE](./NOTICE) for the full licensing split and
+[docs.objectio.io](https://docs.objectio.io) for tiering details.
