@@ -1,12 +1,18 @@
 # ObjectIO
 
 **Unified software-defined storage in Rust.** One cluster, one binary per
-service, four protocols on a shared erasure-coded durability core:
+service, six protocols on a shared erasure-coded durability core:
 
 - **S3** — wire-compatible with AWS S3 (SigV4, multipart, policies, SSE)
 - **Apache Iceberg REST Catalog** — embedded; warehouse creation
   auto-provisions its backing bucket
-- **Delta Sharing** — read-only table sharing over bearer tokens
+- **Delta Lake** — native `_delta_log/` tables + uniform Delta over
+  Iceberg; shares data via the Delta Sharing protocol
+- **Delta Sharing** — open protocol, bearer-token auth, presigned S3
+  URLs for recipients
+- **Unity Catalog** — Databricks-compatible REST surface at
+  `/api/2.1/unity-catalog/`; three-level governance (catalog.schema.table),
+  row filters, column masks, default deny-direct-S3
 - **Block** — iSCSI, NVMe-oF, NBD attachment targets with thin
   provisioning, snapshots, clones, per-volume QoS
 
@@ -25,10 +31,27 @@ service. No JVM, no Go runtime, no external kv store.
 - **Iceberg REST Catalog** — `/iceberg/v1/*`; works with Spark, Trino,
   PyIceberg, Flink; IAM-style policies at namespace + table level;
   vended credentials
+- **Delta Lake** — native `_delta_log/` tables + uniform Delta over
+  Iceberg; shares data via the Delta Sharing protocol
 - **Delta Sharing server** — open protocol, bearer-token auth,
   presigned S3 URLs for recipients
+- **Unity Catalog** — Databricks-compatible REST surface at
+  `/api/2.1/unity-catalog/`; three-level governance (catalog.schema.table),
+  row filters, column masks, default deny-direct-S3 on backing buckets,
+  OIDC group bridging, full CRUD for catalogs/schemas/tables/volumes/models
 - **Distributed block volumes** — snapshots, writable clones, thin
   provisioning, QoS (IOPS + bandwidth)
+- **Pluggable grep engines** — regex (default), PCRE2, Hyperscan; prefix
+  grep with pagination; stream grep across many keys
+- **io_uring** — async I/O hot path on Linux via io_uring
+- **Split control plane** — gateway can bind 4 separate listeners
+  (data plane, admin, ops console, tenant console); audience gating
+  between ops and tenant surfaces
+- **Two-bundle console** — React SPA split into ops (system admin) and
+  tenant (end-user) bundles; ops refuses tenant creds, tenant refuses
+  admin creds
+- **Slug-style BYO-OIDC** — per-tenant OIDC providers with tenant admin
+  configuration
 - **Raft metadata** — single-pod dev mode or 3+-pod HA; no external
   service dependency
 - **Encryption at rest** — SSE-S3, SSE-C, SSE-KMS (local or external
@@ -56,9 +79,9 @@ Ideal for laptops, demos, smoke tests, and appliance deployments.
 ```sh
 VERSION=v0.1.0
 OS=$(uname | tr '[:upper:]' '[:lower:]' | sed 's/darwin/darwin/;s/linux/linux/')
-ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')
+ARCH=$(uname | tr '[:upper:]' '[:lower:]' | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/arm64/arm64/')
 curl -L -o objectio-aio \
-  "https://github.com/cloudomate/objectio/releases/download/${VERSION}/objectio-aio-${VERSION}-${OS}-${ARCH}"
+   "https://github.com/cloudomate/objectio/releases/download/${VERSION}/objectio-aio-${VERSION}-${OS}-${ARCH}"
 chmod +x objectio-aio
 sudo mv objectio-aio /usr/local/bin/
 objectio-aio
@@ -70,10 +93,10 @@ The banner prints:
 
 ```
 ━━━ ObjectIO ready ━━━
-  S3 / Iceberg / Delta Sharing : http://localhost:9000
-  Console                       : http://localhost:9000/_console/
-  Admin access key              : AKIA...
-  Admin secret key              : ...
+  S3 / Iceberg / Delta / Unity : http://localhost:9000
+  Console                        : http://localhost:9000/_console/
+  Admin access key               : AKIA...
+  Admin secret key               : ...
   AWS_ACCESS_KEY_ID=AKIA... AWS_SECRET_ACCESS_KEY=... \
     aws --endpoint-url http://localhost:9000 s3 mb s3://test
 ```
@@ -112,8 +135,14 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/
 #   http://localhost:9000/iceberg/v1
 # Create a warehouse first:
 curl -s -u $AK:$SK -X POST -H 'Content-Type: application/json' \
-  -d '{"name":"analytics"}' \
+   -d '{"name":"analytics"}' \
   http://localhost:9000/_admin/warehouses
+
+# Delta Sharing (bearer-token auth)
+#   http://localhost:9000/delta-sharing/v1/
+
+# Unity Catalog (Databricks-compatible REST)
+#   http://localhost:9000/api/2.1/unity-catalog/
 ```
 
 ### Building from source
@@ -124,7 +153,7 @@ brew install nasm autoconf automake libtool llvm protobuf
 # Ubuntu / Debian
 sudo apt-get install build-essential nasm autoconf automake libtool libclang-dev protobuf-compiler
 
-cargo build --workspace --release --features isal   # omit --features on ARM
+cargo build --workspace --release --features isal    # omit --features on ARM
 ```
 
 ## Documentation
@@ -140,8 +169,9 @@ Source: [cloudomate/objectio-docs](https://github.com/cloudomate/objectio-docs).
 Dual-licensed:
 
 - **Apache 2.0** — everything outside `enterprise/`
-- **BUSL 1.1** — `enterprise/crates/objectio-iceberg` and
-  `enterprise/crates/objectio-delta-sharing`; converts to Apache-2.0
+- **BUSL 1.1** — `enterprise/crates/objectio-iceberg`,
+   `enterprise/crates/objectio-delta-sharing`, and
+   `enterprise/crates/objectio-unity-catalog`; converts to Apache-2.0
   on 2030-04-18. BUSL permits reading, self-hosting, and modifying;
   it only restricts offering the Enterprise features as a competing
   paid managed service.
