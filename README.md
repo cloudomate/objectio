@@ -156,13 +156,6 @@ sudo apt-get install build-essential nasm autoconf automake libtool libclang-dev
 cargo build --workspace --release --features isal    # omit --features on ARM
 ```
 
-## Documentation
-
-Everything else — installation topologies, operations, admin API,
-Iceberg catalog management, authentication setup, TOGAF-aligned
-architecture docs — lives at **[docs.objectio.io](https://docs.objectio.io)**.
-
-Source: [cloudomate/objectio-docs](https://github.com/cloudomate/objectio-docs).
 
 ## License
 
@@ -183,6 +176,3 @@ Enterprise features are also gated at runtime by an Ed25519-signed
 license file; without one, those endpoints return `403
 EnterpriseLicenseRequired`. Install a license through the console or
 `PUT /_admin/license`.
-
-See [NOTICE](./NOTICE) for the full licensing split and
-[docs.objectio.io](https://docs.objectio.io) for tiering details.
