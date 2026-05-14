@@ -16,7 +16,7 @@ service, six protocols on a shared erasure-coded durability core:
 - **Block** — iSCSI, NVMe-oF, NBD attachment targets with thin
   provisioning, snapshots, clones, per-volume QoS
 
-Everything runs on top of topology-aware, failure-domain-hardened
+Everything runs on top a topology-aware, failure-domain-hardened
 erasure coding (Reed-Solomon, LRC) with a Raft-consensus metadata
 service. No JVM, no Go runtime, no external kv store.
 
