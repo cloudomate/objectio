@@ -85,6 +85,7 @@ pub enum S3Operation {
     CompleteMultipartUpload,
     AbortMultipartUpload,
     ListParts,
+    ListMultipartUploads,
     DeleteObjects,
 }
 
@@ -106,6 +107,7 @@ impl S3Operation {
             S3Operation::CompleteMultipartUpload => "CompleteMultipartUpload",
             S3Operation::AbortMultipartUpload => "AbortMultipartUpload",
             S3Operation::ListParts => "ListParts",
+            S3Operation::ListMultipartUploads => "ListMultipartUploads",
             S3Operation::DeleteObjects => "DeleteObjects",
         }
     }

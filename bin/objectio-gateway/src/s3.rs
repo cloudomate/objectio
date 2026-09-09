@@ -835,6 +835,17 @@ pub struct ListObjectsParams {
     lifecycle: Option<String>,
     /// If present, this is a get bucket encryption request
     encryption: Option<String>,
+    /// If present (even empty), this is a ListMultipartUploads request
+    uploads: Option<String>,
+    /// Key marker for ListMultipartUploads pagination
+    #[serde(rename = "key-marker")]
+    key_marker: Option<String>,
+    /// Upload ID marker for ListMultipartUploads pagination
+    #[serde(rename = "upload-id-marker")]
+    upload_id_marker: Option<String>,
+    /// Max uploads per page for ListMultipartUploads
+    #[serde(rename = "max-uploads")]
+    max_uploads: Option<u32>,
 }
 
 impl ListObjectsParams {
@@ -1146,7 +1157,6 @@ pub struct PartItem {
 /// Response for ListMultipartUploads
 #[derive(Serialize)]
 #[serde(rename = "ListMultipartUploadsResult")]
-#[allow(dead_code)]
 pub struct ListMultipartUploadsResult {
     #[serde(rename = "Bucket")]
     pub bucket: String,
@@ -1160,6 +1170,11 @@ pub struct ListMultipartUploadsResult {
     #[serde(rename = "NextUploadIdMarker")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_upload_id_marker: Option<String>,
+    #[serde(rename = "Delimiter")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
+    #[serde(rename = "Prefix")]
+    pub prefix: String,
     #[serde(rename = "MaxUploads")]
     pub max_uploads: u32,
     #[serde(rename = "IsTruncated")]
@@ -1171,7 +1186,6 @@ pub struct ListMultipartUploadsResult {
 
 /// Upload item in ListMultipartUploads response
 #[derive(Serialize)]
-#[allow(dead_code)]
 pub struct UploadItem {
     #[serde(rename = "Key")]
     pub key: String,
@@ -1584,6 +1598,14 @@ pub async fn list_objects(
     }
     if params.encryption.is_some() {
         return get_bucket_encryption_internal(state, bucket).await;
+    }
+    // ?uploads is ListMultipartUploads, NOT an object listing. Falling
+    // through to the object listing here hands clients (geesefs aborts
+    // stale uploads at mount) a truncated ListBucketResult whose
+    // NextContinuationToken they cannot use as a key marker, so they
+    // re-issue the same request forever.
+    if params.uploads.is_some() {
+        return list_multipart_uploads_internal(state, bucket, &params, auth.as_ref()).await;
     }
     if params.versions.is_some() {
         return list_object_versions_internal(
@@ -5716,16 +5738,8 @@ pub async fn get_object_with_params(
     // If key is empty (trailing slash on bucket), treat as list_objects
     if key.is_empty() {
         let list_params = ListObjectsParams {
-            prefix: None,
-            delimiter: None,
             max_keys: params.max_parts,
-            continuation_token: None,
-            policy: None,
-            versions: None,
-            versioning: None,
-            object_lock: None,
-            lifecycle: None,
-            encryption: None,
+            ..Default::default()
         };
         return list_objects(State(state), Path(bucket), Query(list_params), auth).await;
     }
@@ -5893,21 +5907,51 @@ async fn abort_multipart_upload_internal(
     }
 }
 
-/// GET /{bucket}?uploads - List multipart uploads
-#[allow(dead_code)]
-pub async fn list_multipart_uploads(
-    State(state): State<Arc<AppState>>,
-    Path(bucket): Path<String>,
+/// GET /{bucket}?uploads - List multipart uploads.
+///
+/// Dispatched from [`list_objects`] when `?uploads` is present. Honors
+/// `prefix`, `key-marker`, `upload-id-marker` and `max-uploads` so a
+/// truncated response can actually be paged to completion — Meta
+/// resumes strictly after (key-marker, upload-id-marker).
+///
+/// `delimiter` is accepted and echoed for wire fidelity but uploads are
+/// never rolled up into `CommonPrefixes`; Meta has no grouping support.
+async fn list_multipart_uploads_internal(
+    state: Arc<AppState>,
+    bucket: String,
+    params: &ListObjectsParams,
+    auth: Option<&Extension<AuthResult>>,
 ) -> Response {
+    if let Some(Extension(auth_result)) = auth {
+        let resource = build_s3_arn(&bucket, None);
+        if let Some(deny_response) = check_bucket_policy(
+            &state,
+            &bucket,
+            &auth_result.user_arn,
+            "s3:ListBucketMultipartUploads",
+            &resource,
+            None,
+        )
+        .await
+        {
+            return deny_response;
+        }
+    }
+
+    let prefix = params.prefix.clone().unwrap_or_default();
+    let key_marker = params.key_marker.clone().unwrap_or_default();
+    let upload_id_marker = params.upload_id_marker.clone().unwrap_or_default();
+    let max_uploads = params.max_uploads.unwrap_or(1000).clamp(1, 1000);
+
     let mut client = state.meta_client.clone();
 
     match client
         .list_multipart_uploads(ListMultipartUploadsRequest {
             bucket: bucket.clone(),
-            prefix: String::new(),
-            key_marker: String::new(),
-            upload_id_marker: String::new(),
-            max_uploads: 1000,
+            prefix: prefix.clone(),
+            key_marker: key_marker.clone(),
+            upload_id_marker: upload_id_marker.clone(),
+            max_uploads,
         })
         .await
     {
@@ -5916,8 +5960,8 @@ pub async fn list_multipart_uploads(
 
             let result = ListMultipartUploadsResult {
                 bucket: bucket.clone(),
-                key_marker: String::new(),
-                upload_id_marker: String::new(),
+                key_marker,
+                upload_id_marker,
                 next_key_marker: if resp.is_truncated {
                     Some(resp.next_key_marker)
                 } else {
@@ -5928,7 +5972,9 @@ pub async fn list_multipart_uploads(
                 } else {
                     None
                 },
-                max_uploads: 1000,
+                delimiter: params.delimiter.clone(),
+                prefix,
+                max_uploads,
                 is_truncated: resp.is_truncated,
                 uploads: resp
                     .uploads
@@ -7769,5 +7815,95 @@ pub async fn admin_delete_access_key(
                     .unwrap()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_params(query: &str) -> ListObjectsParams {
+        let uri: axum::http::Uri = format!("/ws1?{query}").parse().expect("valid uri");
+        let Query(params) =
+            Query::<ListObjectsParams>::try_from_uri(&uri).expect("query should deserialize");
+        params
+    }
+
+    #[test]
+    fn uploads_flag_is_parsed_from_empty_value() {
+        // geesefs sends a bare `?uploads=` at mount; the empty value
+        // must still register as "this is ListMultipartUploads".
+        let params = parse_params("uploads=");
+        assert!(params.uploads.is_some());
+    }
+
+    #[test]
+    fn uploads_pagination_markers_are_parsed() {
+        let params = parse_params(
+            "uploads=&prefix=users%2Fys%2F&key-marker=a&upload-id-marker=u1&max-uploads=42",
+        );
+        assert!(params.uploads.is_some());
+        assert_eq!(params.prefix.as_deref(), Some("users/ys/"));
+        assert_eq!(params.key_marker.as_deref(), Some("a"));
+        assert_eq!(params.upload_id_marker.as_deref(), Some("u1"));
+        assert_eq!(params.max_uploads, Some(42));
+    }
+
+    #[test]
+    fn plain_listing_query_does_not_trigger_uploads() {
+        let params = parse_params("prefix=uploads%2F&max-keys=10");
+        assert!(params.uploads.is_none());
+    }
+
+    #[test]
+    fn truncated_result_carries_key_markers_not_continuation_token() {
+        // The hang was a truncated ListBucketResult answering ?uploads:
+        // its NextContinuationToken is not a key marker, so the client
+        // could never advance. A truncated LMU response must expose
+        // NextKeyMarker/NextUploadIdMarker instead.
+        let result = ListMultipartUploadsResult {
+            bucket: "ws1".into(),
+            key_marker: String::new(),
+            upload_id_marker: String::new(),
+            next_key_marker: Some("users/ys/big.bin".into()),
+            next_upload_id_marker: Some("upload-7".into()),
+            delimiter: None,
+            prefix: String::new(),
+            max_uploads: 1000,
+            is_truncated: true,
+            uploads: vec![UploadItem {
+                key: "users/ys/big.bin".into(),
+                upload_id: "upload-7".into(),
+                initiated: "2026-09-09T00:00:00.000Z".into(),
+                storage_class: "STANDARD".into(),
+            }],
+        };
+
+        let xml = to_xml(&result).expect("result should serialize");
+        assert!(xml.contains("<ListMultipartUploadsResult>"));
+        assert!(xml.contains("<NextKeyMarker>users/ys/big.bin</NextKeyMarker>"));
+        assert!(xml.contains("<NextUploadIdMarker>upload-7</NextUploadIdMarker>"));
+        assert!(!xml.contains("NextContinuationToken"));
+        assert!(!xml.contains("ListBucketResult"));
+    }
+
+    #[test]
+    fn untruncated_result_omits_next_markers() {
+        let result = ListMultipartUploadsResult {
+            bucket: "ws1".into(),
+            key_marker: String::new(),
+            upload_id_marker: String::new(),
+            next_key_marker: None,
+            next_upload_id_marker: None,
+            delimiter: None,
+            prefix: String::new(),
+            max_uploads: 1000,
+            is_truncated: false,
+            uploads: vec![],
+        };
+
+        let xml = to_xml(&result).expect("result should serialize");
+        assert!(xml.contains("<IsTruncated>false</IsTruncated>"));
+        assert!(!xml.contains("NextKeyMarker"));
     }
 }
