@@ -806,6 +806,39 @@ async fn check_bucket_policy(
 }
 
 /// Build ARN for an S3 resource
+/// Shape a listing response for the API version the client asked for.
+///
+/// V1 (`GET /{bucket}`) paginates on Marker/NextMarker; V2
+/// (`?list-type=2`) on ContinuationToken/KeyCount. Answering a V1
+/// request with a V2-only body leaves the client nothing to page with.
+fn apply_listing_version(
+    result: &mut ListBucketResult,
+    is_v2: bool,
+    marker: Option<String>,
+    start_after: Option<String>,
+) {
+    if is_v2 {
+        result.start_after = start_after;
+        result.marker = None;
+        result.next_marker = None;
+        return;
+    }
+    result.marker = Some(marker.unwrap_or_default());
+    result.start_after = None;
+    result.key_count = None;
+    result.next_continuation_token = None;
+    result.next_marker = if result.is_truncated {
+        let last_key = result.contents.last().map(|c| c.key.clone());
+        let last_prefix = result.common_prefixes.last().map(|p| p.prefix.clone());
+        match (last_key, last_prefix) {
+            (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
+            (a, b) => a.or(b),
+        }
+    } else {
+        None
+    };
+}
+
 fn build_s3_arn(bucket: &str, key: Option<&str>) -> String {
     match key {
         Some(k) => format!("arn:obio:s3:::{}/{}", bucket, k),
@@ -822,6 +855,21 @@ pub struct ListObjectsParams {
     max_keys: Option<u32>,
     #[serde(rename = "continuation-token")]
     continuation_token: Option<String>,
+    /// V1 pagination position (`?marker=`). Was unparsed, so a V1
+    /// client could never advance past the first page.
+    marker: Option<String>,
+    /// V2 pagination position (`?start-after=`). Also unparsed.
+    #[serde(rename = "start-after")]
+    start_after: Option<String>,
+    /// `list-type=2` selects the ListObjectsV2 request/response shape.
+    /// Absent means V1, which uses Marker/NextMarker rather than
+    /// KeyCount/ContinuationToken.
+    #[serde(rename = "list-type")]
+    list_type: Option<String>,
+    /// Accepted and echoed; only "url" is meaningful to S3 and we do
+    /// not currently encode keys, so this is recorded, not honored.
+    #[serde(rename = "encoding-type")]
+    encoding_type: Option<String>,
     /// If present (even empty), this is a policy request
     policy: Option<String>,
     /// If present, this is a list object versions request
@@ -1013,6 +1061,22 @@ pub struct ListBucketResult {
     #[serde(rename = "Delimiter")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delimiter: Option<String>,
+    /// V1 only: echo of the requested ?marker=
+    #[serde(rename = "Marker")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
+    /// V1 only: where the client should resume. Emitted whenever the
+    /// listing is truncated so a V1 client always has a way forward.
+    #[serde(rename = "NextMarker")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_marker: Option<String>,
+    /// V2 only: echo of the requested ?start-after=
+    #[serde(rename = "StartAfter")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<String>,
+    #[serde(rename = "EncodingType")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding_type: Option<String>,
     #[serde(rename = "MaxKeys")]
     pub max_keys: u32,
     #[serde(rename = "KeyCount")]
@@ -1638,6 +1702,14 @@ pub async fn list_objects(
     let delimiter = params.delimiter.clone();
     let max_keys = params.max_keys.unwrap_or(1000);
     let continuation_token = params.continuation_token.as_deref();
+    let is_v2 = params.list_type.as_deref() == Some("2");
+    // V2 resumes from ?start-after=, V1 from ?marker=. A continuation
+    // token, when present, outranks both (Meta applies that precedence).
+    let start_after = if is_v2 {
+        params.start_after.clone().unwrap_or_default()
+    } else {
+        params.marker.clone().unwrap_or_default()
+    };
 
     // First verify bucket exists
     let mut client = state.meta_client.clone();
@@ -1676,11 +1748,8 @@ pub async fn list_objects(
             bucket: bucket.clone(),
             prefix: prefix.clone(),
             delimiter: delimiter.clone().unwrap_or_default(),
-            start_after: String::new(),
-            continuation_token: continuation_token
-                .clone()
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+            start_after: start_after.clone(),
+            continuation_token: continuation_token.map(ToString::to_string).unwrap_or_default(),
             max_keys,
             include_versions: false,
         };
@@ -1708,10 +1777,14 @@ pub async fn list_objects(
                     .map(|p| CommonPrefix { prefix: p })
                     .collect();
                 let key_count = contents.len() + common_prefixes.len();
-                let result = ListBucketResult {
+                let mut result = ListBucketResult {
                     name: bucket.clone(),
                     prefix: prefix.clone(),
                     delimiter: delimiter.clone(),
+                    marker: None,
+                    next_marker: None,
+                    start_after: None,
+                    encoding_type: params.encoding_type.clone(),
                     max_keys,
                     is_truncated: r.is_truncated,
                     next_continuation_token: if r.next_continuation_token.is_empty() {
@@ -1723,6 +1796,12 @@ pub async fn list_objects(
                     common_prefixes,
                     contents,
                 };
+                apply_listing_version(
+                    &mut result,
+                    is_v2,
+                    params.marker.clone(),
+                    params.start_after.clone(),
+                );
                 let xml = format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
                     to_xml(&result).unwrap_or_default()
@@ -1746,6 +1825,7 @@ pub async fn list_objects(
             &prefix,
             max_keys,
             continuation_token,
+            &start_after,
         )
         .await
     {
@@ -1804,10 +1884,14 @@ pub async fn list_objects(
             };
 
             let key_count = contents.len() + common_prefixes.len();
-            let result = ListBucketResult {
+            let mut result = ListBucketResult {
                 name: bucket,
                 prefix,
                 delimiter,
+                marker: None,
+                next_marker: None,
+                start_after: None,
+                encoding_type: params.encoding_type.clone(),
                 max_keys,
                 is_truncated: list_result.is_truncated,
                 next_continuation_token: list_result.next_continuation_token,
@@ -1815,6 +1899,12 @@ pub async fn list_objects(
                 common_prefixes,
                 contents,
             };
+            apply_listing_version(
+                &mut result,
+                is_v2,
+                params.marker.clone(),
+                params.start_after.clone(),
+            );
 
             let xml = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
@@ -1833,10 +1923,14 @@ pub async fn list_objects(
                 ScatterGatherError::NoNodesAvailable => {
                     warn!("No OSD nodes available for listing");
                     // Return empty result if no nodes available (cluster might be starting up)
-                    let result = ListBucketResult {
+                    let mut result = ListBucketResult {
                         name: bucket,
                         prefix,
                         delimiter,
+                        marker: None,
+                        next_marker: None,
+                        start_after: None,
+                        encoding_type: params.encoding_type.clone(),
                         max_keys,
                         is_truncated: false,
                         next_continuation_token: None,
@@ -1844,6 +1938,12 @@ pub async fn list_objects(
                         common_prefixes: vec![],
                         contents: vec![],
                     };
+                    apply_listing_version(
+                        &mut result,
+                        is_v2,
+                        params.marker.clone(),
+                        params.start_after.clone(),
+                    );
                     let xml = format!(
                         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n{}",
                         to_xml(&result).unwrap_or_default()
@@ -4574,6 +4674,7 @@ async fn grep_prefix_internal(
                 &caps.prefix,
                 caps.max_keys,
                 ct_opt,
+                "",
             )
             .await
         {
@@ -7885,6 +7986,87 @@ mod tests {
         assert!(xml.contains("<NextUploadIdMarker>upload-7</NextUploadIdMarker>"));
         assert!(!xml.contains("NextContinuationToken"));
         assert!(!xml.contains("ListBucketResult"));
+    }
+
+    fn listing(is_truncated: bool, keys: &[&str]) -> ListBucketResult {
+        ListBucketResult {
+            name: "ws1".into(),
+            prefix: String::new(),
+            delimiter: None,
+            marker: None,
+            next_marker: None,
+            start_after: None,
+            encoding_type: None,
+            max_keys: 100,
+            is_truncated,
+            next_continuation_token: Some("opaque-token".into()),
+            key_count: Some(keys.len() as u32),
+            common_prefixes: vec![],
+            contents: keys
+                .iter()
+                .map(|k| ObjectContent {
+                    key: (*k).to_string(),
+                    last_modified: "2026-09-09T00:00:00.000Z".into(),
+                    etag: "\"e\"".into(),
+                    size: 1,
+                    storage_class: "STANDARD".into(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn v1_pagination_params_are_parsed() {
+        // Both were dropped by serde, so a V1 client re-sent the same
+        // request forever while IsTruncated stayed true.
+        let params = parse_params("max-keys=100&marker=users%2Fys%2Funtitled.chat");
+        assert_eq!(
+            params.marker.as_deref(),
+            Some("users/ys/untitled.chat")
+        );
+        let params = parse_params("list-type=2&start-after=users%2Fys%2Funtitled.chat");
+        assert_eq!(
+            params.start_after.as_deref(),
+            Some("users/ys/untitled.chat")
+        );
+        assert_eq!(params.list_type.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn v1_truncated_listing_gives_the_client_a_next_marker() {
+        let mut result = listing(true, &["a", "b"]);
+        apply_listing_version(&mut result, false, Some("prev".into()), None);
+
+        assert_eq!(result.marker.as_deref(), Some("prev"));
+        assert_eq!(result.next_marker.as_deref(), Some("b"));
+        // V2-only elements must not appear in a V1 body.
+        assert!(result.key_count.is_none());
+        assert!(result.next_continuation_token.is_none());
+        assert!(result.start_after.is_none());
+
+        let xml = to_xml(&result).expect("serialize");
+        assert!(xml.contains("<NextMarker>b</NextMarker>"));
+        assert!(!xml.contains("KeyCount"));
+        assert!(!xml.contains("NextContinuationToken"));
+    }
+
+    #[test]
+    fn v1_untruncated_listing_has_no_next_marker() {
+        let mut result = listing(false, &["a"]);
+        apply_listing_version(&mut result, false, None, None);
+        assert!(result.next_marker.is_none());
+    }
+
+    #[test]
+    fn v2_listing_keeps_key_count_and_echoes_start_after() {
+        let mut result = listing(true, &["a"]);
+        apply_listing_version(&mut result, true, None, Some("a0".into()));
+
+        assert_eq!(result.start_after.as_deref(), Some("a0"));
+        assert_eq!(result.key_count, Some(1));
+        assert_eq!(result.next_continuation_token.as_deref(), Some("opaque-token"));
+        assert!(result.marker.is_none());
+        assert!(result.next_marker.is_none());
     }
 
     #[test]

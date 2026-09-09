@@ -33,7 +33,7 @@ use objectio_proto::storage::ListObjectsMetaRequest;
 use ring::hmac;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -262,6 +262,7 @@ impl ScatterGatherEngine {
         prefix: &str,
         max_keys: u32,
         continuation_token: Option<&str>,
+        start_after: &str,
     ) -> Result<ListObjectsResult, ScatterGatherError> {
         // 1. Get listing nodes from meta service
         let nodes_resp = meta_client
@@ -308,8 +309,26 @@ impl ScatterGatherEngine {
             }
 
             (token.shard_cursors, false)
-        } else {
+        } else if start_after.is_empty() {
             (HashMap::new(), true)
+        } else {
+            // No token, but the caller gave a key-based start position
+            // (?marker= for V1, ?start-after= for V2). Seed every shard
+            // to resume after that key — the merge is globally sorted,
+            // so a single key positions all shards consistently.
+            let seeded = nodes
+                .iter()
+                .map(|n| {
+                    (
+                        n.shard_id,
+                        ShardCursor {
+                            last_key: start_after.to_string(),
+                            exhausted: false,
+                        },
+                    )
+                })
+                .collect();
+            (seeded, true)
         };
 
         // 3. Query each shard in parallel (skip exhausted shards)
@@ -711,21 +730,36 @@ impl ScatterGatherEngine {
             }
         }
 
-        // Determine if truncated (any shard has more data)
-        let is_truncated = !heap.is_empty()
+        // A shard still holds unconsumed items iff its next element is
+        // sitting in the heap: the merge keeps exactly one lookahead
+        // entry per shard and only stops early on max_keys.
+        let pending_shards: HashSet<u32> = heap.iter().map(|e| e.shard_id).collect();
+
+        // Truncated iff something is actually left to return. Testing
+        // `!objects.is_empty()` here was wrong — the merge reads each
+        // buffer by index and never drains it, so any shard that
+        // returned even one object made every page report truncated,
+        // regardless of max_keys. Clients then paged forever (marker /
+        // start-after) or burned one extra empty round trip (V2).
+        let is_truncated = !pending_shards.is_empty()
             || shard_buffers
                 .values()
-                .any(|(objects, is_truncated)| *is_truncated || !objects.is_empty());
+                .any(|(_objects, shard_truncated)| *shard_truncated);
 
         // Build new cursors
         let new_cursors: HashMap<u32, ShardCursor> = shard_buffers
             .iter()
-            .map(|(shard_id, (_objects, is_truncated))| {
+            .map(|(shard_id, (_objects, shard_truncated))| {
                 let last_key = last_key_per_shard
                     .get(shard_id)
                     .cloned()
                     .unwrap_or_default();
-                let exhausted = last_key.is_empty() && !is_truncated;
+                // Exhausted only when the shard has nothing more server
+                // side AND we consumed everything it handed us. Keying
+                // this off `last_key.is_empty()` alone meant any shard
+                // we read from was re-queried on the next page, which is
+                // where the trailing empty page came from.
+                let exhausted = !*shard_truncated && !pending_shards.contains(shard_id);
                 (
                     *shard_id,
                     ShardCursor {
@@ -751,4 +785,96 @@ pub struct ListObjectsResult {
     /// Number of keys returned
     #[allow(dead_code)]
     pub key_count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine() -> ScatterGatherEngine {
+        ScatterGatherEngine::new(Arc::new(OsdPool::new()), b"test-signing-key")
+    }
+
+    fn obj(key: &str) -> ObjectMeta {
+        ObjectMeta {
+            key: key.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn shard(shard_id: u32, keys: &[&str], is_truncated: bool) -> ShardResult {
+        ShardResult {
+            shard_id,
+            objects: keys.iter().map(|k| obj(k)).collect(),
+            next_token: String::new(),
+            is_truncated,
+        }
+    }
+
+    #[test]
+    fn short_page_is_not_truncated() {
+        // The reported bug: one key returned, max_keys=100, yet the
+        // listing claimed more was available — because truncation was
+        // derived from the fetched buffer being non-empty rather than
+        // from anything being left unconsumed.
+        let (merged, cursors, is_truncated) = engine()
+            .k_way_merge(vec![shard(0, &["users/ys/untitled.chat"], false)], 100)
+            .expect("merge");
+
+        assert_eq!(merged.len(), 1);
+        assert!(!is_truncated, "a short page must not report truncation");
+        assert!(
+            cursors[&0].exhausted,
+            "a fully consumed, non-truncated shard must be exhausted so it is not re-queried"
+        );
+    }
+
+    #[test]
+    fn leftover_buffer_is_truncated_and_resumable() {
+        let (merged, cursors, is_truncated) = engine()
+            .k_way_merge(vec![shard(0, &["a", "b", "c"], false)], 2)
+            .expect("merge");
+
+        assert_eq!(merged.len(), 2);
+        assert!(is_truncated, "unconsumed buffered keys mean more to return");
+        assert!(!cursors[&0].exhausted);
+        assert_eq!(cursors[&0].last_key, "b", "resume after the last key served");
+    }
+
+    #[test]
+    fn shard_with_more_server_side_is_truncated() {
+        let (_merged, cursors, is_truncated) = engine()
+            .k_way_merge(vec![shard(0, &["a"], true)], 100)
+            .expect("merge");
+
+        assert!(is_truncated);
+        assert!(!cursors[&0].exhausted);
+    }
+
+    #[test]
+    fn empty_shard_is_exhausted() {
+        let (merged, cursors, is_truncated) =
+            engine().k_way_merge(vec![shard(0, &[], false)], 100).expect("merge");
+
+        assert!(merged.is_empty());
+        assert!(!is_truncated);
+        assert!(cursors[&0].exhausted);
+    }
+
+    #[test]
+    fn multi_shard_short_page_is_not_truncated() {
+        let (merged, _cursors, is_truncated) = engine()
+            .k_way_merge(
+                vec![shard(0, &["a", "c"], false), shard(1, &["b"], false)],
+                100,
+            )
+            .expect("merge");
+
+        assert_eq!(
+            merged.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"],
+            "merge must stay globally sorted across shards"
+        );
+        assert!(!is_truncated);
+    }
 }
