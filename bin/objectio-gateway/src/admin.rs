@@ -1395,7 +1395,7 @@ pub async fn admin_list_objects(
     // Use the scatter-gather engine (same as the S3 list_objects handler)
     let all_objects = match state
         .scatter_gather
-        .list_objects(&mut meta_client, &bucket, &params.prefix, max_keys, None)
+        .list_objects(&mut meta_client, &bucket, &params.prefix, max_keys, None, "")
         .await
     {
         Ok(result) => result.objects,
