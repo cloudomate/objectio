@@ -44,6 +44,15 @@ fn extract_operation(method: &Method, path: &str) -> Option<S3Operation> {
     }
 }
 
+/// Check whether `query` carries `name` as a parameter key in its own
+/// right. Substring matching would misread `?prefix=uploads/` as a
+/// ListMultipartUploads request.
+fn has_query_flag(query: &str, name: &str) -> bool {
+    query
+        .split('&')
+        .any(|pair| pair.split('=').next() == Some(name))
+}
+
 /// Refine operation type based on query parameters
 fn refine_operation(op: S3Operation, query: Option<&str>) -> S3Operation {
     let query = match query {
@@ -52,6 +61,9 @@ fn refine_operation(op: S3Operation, query: Option<&str>) -> S3Operation {
     };
 
     match op {
+        S3Operation::ListObjects if has_query_flag(query, "uploads") => {
+            S3Operation::ListMultipartUploads
+        }
         S3Operation::PutObject if query.contains("uploadId") && query.contains("partNumber") => {
             S3Operation::UploadPart
         }
